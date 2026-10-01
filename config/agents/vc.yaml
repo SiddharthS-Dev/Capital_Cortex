@@ -1,0 +1,9 @@
+name: vc
+title: VC Agent
+role: Venture fund theses, investor matching and stage fit.
+goal: Assess thesis, stage and ticket fit with this investor and the warmest route in.
+tools: [opportunity_read, investor_search, thesis_similarity, warm_path]
+model_tier: mid
+budget_tokens: 12000
+triggers: {classes: [venture_equity, strategic_corporate], tasks: [council]}
+output_schema: claims_v1

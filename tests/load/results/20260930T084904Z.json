@@ -1,0 +1,70 @@
+{
+  "at": "2026-09-30T08:48:55.617697+00:00",
+  "duration": "2m",
+  "endpoints": {
+    "graph_neighbourhood": {
+      "count": 2,
+      "error_rate": 1,
+      "max_ms": 60018,
+      "p50_ms": 60007,
+      "p95_ms": 60016,
+      "p99_ms": 60017,
+      "pass": false,
+      "slo_p95_ms": 5000
+    }
+  },
+  "graph": {
+    "edges": {
+      "DERIVED_FROM": 200000,
+      "INTRODUCED": 100000,
+      "KNOWS": 200300,
+      "MANAGES": 20000,
+      "MENTIONS": 190000,
+      "OFFERS": 210000,
+      "PART_OF": 30000,
+      "RELATES_TO": 50000
+    },
+    "edges_total": 1000300,
+    "relational": {
+      "contact": 200000,
+      "db_size": "2750 MB",
+      "entity": 1000000,
+      "opportunity": 200000,
+      "organization": 150000,
+      "relationship": 200000,
+      "relationship_edge": 1000300,
+      "signal": 390000
+    },
+    "vertices": {
+      "Contact": 200000,
+      "Fund": 20000,
+      "GrantProgram": 10000,
+      "Investor": 30000,
+      "Opportunity": 200000,
+      "Organization": 150000,
+      "Signal": 390000
+    },
+    "vertices_total": 1000000
+  },
+  "hardware": {
+    "docker_cpus": "16",
+    "docker_mem_bytes": "7918927872"
+  },
+  "k6_exit": 99,
+  "label": "pass C: graph neighbourhood depth 2, 1 serial user, 60 s timeout",
+  "memory_guard": {
+    "min_available_mb": 3070,
+    "tripped": null
+  },
+  "mode": "serial",
+  "rate_mult": 1.0,
+  "sampled": {
+    "neighbourhood_hubs": 20,
+    "paths_connected": 600,
+    "paths_random": 50,
+    "paths_warm": 100
+  },
+  "scenarios": "neighbourhood",
+  "timeout": "60s",
+  "vus": 1
+}

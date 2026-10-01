@@ -1,0 +1,10 @@
+{
+  "classification": 2.0,
+  "extraction": 2.0,
+  "council.deliberation": 8.0,
+  "council.convergence": 6.0,
+  "copilot": 4.0,
+  "proposal": 6.0,
+  "compliance_check": 1.0,
+  "narration": 1.0
+}

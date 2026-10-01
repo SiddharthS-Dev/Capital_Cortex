@@ -1,0 +1,155 @@
+# Roles, permissions and stakeholder mapping (R10). Single source of truth:
+#   - Python RBAC (platform_core.auth.rbac) loads this file
+#   - OPA loads it as data.rbac (mounted as /policies/rbac/data.yaml)
+# Permissions are "<resource>:<action>". "*" = everything, "<resource>:*" = every action on a resource.
+version: 1
+
+roles:
+  admin:
+    description: Platform administrator (Founder).
+    mfa: required            # R5
+    clearance: restricted    # highest document classification readable
+    permissions: ["*"]
+
+  analyst:
+    description: Capital analyst — works the pipeline, drafts collateral, runs agents.
+    mfa: optional            # R5
+    clearance: confidential
+    permissions:
+      - opportunity:read
+      - opportunity:write
+      - scoring:read
+      - scoring:preview
+      - graph:read
+      - entity:read
+      - entity:merge
+      - relationship:read
+      - relationship:write
+      - ingestion:read
+      - source:run
+      - agent:read
+      - agent:run
+      - recommendation:write
+      - proposal:read
+      - proposal:write
+      - board_report:write
+      - dataroom:read
+      - dataroom:write
+      - dashboard:read
+      - forecast:read
+      - alert:read
+      - alert:write
+      - approval:read
+      - approval:request
+      - outbox:read
+      - outbox:draft
+      - outcome:write
+      - copilot:ask
+      - board_report:read
+      - budget:read
+
+  approver:
+    description: Human-in-the-loop approver for governed actuation (I3).
+    mfa: required            # R5
+    clearance: confidential
+    permissions:
+      - opportunity:read
+      - scoring:read
+      - graph:read
+      - relationship:read
+      - agent:read
+      - proposal:read
+      - dataroom:read
+      - dashboard:read
+      - forecast:read
+      - alert:read
+      - approval:read
+      - approval:decide
+      - outbox:read
+      - outbox:send
+      - copilot:ask
+      - board_report:read
+
+  auditor:
+    description: Read-only oversight of every decision and the audit chain.
+    mfa: required            # R5
+    clearance: restricted
+    permissions:
+      - audit:read
+      - audit:verify
+      - opportunity:read
+      - scoring:read
+      - graph:read
+      - agent:read
+      - proposal:read
+      - dataroom:read
+      - dashboard:read
+      - forecast:read
+      - approval:read
+      - outbox:read
+      - retention:read
+      - board_report:read
+      - budget:read
+
+  executive:
+    description: Board / executive — dashboards and board reports; approves only where policy allows.
+    mfa: required            # stricter than R5 minimum; executives can approve board packs
+    clearance: confidential
+    permissions:
+      - dashboard:read
+      - opportunity:read
+      - forecast:read
+      - board_report:read
+      - approval:read
+      - approval:decide      # narrowed by OPA: subject_type in executive_approvable_subjects
+      - copilot:ask
+
+  service:
+    description: Non-human workers (ingestion, scheduler, agents). Scoped further per client.
+    mfa: none
+    clearance: internal
+    permissions:
+      - signal:write
+      - source:run
+      - ingestion:read
+      - system:ping
+      - graph:write
+      - memory:write
+      - agent:run
+      - opportunity:write
+      - alert:write
+      - relationship:write
+      - ml:train
+      - retention:run
+      - dataroom:write
+
+# Service-account scoping (least privilege, §10): a service client may only use the listed
+# permissions even though it holds the "service" role.
+service_clients:
+  # The worker's own account runs scheduled jobs. It can't release the outbox: a release job always runs
+  # under the approver's token (I3).
+  cortex-worker: ["signal:write", "source:run", "ingestion:read", "system:ping", "graph:write",
+                  "memory:write", "agent:run", "opportunity:write", "alert:write", "relationship:write", "ml:train",
+                  "retention:run", "dataroom:write"]
+  cortex-ingestion: ["signal:write", "source:run", "ingestion:read", "system:ping"]
+
+# Subjects an executive may approve (OPA narrows approval:decide).
+executive_approvable_subjects: ["board_report"]
+
+# Classification levels, ascending.
+classifications: ["public", "internal", "confidential", "restricted"]
+
+# R10 stakeholder → role mapping. External parties are contacts, never users.
+stakeholders:
+  board: [executive]
+  founder: [admin, approver]
+  finance: [analyst]           # + forecast:write grant below
+  legal_compliance: [auditor, approver]
+  investors: external_contact
+  banks: external_contact
+  grant_managers: external_contact
+
+# Additive grants for stakeholder personas (applied via Keycloak group → extra role claim).
+grants:
+  finance: ["forecast:write"]
+  legal_compliance: ["compliance:review", "dataroom:approve", "legal_hold:write"]

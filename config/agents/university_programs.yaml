@@ -1,0 +1,9 @@
+name: university_programs
+title: University Programs Agent
+role: Innovation centres and research partnerships.
+goal: Identify the programme's fit and the contacts at the institution.
+tools: [opportunity_read, program_search, contact_lookup]
+model_tier: small
+budget_tokens: 8000
+triggers: {classes: [university_program], tasks: [council]}
+output_schema: claims_v1

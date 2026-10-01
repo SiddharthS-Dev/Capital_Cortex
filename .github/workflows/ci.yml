@@ -1,0 +1,167 @@
+# §14 CI: lint → unit → integration → contract → eval → build → scan → deploy (Terraform) → smoke
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PG_IMAGE: capital-cortex/postgres:16-age1.5.0-pgvector0.8.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
+      - run: pip install -e ".[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: lint-imports
+      - run: mypy
+      - run: npm ci
+        working-directory: apps/web
+      - run: npx eslint . && npx tsc -b --noEmit
+        working-directory: apps/web
+      - name: OpenAPI spec is current
+        run: python scripts/export_openapi.py && git diff --exit-code docs/openapi.json
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+
+  unit:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q --cov=platform_core --cov=cortex --cov-report=term
+      - name: Rego policy tests
+        run: docker run --rm -v "$PWD/config/policies:/policies:ro" openpolicyagent/opa:0.70.0 test /policies -v
+      - run: npm ci && npx vitest run
+        working-directory: apps/web
+
+  integration:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: docker build -t "$PG_IMAGE" infra/postgres
+      - run: pytest -q -m integration tests/integration
+
+  contract:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -m contract tests/contract
+
+  eval:
+    needs: [integration, contract]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: python evals/run.py
+
+  build-scan-smoke:
+    needs: eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install httpx
+      - run: pip install -e .  # scripts/backup.py + restore_drill.py (minio, psycopg, platform_core verifier)
+      - name: Build and start the full stack
+        run: |
+          docker compose -f infra/docker-compose.yml up -d --build --wait postgres redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
+          docker compose -f infra/docker-compose.yml up -d --build minio-init migrate api worker web
+          timeout 300 bash -c 'until curl -sf http://localhost:8300/readyz; do sleep 3; done'
+      - name: Trivy scan (app images)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: capital-cortex/api:dev
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Trivy scan (web image)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: capital-cortex/web:dev
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Trivy scan (dependencies)
+        # constraints.txt is the transitive Python lock; Trivy only recognises it under the requirements.txt name
+        run: mkdir -p deps-scan && cp constraints.txt deps-scan/requirements.txt && cp apps/web/package-lock.json deps-scan/
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: deps-scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Smoke (MFA login, audit verify, bus round-trip, traces)
+        run: python scripts/smoke.py
+      - name: Playwright E2E
+        working-directory: apps/web
+        run: npm ci && npx playwright install --with-deps chromium && npx playwright test
+      - name: OWASP ZAP baseline (UI + API)
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:3300
+          fail_action: false
+      - name: OWASP ZAP API scan (OpenAPI, safe mode)
+        run: >-
+          docker run --rm --network host -v "$PWD:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable
+          zap-api-scan.py -t http://localhost:8300/v1/openapi.json -f openapi -S -I -J zap-api.json
+      - name: Backup + restore drill (D-031, RUNBOOK §8)
+        run: |
+          docker compose -f infra/docker-compose.yml up -d --no-deps wal-shipper
+          python scripts/backup.py
+          python scripts/restore_drill.py --report restore-drill.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: ops-reports, path: "zap-api.json\nrestore-drill.json", if-no-files-found: ignore}
+      - if: failure()
+        run: docker compose -f infra/docker-compose.yml logs --no-color > compose-logs.txt
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: compose-logs, path: compose-logs.txt}
+
+  deploy:
+    # Gated: runs only on main once a target environment is configured (D-011).
+    needs: build-scan-smoke
+    if: github.ref == 'refs/heads/main' && vars.TF_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init && terraform plan -out plan.tfplan && terraform apply -auto-approve plan.tfplan
+        working-directory: infra/terraform

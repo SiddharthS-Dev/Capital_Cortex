@@ -1,0 +1,520 @@
+{
+  "realm": "cortex",
+  "displayName": "Inspironics Capital Cortex",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "passwordPolicy": "length(12) and notUsername and upperCase(1) and digits(1) and specialChars(1)",
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpPolicyLookAheadWindow": 1,
+  "browserFlow": "browser-cortex",
+  "roles": {
+    "realm": [
+      {
+        "name": "mfa-required",
+        "description": "Marker: login must include OTP (R5)"
+      },
+      {
+        "name": "admin",
+        "description": "Platform administrator",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa-required"
+          ]
+        }
+      },
+      {
+        "name": "analyst",
+        "description": "Capital analyst (MFA optional)"
+      },
+      {
+        "name": "approver",
+        "description": "Human-in-the-loop approver",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa-required"
+          ]
+        }
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only oversight",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa-required"
+          ]
+        }
+      },
+      {
+        "name": "executive",
+        "description": "Board / executive",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "mfa-required"
+          ]
+        }
+      },
+      {
+        "name": "service",
+        "description": "Non-human workers"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "cortex-web",
+      "name": "Capital Cortex UI",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:3300/*",
+        "http://localhost:5373/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3300",
+        "http://localhost:5373"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3300/*##http://localhost:5373/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-cortex-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "cortex-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "amr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "cortex-grants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "cortex_grants",
+            "claim.name": "cortex_grants",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "cortex-api",
+      "name": "Capital Cortex API (audience only)",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "dev-api-secret-change-me"
+    },
+    {
+      "clientId": "cortex-worker",
+      "name": "Capital Cortex workers",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "dev-worker-secret-change-me",
+      "protocolMappers": [
+        {
+          "name": "audience-cortex-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "cortex-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "cortex-ingestion",
+      "name": "Capital Cortex ingestion",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "dev-ingestion-secret-change-me",
+      "protocolMappers": [
+        {
+          "name": "audience-cortex-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "cortex-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "dev-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Founder",
+      "lastName": "Dev",
+      "email": "dev-admin@cortex.local",
+      "realmRoles": [
+        "admin",
+        "approver"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [
+        "CONFIGURE_TOTP"
+      ]
+    },
+    {
+      "username": "dev-analyst",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Analyst",
+      "lastName": "Dev",
+      "email": "dev-analyst@cortex.local",
+      "realmRoles": [
+        "analyst"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "username": "dev-finance",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Finance",
+      "lastName": "Dev",
+      "email": "dev-finance@cortex.local",
+      "realmRoles": [
+        "analyst"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "attributes": {
+        "cortex_grants": [
+          "forecast:write"
+        ]
+      }
+    },
+    {
+      "username": "dev-approver",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Approver",
+      "lastName": "Dev",
+      "email": "dev-approver@cortex.local",
+      "realmRoles": [
+        "approver"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [
+        "CONFIGURE_TOTP"
+      ]
+    },
+    {
+      "username": "dev-legal",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Legal",
+      "lastName": "Dev",
+      "email": "dev-legal@cortex.local",
+      "realmRoles": [
+        "auditor",
+        "approver"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [
+        "CONFIGURE_TOTP"
+      ],
+      "attributes": {
+        "cortex_grants": [
+          "compliance:review"
+        ]
+      }
+    },
+    {
+      "username": "dev-executive",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Board",
+      "lastName": "Dev",
+      "email": "dev-executive@cortex.local",
+      "realmRoles": [
+        "executive"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [
+        "CONFIGURE_TOTP"
+      ]
+    },
+    {
+      "username": "smoke-auditor",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Smoke",
+      "lastName": "Dev",
+      "email": "smoke-auditor@cortex.local",
+      "realmRoles": [
+        "auditor"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Cortex!dev-2026",
+          "temporary": false
+        },
+        {
+          "type": "otp",
+          "userLabel": "smoke-seeded (dev only)",
+          "secretData": "{\"value\": \"cortex-dev-smoke-totp-secret\"}",
+          "credentialData": "{\"subType\": \"totp\", \"digits\": 6, \"counter\": 0, \"period\": 30, \"algorithm\": \"HmacSHA1\"}"
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "username": "service-account-cortex-worker",
+      "enabled": true,
+      "serviceAccountClientId": "cortex-worker",
+      "realmRoles": [
+        "service"
+      ]
+    },
+    {
+      "username": "service-account-cortex-ingestion",
+      "enabled": true,
+      "serviceAccountClientId": "cortex-ingestion",
+      "realmRoles": [
+        "service"
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "amr-pwd",
+      "config": {
+        "default.reference.value": "pwd",
+        "default.reference.maxAge": "36000"
+      }
+    },
+    {
+      "alias": "amr-otp",
+      "config": {
+        "default.reference.value": "otp",
+        "default.reference.maxAge": "36000"
+      }
+    },
+    {
+      "alias": "amr-otp-optional",
+      "config": {
+        "default.reference.value": "otp",
+        "default.reference.maxAge": "36000"
+      }
+    },
+    {
+      "alias": "cond-mfa-required",
+      "config": {
+        "condUserRole": "mfa-required",
+        "negate": "false"
+      }
+    },
+    {
+      "alias": "cond-not-mfa-required",
+      "config": {
+        "condUserRole": "mfa-required",
+        "negate": "true"
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "browser-cortex",
+      "description": "Browser login; OTP required for Admin/Approver/Auditor/Executive (R5)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticator": "auth-cookie"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "flowAlias": "browser-cortex forms"
+        }
+      ]
+    },
+    {
+      "alias": "browser-cortex forms",
+      "description": "Password, then OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticator": "auth-username-password-form",
+          "authenticatorConfig": "amr-pwd"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "flowAlias": "browser-cortex mfa-required"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 30,
+          "userSetupAllowed": false,
+          "flowAlias": "browser-cortex mfa-optional"
+        }
+      ]
+    },
+    {
+      "alias": "browser-cortex mfa-required",
+      "description": "Privileged roles must use OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "cond-mfa-required"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticator": "auth-otp-form",
+          "authenticatorConfig": "amr-otp"
+        }
+      ]
+    },
+    {
+      "alias": "browser-cortex mfa-optional",
+      "description": "Analysts who enrolled OTP use it",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "cond-not-mfa-required"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticator": "conditional-user-configured"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 30,
+          "userSetupAllowed": false,
+          "authenticator": "auth-otp-form",
+          "authenticatorConfig": "amr-otp-optional"
+        }
+      ]
+    }
+  ]
+}

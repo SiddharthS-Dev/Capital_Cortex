@@ -1,0 +1,10 @@
+# Extension points (R4; SyRS phases 6–7 and §15). Interfaces live in cortex/extensions; nothing is implemented.
+# Enabling a flag without registering an implementation stops the API at start-up (no placeholder results).
+version: 1
+flags:
+  negotiation_assistant: false
+  portfolio_optimizer: false
+  scenario_planner: false
+  finance_digital_twin: false
+  ecosystem_mapper: false
+  cortex_federation: false

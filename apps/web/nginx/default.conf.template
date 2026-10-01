@@ -1,0 +1,50 @@
+# Cache policy per path. A single server-level add_header set is used on purpose: in nginx, an add_header
+# inside a location replaces (does not extend) the server-level ones, which silently dropped the security
+# headers from /assets/ and /config.js (ZAP 10021, docs/SECURITY_SCAN.md).
+map $uri $cortex_cache_control {
+    default         "";
+    /index.html     "no-cache";
+    /config.js      "no-store";
+    ~^/assets/      "public, max-age=31536000, immutable";
+}
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy same-origin always;
+    add_header Cross-Origin-Resource-Policy same-origin always;
+    # 'unsafe-inline' for styles only: ECharts/Cytoscape write inline style attributes (accepted risk, SECURITY_SCAN.md).
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ${OIDC_ORIGIN}; frame-src ${OIDC_ORIGIN}; frame-ancestors 'none'; base-uri 'self'; form-action 'self' ${OIDC_ORIGIN}; object-src 'none'" always;
+    add_header Cache-Control $cortex_cache_control always;
+
+    # Re-resolve the API name (the container's DNS server, from 15-cortex-config.envsh): a literal proxy_pass host
+    # is resolved once at start, so a restarted api container with a new IP left the UI on 502s.
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
+
+    location /v1/ {
+        set $cortex_api ${API_UPSTREAM};
+        proxy_pass $cortex_api;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # the API sets these too; hide its copies so each header is sent exactly once (nginx's set above)
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header Permissions-Policy;
+        proxy_hide_header Cross-Origin-Resource-Policy;
+        proxy_buffering off;          # SSE agent streams (Phase 2)
+        proxy_read_timeout 300s;
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}

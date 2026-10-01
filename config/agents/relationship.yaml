@@ -1,0 +1,9 @@
+name: relationship
+title: Relationship Agent
+role: Warmth, introduction paths and follow-ups.
+goal: Say how warm the relationship with the counterparty is, who the best route in is, and what follow-up is due.
+tools: [recall, warm_path, contact_lookup, milestone_create]
+model_tier: small
+budget_tokens: 8000
+triggers: {always: true, tasks: [council, relationship]}
+output_schema: claims_v1

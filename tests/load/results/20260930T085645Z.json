@@ -1,0 +1,100 @@
+{
+  "at": "2026-09-30T08:56:44.544170+00:00",
+  "duration": "3m",
+  "endpoints": {
+    "graph_paths": {
+      "count": 37,
+      "error_rate": 0,
+      "max_ms": 3626,
+      "p50_ms": 12,
+      "p95_ms": 376,
+      "p99_ms": 2963,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:connected": {
+      "count": 25,
+      "error_rate": null,
+      "max_ms": 3626,
+      "p50_ms": 12,
+      "p95_ms": 1430,
+      "p99_ms": 3184,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:random": {
+      "count": 7,
+      "error_rate": null,
+      "max_ms": 16,
+      "p50_ms": 13,
+      "p95_ms": 16,
+      "p99_ms": 16,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:warm_intro": {
+      "count": 5,
+      "error_rate": null,
+      "max_ms": 25,
+      "p50_ms": 20,
+      "p95_ms": 24,
+      "p99_ms": 25,
+      "pass": true,
+      "slo_p95_ms": 5000
+    }
+  },
+  "graph": {
+    "edges": {
+      "DERIVED_FROM": 200000,
+      "INTRODUCED": 100000,
+      "KNOWS": 200300,
+      "MANAGES": 20000,
+      "MENTIONS": 190000,
+      "OFFERS": 210000,
+      "PART_OF": 30000,
+      "RELATES_TO": 50000
+    },
+    "edges_total": 1000300,
+    "relational": {
+      "contact": 200000,
+      "db_size": "2750 MB",
+      "entity": 1000000,
+      "opportunity": 200000,
+      "organization": 150000,
+      "relationship": 200000,
+      "relationship_edge": 1000300,
+      "signal": 390000
+    },
+    "vertices": {
+      "Contact": 200000,
+      "Fund": 20000,
+      "GrantProgram": 10000,
+      "Investor": 30000,
+      "Opportunity": 200000,
+      "Organization": 150000,
+      "Signal": 390000
+    },
+    "vertices_total": 1000000
+  },
+  "hardware": {
+    "docker_cpus": "16",
+    "docker_mem_bytes": "7918927872"
+  },
+  "k6_exit": 0,
+  "label": "pass D2: graph paths at 0.2 req/s",
+  "memory_guard": {
+    "min_available_mb": 1724,
+    "tripped": null
+  },
+  "mode": "rate",
+  "rate_mult": 1.0,
+  "sampled": {
+    "neighbourhood_hubs": 20,
+    "paths_connected": 600,
+    "paths_random": 50,
+    "paths_warm": 100
+  },
+  "scenarios": "paths",
+  "timeout": "60s",
+  "vus": 1
+}

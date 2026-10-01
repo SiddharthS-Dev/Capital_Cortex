@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "capital-cortex"
+version = "0.1.0"
+description = "Inspironics Capital Cortex — autonomous capital intelligence & fundraising engine (OCIF)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.7",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",
+  "psycopg[binary]>=3.2.3",
+  "alembic>=1.14",
+  "redis>=5.2",
+  "httpx>=0.27",
+  "pyjwt[crypto]>=2.10",
+  "pyyaml>=6.0.2",
+  "anthropic>=0.40",
+  "prometheus-client>=0.21",
+  "opentelemetry-api>=1.28",
+  "opentelemetry-sdk>=1.28",
+  "opentelemetry-exporter-otlp-proto-http>=1.28",
+  "opentelemetry-instrumentation-fastapi>=0.49b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
+  "opentelemetry-instrumentation-redis>=0.49b0",
+  "opentelemetry-instrumentation-httpx>=0.49b0",
+  "sse-starlette>=2.1",
+  "feedparser>=6.0.11",
+  "python-dateutil>=2.9",
+  "openpyxl>=3.1.5",
+  "apscheduler>=3.10,<4",
+  "python-multipart>=0.0.12",
+  "rapidfuzz>=3.10",
+  "minio>=7.2",
+  "pycountry>=24.6",
+  "scikit-learn>=1.5",
+  "langgraph>=0.2",
+  "icalendar>=6.0",
+  "beautifulsoup4>=4.12",
+  "python-docx>=1.1",
+  "python-pptx>=1.0",
+  "weasyprint>=62",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "fakeredis>=2.26",
+  "respx>=0.21",
+  "testcontainers[postgres]>=4.8",
+  "schemathesis>=3.38",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "types-PyYAML",
+  "import-linter>=2.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["platform_core", "cortex"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["apps", "migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = ["S101", "S104", "B008", "RUF012", "E501", "RUF001", "RUF002", "RUF003"]  # E501: ruff format owns line length; RUF00x: math symbols in docs
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+"seed/**" = ["S311", "S608", "E501"]
+# SQL is assembled only from module constants / whitelisted identifiers; every value is a bound parameter.
+"cortex/l8_actuation/api/routers/*.py" = ["S608"]
+"cortex/l5_strategy/*.py" = ["S608"]
+"cortex/l4_reasoning/*.py" = ["S608"]
+"cortex/l3_memory/*.py" = ["S608"]
+"cortex/l6_agency/*.py" = ["S608"]
+"cortex/l7_governance/*.py" = ["S608"]
+"cortex/l8_actuation/*.py" = ["S608"]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+python_version = "3.12"
+strict = false
+warn_unused_ignores = true
+ignore_missing_imports = true
+packages = ["platform_core", "cortex"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+  "integration: requires Docker (testcontainers)",
+  "contract: schemathesis contract tests",
+]
+addopts = "-m 'not integration and not contract'"
+
+# Working rule 4: platform_core must never import the Capital-Cortex domain.
+[tool.importlinter]
+root_packages = ["platform_core", "cortex"]
+
+[[tool.importlinter.contracts]]
+name = "platform_core is domain-free"
+type = "forbidden"
+source_modules = ["platform_core"]
+forbidden_modules = ["cortex"]
+
+[[tool.importlinter.contracts]]
+name = "Only L7 governance may reach the outbox sender (I3)"
+type = "forbidden"
+source_modules = ["cortex.l6_agency"]
+forbidden_modules = ["cortex.l7_governance.outbox"]
+allow_indirect_imports = true

@@ -1,0 +1,24 @@
+# Runway forecasting assumptions (FR-07). Every figure shown in the Forecast Studio names these assumptions.
+horizon_months: 24
+trailing_burn_months: 3
+# Months between an opportunity's deadline and cash arriving, by class (planning assumption).
+decision_lag_months:
+  default: 4
+  grant: 6
+  government_program: 6
+  university_program: 5
+  foundation_esg: 5
+  venture_equity: 3
+  private_equity: 4
+  strategic_corporate: 4
+  debt_facility: 2
+  convertible: 2
+  equipment_finance: 2
+  revenue_based_financing: 1
+# Pipeline stages whose probability-weighted amounts count as expected inflows. "discovered" is excluded
+# by default: nobody has qualified those opportunities yet.
+inflow_stages: [qualified, engaged, submitted, diligence, term_sheet, committed, closed]
+scenarios:
+  base: {burn_delta_pct: 0, inflow_probability_multiplier: 1.0}
+  downside: {burn_delta_pct: 20, inflow_probability_multiplier: 0.5, inflow_delay_months: 2}
+  upside: {burn_delta_pct: -10, inflow_probability_multiplier: 1.2}

@@ -1,0 +1,45 @@
+# Labelled set for eval gate (c): classification accuracy ≥ 0.85 (rules only; the LLM fallback is optional).
+# Fictional organisations only. Each item: title, optional description / hints, expected class.
+items:
+  - {title: "Seed round for a climate software startup", description: "Veltaris Ventures leads a pre-seed and seed round for B2B climate SaaS", investor_type: vc, expect: venture_equity}
+  - {title: "Series A equity round: industrial AI", description: "Venture capital fund seeks Series A companies in industrial automation", expect: venture_equity}
+  - {title: "Quorvane Capital early-stage VC fund", description: "Venture capital for seed and Series A founders", investor_type: vc, expect: venture_equity}
+  - {title: "Angel syndicate for deep-tech founders", description: "Equity round participation for pre-seed startups", investor_type: angel, expect: venture_equity}
+  - {title: "Growth equity for profitable SaaS", description: "Minority stake growth capital for companies above 10M ARR", investor_type: pe, expect: private_equity}
+  - {title: "Private equity buyout programme", description: "Majority buyout of mature industrial businesses", expect: private_equity}
+  - {title: "Family office growth capital", description: "Growth equity and minority stake investments", investor_type: family_office, expect: private_equity}
+  - {title: "Corporate venture arm invests in mobility", description: "Strategic investment from a corporate venture capital unit", investor_type: cvc, expect: strategic_corporate}
+  - {title: "Strategic partner investment programme", description: "CVC backing for startups aligned to the parent's roadmap", expect: strategic_corporate}
+  - {title: "Corporate innovation fund call", description: "Strategic investment in energy transition startups", investor_type: cvc, expect: strategic_corporate}
+  - {title: "Research grant for clean water technology", description: "Call for proposals, non-dilutive grant funding up to 500k", expect: grant}
+  - {title: "Innovation grant: advanced materials", description: "Funding opportunity with awards for applied research", class_hint: grant, expect: grant}
+  - {title: "Non-dilutive award for health diagnostics", description: "Grant programme for early diagnostics prototypes", expect: grant}
+  - {title: "Call for proposals: digital skills", description: "Grant awards to training providers", expect: grant}
+  - {title: "National innovation scheme for SMEs", description: "Government program providing public funding and tax credit for R&D", counterparty_kind: agency, expect: government_program}
+  - {title: "SBIR Phase I solicitation", description: "Small business innovation research program run by a federal agency", counterparty_kind: agency, expect: government_program}
+  - {title: "Ministry export acceleration programme", description: "Public funding programme from the ministry of trade", expect: government_program}
+  - {title: "R&D tax credit programme", description: "Government program offering refundable tax credit", expect: government_program}
+  - {title: "University research partnership call", description: "Joint research partnership with a university innovation centre", counterparty_kind: university, expect: university_program}
+  - {title: "Campus incubator cohort", description: "University incubator for spin-outs with tech transfer support", expect: university_program}
+  - {title: "Tech transfer proof-of-concept fund", description: "University innovation centre funding for licensing pilots", counterparty_kind: university, expect: university_program}
+  - {title: "Innovation center industry fellowship", description: "Research partnership placements at a university", expect: university_program}
+  - {title: "Foundation climate resilience fund", description: "Philanthropic foundation funding SDG-aligned climate projects", investor_type: foundation, expect: foundation_esg}
+  - {title: "Impact fund for inclusive fintech", description: "ESG impact fund investing in financial inclusion", expect: foundation_esg}
+  - {title: "Blended finance facility for clean cooking", description: "Philanthropic and impact capital with ESG targets", expect: foundation_esg}
+  - {title: "SDG accelerator from a charitable foundation", description: "Foundation support for sustainable development goals", expect: foundation_esg}
+  - {title: "Venture debt facility for growth-stage startups", description: "Term loan with warrants for VC-backed companies", investor_type: lender, expect: debt_facility}
+  - {title: "Revolving credit facility for SMEs", description: "Working capital facility from a commercial lender", expect: debt_facility}
+  - {title: "Term loan programme for manufacturers", description: "Senior secured term loan", investor_type: lender, expect: debt_facility}
+  - {title: "Working capital facility for exporters", description: "Short-term credit facility", expect: debt_facility}
+  - {title: "SAFE round with valuation cap", description: "Post-money SAFE with a 10M valuation cap and discount rate", expect: convertible}
+  - {title: "Bridge note ahead of Series A", description: "Convertible note with 20% discount", expect: convertible}
+  - {title: "Convertible note programme for pre-seed", description: "Notes convert at the next priced round", expect: convertible}
+  - {title: "Equity-free SAFE from an accelerator", description: "SAFE investment with valuation cap", expect: convertible}
+  - {title: "Equipment finance for lab instruments", description: "Asset finance for scientific equipment", expect: equipment_finance}
+  - {title: "Equipment lease for manufacturing lines", description: "Operating equipment lease over 36 months", expect: equipment_finance}
+  - {title: "Asset finance for fleet electrification", description: "Hire purchase and asset finance for EV fleets", expect: equipment_finance}
+  - {title: "Hire purchase for agricultural machinery", description: "Equipment finance programme", expect: equipment_finance}
+  - {title: "Revenue-based financing for SaaS", description: "Repayment as a percentage of revenue with a repayment cap", expect: revenue_based_financing}
+  - {title: "RBF for e-commerce brands", description: "Revenue based financing, non-dilutive", expect: revenue_based_financing}
+  - {title: "Revenue-based growth capital", description: "Repaid from a percentage of revenue until a repayment cap is reached", expect: revenue_based_financing}
+  - {title: "Marketing capital via revenue-based financing", description: "RBF advances repaid from monthly revenue", expect: revenue_based_financing}

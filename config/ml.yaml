@@ -1,0 +1,24 @@
+# ml_scorer (FR-03 probability_of_success). Trained ONLY on realised outcomes (I6); predictions are never
+# training labels. Demo-trained models (synthetic seed outcomes) score demo opportunities only.
+version: 1
+model_name: probability_of_success
+labels:
+  positive: [won]
+  negative: [lost]        # "withdrawn" says nothing about the counterparty's decision, so it's excluded
+min_samples: 30
+min_per_class: 5
+cv_folds: 5
+calibration: sigmoid      # Platt scaling; isotonic needs far more outcomes than an early-stage pipeline has
+algorithms: [logistic_regression, hist_gradient_boosting]
+select_by: brier          # the candidate with the lowest cross-validated Brier score wins
+# Promote a new model only if it beats the active one (or, for the first model, the class-prior baseline)
+# on cross-validated AUC or Brier (§6 L8 feedback_collector).
+promotion: {auc_margin: 0.0, brier_margin: 0.0}
+features:
+  factors: [strategic_fit, technology_alignment, geography, stage, funding_size, esg_relevance,
+            relationship_strength, timing, thesis_match, cost_dilution, strategic_value]
+  include_class: true
+  include_completeness: false   # the missing-indicator features already carry evidence coverage
+  include_amount: true
+calibration_bins: 10
+retrain_schedule: "0 4 * * 1"   # weekly, Monday 04:00 UTC

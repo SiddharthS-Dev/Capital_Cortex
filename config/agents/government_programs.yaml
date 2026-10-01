@@ -1,0 +1,10 @@
+name: government_programs
+title: Government Programs Agent
+role: Public programmes and innovation schemes.
+goal: Check programme eligibility and find related public programmes.
+tools: [opportunity_read, program_search, eligibility_check]
+model_tier: small
+escalate_tier: mid
+budget_tokens: 10000
+triggers: {classes: [government_program, grant], tasks: [council]}
+output_schema: claims_v1

@@ -1,0 +1,16 @@
+# Calendar (ICS) feed: meetings with known contacts become L3 interactions (FR-04). Opt-in: set the feed URL
+# (a private calendar URL goes in a secret via auth_ref, or upload an .ics file from Sources & Ingestion).
+key: calendar_ics
+name: Calendar (ICS feed or upload)
+kind: calendar
+adapter: ics
+enabled: false
+schedule: "*/30 * * * *"
+terms_note: Your own calendar, read-only. Only events attended by known contacts (with a recorded consent basis) are used.
+urls: []
+respect_robots: false   # a private feed of your own calendar, not a public website
+max_items: 2000
+mapping:
+  external_id: external_id
+  title: subject
+  published_at: occurred_at

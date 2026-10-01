@@ -1,0 +1,28 @@
+# Relationship intelligence (FR-04). Loaded by cortex.l3_memory.
+version: 1
+
+# Warmth = Σ weight(kind) × e^(−Δdays / decay_days), then normalised to 0–1 with
+# warmth = 1 − e^(−S / scale). One meeting today ≈ 0.63; it decays to ≈ 0.28 after 90 days with no contact.
+decay_days: 90
+weights:
+  meeting: 1.0
+  intro: 0.8
+  call: 0.7
+  email_reply: 0.4
+  email_sent: 0.1
+  note: 0.0          # internal notes never make a relationship warmer
+normalisation:
+  method: saturating
+  scale: 1.0
+
+# Interactions older than this no longer contribute (their weight is below 0.4 % after 500 days anyway).
+horizon_days: 500
+sparkline_weeks: 12
+
+# Defaults for milestones created from meetings.
+follow_up_default_days: 7
+commitment_default_days: 30
+
+# Mailbox / calendar adapters: interactions are created only for addresses of known contacts (consent basis
+# recorded on the contact). Unknown senders are ignored, never auto-created as people.
+match_unknown_addresses: false

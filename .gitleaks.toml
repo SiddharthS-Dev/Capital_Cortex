@@ -1,0 +1,13 @@
+# Dev-only credentials in the dev realm, compose defaults and smoke tests are intentional and documented
+# (DECISIONS D-013). Everything else is scanned with the default rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "dev-only fixtures"
+paths = [
+  '''infra/keycloak/realm-cortex\.json''',
+  '''infra/keycloak/generate_realm\.py''',
+  '''scripts/smoke\.py''',
+  '''apps/web/e2e/helpers\.ts''',
+]

@@ -1,0 +1,11 @@
+# Agent declarations (SyRS §7). A tool not listed here can never be called by this agent (§10 prompt-injection
+# defence). Tiers are vendor-neutral (R7). budget_tokens is the per-task ceiling enforced by the governor.
+name: discovery
+title: Discovery Agent
+role: Scans sources and triages new signals, focusing on equity, strategic and ESG classes.
+goal: Say whether this opportunity is worth qualifying, based on its source, classification and evidence coverage.
+tools: [opportunity_read, search_signals, classify, graph_read]
+model_tier: small
+budget_tokens: 6000
+triggers: {stages: [discovered], classes: [venture_equity, strategic_corporate, foundation_esg], tasks: [triage, council]}
+output_schema: claims_v1

@@ -1,0 +1,38 @@
+# Eval gate (b) grounding (§14): every claim in generated collateral resolves to a record, every number matches,
+# and every missing input is rendered as [EVIDENCE REQUIRED]. Fictional records (I1 applies to evals too).
+version: 1
+package: vc_pitch
+self:
+  id: 00000000-0000-0000-0000-0000000000a1
+  name: Lumen Grid Labs (fictional)
+  country: US
+  profile:
+    description: Grid-scale energy storage controls software
+    stage: seed
+    sectors: [energy]
+    tech_tags: [energy storage, battery controls]
+    traction: ["2 utility pilots signed"]
+    raise_target: {min: 500000, max: 1500000, currency: USD}
+opportunity:
+  id: 00000000-0000-0000-0000-0000000000b1
+  title: Storage Seed Programme (fictional)
+  currency: USD
+  amount_min: 250000
+  amount_max: 1000000
+tool_facts:
+  opportunity:
+    - {text: "“Storage Seed Programme (fictional)” scores 81.2% in the high band, with 70.0% evidence completeness.", kind: fact, evidence: ["opportunity:00000000-0000-0000-0000-0000000000b1"]}
+    - {text: "The stated amount is USD 250,000 to 1,000,000.", kind: fact, evidence: ["opportunity:00000000-0000-0000-0000-0000000000b1"]}
+    - {text: "The deadline is 2026-12-15, 76 days from 2026-09-30.", kind: fact, evidence: ["tool:run:opportunity"]}
+  financials:
+    - {text: "Cash at 2026-08-01 was USD 1,200,000; the trailing 3-month average net burn is USD 55,000.", kind: fact, evidence: ["tool:run:financials"]}
+  # a fabricated fact slipped in by a faulty tool/model: the gate requires it to be stripped, never rendered
+  signals:
+    - {text: "Aurora Climate Ventures Fund II has committed USD 2,000,000.", kind: fact, evidence: ["opportunity:00000000-0000-0000-0000-0000000000b1"]}
+tool_gaps:
+  dd_checklist: ["DD evidence required: Capitalisation table"]
+records:
+  "opportunity:00000000-0000-0000-0000-0000000000b1": {title: Storage Seed Programme (fictional), score: 0.8123, completeness: 0.7, amount_min: 250000, amount_max: 1000000, currency: USD, deadline: "2026-12-15"}
+  "tool:run:opportunity": {deadline: "2026-12-15", days_to_deadline: 76, as_of: "2026-09-30"}
+  "tool:run:financials": {period: "2026-08-01", cash: 1200000, trailing_3m_net_burn: 55000, currency: USD}
+  "organization:00000000-0000-0000-0000-0000000000a1": {name: Lumen Grid Labs (fictional), country: US, profile: {description: Grid-scale energy storage controls software, stage: seed, sectors: [energy], tech_tags: [energy storage, battery controls], traction: ["2 utility pilots signed"], raise_target: {min: 500000, max: 1500000, currency: USD}}}

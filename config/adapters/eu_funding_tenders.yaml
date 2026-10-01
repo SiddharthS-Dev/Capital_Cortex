@@ -1,0 +1,31 @@
+# EU Funding & Tenders portal: the SEDIA search API. Disabled until its current API terms are verified (§6/L1).
+key: eu_funding_tenders
+name: EU Funding & Tenders (template)
+kind: api
+adapter: json_api
+enabled: false
+schedule: "30 3 * * *"
+terms_note: >-
+  EU Funding & Tenders Portal search API (api.tech.ec.europa.eu). Verify the current terms and endpoint
+  before enabling. The mapping follows the public search response.
+rate_limit: {min_interval_seconds: 2.0}
+respect_robots: false
+max_items: 100
+request:
+  method: POST
+  url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text={keyword}&pageSize=50&pageNumber=1"
+  vars: {keyword: ["innovation"]}
+  items_path: results
+  id_path: reference
+mapping:
+  external_id: reference
+  title: ["metadata.title[0]", summary]
+  description: ["metadata.description[0]", content]
+  url: url
+  deadline: "metadata.deadlineDate[0]"
+defaults:
+  currency: EUR
+  countries: [EU]
+  counterparty_name: European Commission
+  counterparty_kind: agency
+  class_hint: grant

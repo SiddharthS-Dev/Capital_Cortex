@@ -1,0 +1,16 @@
+# Declared assumptions used by deterministic agent tools (I7: tools compute, agents narrate). Every tool
+# result cites this file, so any number derived from these values is traceable.
+version: 1
+debt_capacity:
+  # Indicative capacity = trailing-12-month revenue × multiple, capped at a share of current cash.
+  ttm_revenue_multiple: 0.25
+  max_share_of_cash: 0.5
+  min_months_of_data: 6
+terms_compare:
+  min_peers: 3
+convergence:
+  # Stance thresholds for a deterministic council tally. An agent's stance comes from blockers/support in
+  # its tool results; the council stance is the confidence-weighted majority.
+  min_consensus_for_pursue: 0.5
+warm_path:
+  warm_threshold: 0.5

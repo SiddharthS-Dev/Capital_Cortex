@@ -1,0 +1,58 @@
+# Proposal Factory package types (FR-05). A package = sections (built from sourced evidence) + artefacts
+# (rendered by cortex.l8_actuation.asset_generator). Every claim is citation-checked; every missing input becomes
+# an [EVIDENCE REQUIRED: …] gap that blocks approval until resolved or waived by an Admin.
+version: 1
+
+sections:
+  executive_overview: {title: Executive overview}
+  company: {title: The company}
+  opportunity: {title: The opportunity}
+  fit: {title: Fit and scoring evidence}
+  eligibility: {title: Eligibility}
+  technology: {title: Technology}
+  traction: {title: Traction}
+  team: {title: Team}
+  financials: {title: Financials and runway}
+  ask: {title: The ask}
+  use_of_funds: {title: Use of funds}
+  work_plan: {title: Work plan}
+  budget_summary: {title: Budget}
+  esg: {title: ESG and impact}
+  relationship: {title: Relationship}
+  risks: {title: Risks and open evidence}
+  dd_status: {title: Due-diligence status}
+
+packages:
+  vc_pitch:
+    title: VC pitch package
+    sections: [executive_overview, company, opportunity, fit, technology, traction, team, financials, ask, use_of_funds, relationship, risks, dd_status]
+    artefacts: [pitch_deck, executive_summary, investment_memo, financial_model, dd_checklist]
+  grant:
+    title: Grant application package
+    sections: [executive_overview, company, opportunity, eligibility, technology, esg, work_plan, budget_summary, team, risks]
+    artefacts: [grant_narrative, budget, technical_annex, executive_summary, dd_checklist]
+  debt_facility:
+    title: Debt facility package
+    sections: [executive_overview, company, opportunity, financials, ask, use_of_funds, risks, dd_status]
+    artefacts: [executive_summary, investment_memo, financial_model, dd_checklist]
+  esg_memo:
+    title: ESG / impact memo
+    sections: [executive_overview, company, opportunity, esg, fit, technology, risks]
+    artefacts: [investment_memo, executive_summary, technical_annex]
+
+artefacts:
+  pitch_deck: {title: Pitch deck, formats: [pptx, pdf], sections: all}
+  executive_summary: {title: Executive summary, formats: [docx, pdf], sections: [executive_overview, opportunity, fit, financials, ask, eligibility, esg]}
+  investment_memo: {title: Investment memo, formats: [docx, pdf], sections: all}
+  grant_narrative: {title: Grant narrative, formats: [docx, pdf], sections: all}
+  technical_annex: {title: Technical annex, formats: [docx, pdf], sections: [technology, work_plan, team, esg, eligibility]}
+  budget: {title: Budget, formats: [xlsx], sections: [budget_summary, use_of_funds]}
+  financial_model: {title: Financial model (live formulas), formats: [xlsx], sections: [financials]}
+  dd_checklist: {title: DD checklist, formats: [xlsx, docx], sections: [dd_status]}
+
+# Appended to every narrative artefact (compliance_check expects it for forward-looking statements).
+disclaimer: >-
+  This document was prepared with Inspironics Capital Cortex. Every factual statement carries a citation to its
+  source record, listed in the evidence appendix. Statements about the future (forecasts, runway, plans) are
+  estimates based on the cited records and assumptions; they are not guarantees. Nothing in this document is an
+  offer of securities.

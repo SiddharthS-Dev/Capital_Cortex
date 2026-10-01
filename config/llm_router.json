@@ -1,0 +1,39 @@
+{
+  "_comment": "Vendor-neutral tiers (R7). Load with LLM_ROUTER=@config/llm_router.json. Prices are USD per million tokens. Secrets are refs (env:/vault:), never values.",
+  "tiers": {
+    "small": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "max_tokens": 4096,
+      "price_in_per_mtok": 1.0,
+      "price_out_per_mtok": 5.0,
+      "params": {}
+    },
+    "mid": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "max_tokens": 16000,
+      "price_in_per_mtok": 2.0,
+      "price_out_per_mtok": 10.0,
+      "params": {"effort": "medium", "fallbacks": "default"}
+    },
+    "large": {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "max_tokens": 32000,
+      "price_in_per_mtok": 4.0,
+      "price_out_per_mtok": 20.0,
+      "params": {"effort": "high", "fallbacks": "default"}
+    }
+  },
+  "providers": {
+    "anthropic": {"kind": "anthropic", "api_key_ref": "env:ANTHROPIC_API_KEY", "timeout_seconds": 600},
+    "azure_openai": {
+      "kind": "azure_openai",
+      "endpoint": "https://YOUR-RESOURCE.openai.azure.com",
+      "api_version": "2024-10-21",
+      "api_key_ref": "vault:secret/cortex/llm#azure_openai_api_key"
+    },
+    "vllm": {"kind": "openai_compatible", "endpoint": "http://vllm:8000/v1"}
+  }
+}

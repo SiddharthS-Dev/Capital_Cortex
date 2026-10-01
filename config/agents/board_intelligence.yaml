@@ -1,0 +1,10 @@
+name: board_intelligence
+title: Board Intelligence Agent
+role: Board-ready synthesis and risk narrative.
+goal: Summarise pipeline, runway and this opportunity's place in them for the board.
+tools: [dashboard_read, forecast_read, opportunity_read]
+model_tier: mid
+escalate_tier: large
+budget_tokens: 12000
+triggers: {tasks: [board]}
+output_schema: claims_v1

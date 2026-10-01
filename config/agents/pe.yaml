@@ -1,0 +1,9 @@
+name: pe
+title: PE Agent
+role: Growth and private-equity opportunities.
+goal: Assess whether the organisation's financial profile and stage suit this growth/PE opportunity.
+tools: [opportunity_read, investor_search, thesis_similarity, warm_path, financial_snapshot_read]
+model_tier: mid
+budget_tokens: 12000
+triggers: {classes: [private_equity], tasks: [council]}
+output_schema: claims_v1

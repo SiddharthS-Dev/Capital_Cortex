@@ -1,0 +1,14 @@
+# Incident restore only (RUNBOOK §8 "Restore procedure"): run `postgres` on a restored data volume instead of
+# `pgdata`, leaving the damaged volume untouched as evidence. Create and fill the volume first (RUNBOOK §8), then:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml -f infra/docker-compose.restore.yml \
+#     --env-file .env up -d --wait postgres
+# Compose merges volume mounts by target path, so this replaces only the data directory mount.
+services:
+  postgres:
+    volumes:
+      - pgdata_restored:/var/lib/postgresql/data
+
+volumes:
+  pgdata_restored:
+    external: true
+    name: ${RESTORED_PGDATA_VOLUME:-capital-cortex_pgdata_restored}

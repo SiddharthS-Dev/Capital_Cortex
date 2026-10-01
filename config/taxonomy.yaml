@@ -1,0 +1,114 @@
+# The 11 capital instrument classes (D-004) and rules-first classification hints (FR-02).
+# The Phase 1 classifier evaluates `rules` first and uses the small-tier LLM only when rule
+# confidence is below `llm_threshold`. It never overwrites a human-set class.
+version: 1
+llm_threshold: 0.7
+
+classes:
+  venture_equity:
+    label: Venture Equity
+    agent: VC
+    rules:
+      keywords: ["seed round", "series a", "series b", "venture capital", "vc fund", "pre-seed", "equity round"]
+      investor_types: [vc, angel]
+  private_equity:
+    label: Private Equity / Growth
+    agent: PE
+    rules:
+      keywords: ["growth equity", "private equity", "buyout", "growth capital", "minority stake"]
+      investor_types: [pe, family_office]
+  strategic_corporate:
+    label: Strategic / Corporate Venture
+    agent: Discovery
+    rules:
+      keywords: ["corporate venture", "cvc", "strategic investment", "strategic partner", "corporate innovation fund"]
+      investor_types: [cvc]
+  grant:
+    label: Grant (non-dilutive)
+    agent: Grant
+    rules:
+      keywords: ["grant", "call for proposals", "funding opportunity", "award", "non-dilutive"]
+  government_program:
+    label: Government Program
+    agent: Government Programs
+    rules:
+      keywords: ["innovation scheme", "government program", "public funding", "ministry", "tax credit", "sbir", "sttr"]
+      counterparty_kinds: [agency]
+  university_program:
+    label: University / Research Program
+    agent: University Programs
+    rules:
+      keywords: ["university", "research partnership", "innovation centre", "innovation center", "incubator", "tech transfer"]
+      counterparty_kinds: [university]
+  foundation_esg:
+    label: Foundation / ESG / Impact
+    agent: Grant
+    rules:
+      keywords: ["foundation", "impact fund", "esg", "sdg", "philanthropic", "climate fund", "blended finance"]
+      investor_types: [foundation]
+  debt_facility:
+    label: Debt Facility
+    agent: Debt
+    rules:
+      keywords: ["term loan", "credit facility", "venture debt", "revolving credit", "working capital facility"]
+      investor_types: [lender]
+  convertible:
+    label: Convertible (SAFE / Note)
+    agent: Convertible
+    rules:
+      keywords: ["safe", "convertible note", "valuation cap", "discount rate", "bridge note"]
+  equipment_finance:
+    label: Equipment Finance
+    agent: Debt
+    rules:
+      keywords: ["equipment finance", "equipment lease", "asset finance", "hire purchase"]
+  revenue_based_financing:
+    label: Revenue-Based Financing
+    agent: Debt
+    rules:
+      keywords: ["revenue-based", "revenue based financing", "rbf", "repayment cap", "percentage of revenue"]
+
+# Tag vocabularies applied by the typer (L2). Keyword → tag; whole words/phrases (plural ok), case-insensitive; "stem*" matches word starts.
+sectors:
+  ai_data: ["artificial intelligence", "ai", "machine learning", "data science", "analytics", "big data", "computer vision"]
+  software: ["software", "saas", "cloud", "platform", "digital"]
+  cybersecurity: ["cybersecurity", "cyber security", "information security"]
+  climate_energy: ["clean energy", "renewable", "solar", "wind energy", "energy storage", "decarbon*", "climate", "hydrogen", "grid"]
+  health_life_sciences: ["health", "medical", "biomedical", "clinical", "pharma", "biotech", "life science", "cancer"]
+  manufacturing: ["manufacturing", "industrial", "factory", "robotics", "automation"]
+  agriculture_food: ["agricultur*", "farm", "food", "crop", "livestock"]
+  education: ["education", "training", "workforce", "stem"]
+  fintech: ["fintech", "financial technology", "payments", "banking"]
+  mobility: ["mobility", "transport", "automotive", "electric vehicle", "aviation", "aerospace"]
+  defense_space: ["defense", "defence", "military", "space", "satellite", "munitions"]
+  environment: ["environment", "water", "conservation", "biodiversity", "pollution", "waste", "circular"]
+  social_impact: ["community", "inclusion", "equity", "poverty", "social impact", "nonprofit"]
+  research: ["research and development", "r&d", "research", "science", "innovation"]
+
+esg:
+  climate: ["climate", "emission", "carbon", "decarbon*", "net zero", "net-zero"]
+  clean_energy: ["clean energy", "renewable", "solar", "wind", "energy efficiency", "hydrogen"]
+  circular_economy: ["circular", "recycl*", "waste reduction", "reuse"]
+  water: ["water", "sanitation", "ocean", "marine"]
+  health: ["health", "wellbeing", "well-being", "medical"]
+  education: ["education", "skills", "training", "literacy"]
+  inclusion: ["inclusion", "diversity", "equity", "underserved", "underrepresented", "women-owned", "minority"]
+  governance: ["governance", "transparency", "anti-corruption", "accountability"]
+
+# ESG tag → UN Sustainable Development Goals
+sdg_map:
+  climate: [SDG13]
+  clean_energy: [SDG7, SDG13]
+  circular_economy: [SDG12]
+  water: [SDG6, SDG14]
+  health: [SDG3]
+  education: [SDG4]
+  inclusion: [SDG5, SDG10]
+  governance: [SDG16]
+
+stages:
+  pre_seed: ["pre-seed", "pre seed", "idea stage", "concept"]
+  seed: ["seed", "phase i", "phase 1", "early-stage", "early stage", "proof of concept", "feasibility"]
+  series_a: ["series a", "phase ii", "phase 2", "commercialization", "commercialisation"]
+  series_b_plus: ["series b", "series c", "scale-up", "scaleup", "expansion"]
+  growth: ["growth", "late-stage", "late stage", "mature"]

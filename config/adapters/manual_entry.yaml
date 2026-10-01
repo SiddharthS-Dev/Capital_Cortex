@@ -1,0 +1,25 @@
+key: manual_entry
+name: Manual entry
+kind: manual
+adapter: manual
+enabled: true
+terms_note: Entered by a signed-in user; the entry is attributed to that user in its provenance.
+respect_robots: false
+max_items: 100
+mapping:
+  external_id: external_id
+  title: title
+  description: description
+  url: url
+  counterparty_name: counterparty_name
+  counterparty_kind: counterparty_kind
+  counterparty_country: counterparty_country
+  countries: countries
+  deadline: deadline
+  amount_min: amount_min
+  amount_max: amount_max
+  currency: currency
+  class_hint: class_hint
+  stage_fit: stage_fit
+  sectors: sectors
+  investor_type: investor_type

@@ -1,0 +1,49 @@
+# Grants.gov public REST API: official, unauthenticated federal grants search (search2 + fetchOpportunity).
+# Terms: public-domain U.S. government data; see https://www.grants.gov/api. Verified reachable 2026-09-29.
+key: grants_gov
+name: Grants.gov (US federal grants)
+kind: api
+adapter: json_api
+enabled: true
+schedule: "15 */6 * * *"        # every 6 hours, UTC
+terms_note: >-
+  Official Grants.gov REST API (search2 / fetchOpportunity), public U.S. government data, no key required.
+  Polite use: 1 request/second and at most 150 opportunities per run.
+rate_limit: {min_interval_seconds: 1.0}
+respect_robots: false            # an API endpoint, not a crawled page; its usage terms govern (R11)
+max_items: 150
+request:
+  method: POST
+  url: https://api.grants.gov/v1/api/search2
+  json: {rows: 25, oppStatuses: "forecasted|posted", keyword: "{keyword}"}
+  vars:
+    keyword: ["small business innovation", "technology", "artificial intelligence", "clean energy",
+              "advanced manufacturing", "research and development"]
+  items_path: data.oppHits
+  id_path: id
+detail:
+  method: POST
+  url: https://api.grants.gov/v1/api/fetchOpportunity
+  json: {opportunityId: "{id}"}
+  root_path: data
+mapping:
+  external_id: id
+  title: [opportunityTitle, title]
+  description: [synopsis.synopsisDesc, forecast.forecastDesc]
+  url: {template: "https://www.grants.gov/search-results-detail/{id}"}
+  # agency-level names first: synopsis.agencyName sometimes holds a grants officer's personal name
+  counterparty_name: [agency, synopsis.agencyDetails.agencyName, forecast.agencyDetails.agencyName, topAgencyDetails.agencyName]
+  published_at: [synopsis.postingDate, forecast.postingDate]
+  open_date: openDate
+  deadline: [synopsis.responseDate, forecast.estApplicationResponseDate, closeDate]
+  amount_min: [synopsis.awardFloor, forecast.awardFloor]
+  amount_max: [synopsis.awardCeiling, forecast.awardCeiling]
+  categories: ["synopsis.fundingActivityCategories[*].description", "forecast.fundingActivityCategories[*].description"]
+  instruments: ["synopsis.fundingInstruments[*].description", "forecast.fundingInstruments[*].description"]
+  eligibility_text: [synopsis.applicantEligibilityDesc, forecast.applicantEligibilityDesc]
+defaults:
+  currency: USD
+  countries: [US]               # federal programmes; eligibility text is kept for review
+  counterparty_kind: agency
+  counterparty_country: US
+  class_hint: grant

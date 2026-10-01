@@ -1,0 +1,15 @@
+# Data-room folder watcher (FR-06): files dropped into MinIO cortex-dataroom/inbox/<folder>/ become data-room
+# documents (unapproved until a person approves them in the Data Room). Enable it from Sources & Ingestion.
+key: dataroom_watcher
+name: Data-room inbox (MinIO folder watcher)
+kind: dataroom
+adapter: dataroom_watcher
+enabled: false
+schedule: "*/10 * * * *"
+terms_note: Internal storage. Files are registered unapproved; approving them for packages is a human decision.
+respect_robots: false
+max_items: 200
+request: {classification: internal, kind: document, dd_tags: []}
+mapping:
+  external_id: sha256
+  title: title

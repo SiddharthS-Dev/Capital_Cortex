@@ -1,0 +1,26 @@
+# Retention policy (R13). Enforced by cortex.l7_governance.retention (Phase 3).
+# Legal hold always wins over any expiry rule.
+version: 1
+policies:
+  audit_log:
+    retain: 7y
+    immutable: true
+    action: none            # never deleted by the platform
+  signal:
+    warm: 2y
+    then: cold              # MinIO lifecycle tier
+  memory_hot:
+    retain: 24h             # Redis TTL
+  memory_warm:
+    retain: 1y
+    then: cold
+  proposal_draft:
+    retain: 1y
+    action: delete
+  agent_run:
+    retain: 2y
+    action: delete
+  llm_cache:
+    retain: 7d
+legal_hold:
+  tables: [document, proposal, signal, meeting]

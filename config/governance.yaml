@@ -1,0 +1,40 @@
+# Governed actuation (I3, SyRS §11/§12). Loaded by cortex.l7_governance and passed to OPA as input.config.
+version: 1
+
+# Segregation of duties: the person who requested an approval can't approve it. Set true only for a
+# single-person organisation (the audit log still shows who requested and who approved).
+allow_self_approval: false
+
+# After the final approval, release the outbox item straight away (the sender still verifies the signed
+# token, re-hashes the payload and re-evaluates policy). false = an approver presses "Send".
+auto_release_on_approval: true
+
+# no_external_send_outside_business_hours (optional policy)
+business_hours_only: false
+timezone: UTC
+
+# Default due date for new approval requests when the subject has no deadline of its own.
+approval_due_days: 3
+
+# Webhook deliveries may only go to these URL prefixes (SSRF guard). Empty = webhooks disabled.
+webhook_allowlist: []
+
+# Content flags that select policies. Deterministic patterns, case-insensitive.
+financial_terms_patterns:
+  - '\bvaluation\b'
+  - '\b(pre|post)-money\b'
+  - '\bterm sheet\b'
+  - '\binterest rate\b'
+  - '\bcoupon\b'
+  - '\bdiscount rate\b'
+  - '\bvaluation cap\b'
+  - '\bconversion (price|discount)\b'
+  - '\bequity stake\b'
+  - '\bwarrants?\b'
+  - '\bcovenants?\b'
+  - '\bliquidation preference\b'
+pii_patterns:
+  - '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+  # phone numbers need an international prefix or a bracketed area code, so dates and amounts don't match
+  - '\+\d{1,3}[\s.-]?(?:\(\d{1,4}\)[\s.-]?)?\d{2,4}(?:[\s.-]?\d{2,4}){1,4}'
+  - '\(\d{3}\)\s?\d{3}[\s.-]\d{4}'

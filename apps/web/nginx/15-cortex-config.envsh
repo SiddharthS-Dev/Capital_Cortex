@@ -1,0 +1,17 @@
+#!/bin/sh
+# Sourced (.envsh) by the nginx entrypoint before template envsubst, so OIDC_ORIGIN reaches the CSP.
+# Writes runtime config for the SPA from the container environment (no rebuild per environment).
+cat > /usr/share/nginx/html/config.js <<CFG
+window.__CORTEX_CONFIG__ = {
+  oidcAuthority: "${OIDC_AUTHORITY}",
+  oidcClientId: "${OIDC_CLIENT_ID}",
+  apiBase: ""
+};
+CFG
+# Origin of the IdP for the CSP (scheme://host:port).
+OIDC_ORIGIN=$(echo "$OIDC_AUTHORITY" | sed -E 's#^(https?://[^/]+).*#\1#')
+export OIDC_ORIGIN
+
+# DNS server for nginx's runtime re-resolution of API_UPSTREAM (Docker: 127.0.0.11; Kubernetes: the cluster DNS).
+NGINX_RESOLVER=${NGINX_RESOLVER:-$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)}
+export NGINX_RESOLVER

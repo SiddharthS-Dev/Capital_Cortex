@@ -1,0 +1,52 @@
+# SLO and cost alerts (§11).
+groups:
+  - name: cortex-slo
+    rules:
+      - alert: ApiLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(cortex_http_request_seconds_bucket{route!~"/v1/dashboards.*|/v1/graph.*"}[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "API p95 latency above 1s"}
+      - alert: DashboardLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(cortex_http_request_seconds_bucket{route=~"/v1/dashboards.*"}[5m]))) > 3
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Dashboard p95 above 3s SLO"}
+      - alert: GraphLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(cortex_http_request_seconds_bucket{route=~"/v1/graph.*"}[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Graph p95 above 5s SLO"}
+      - alert: ScoringLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(cortex_http_request_seconds_bucket{route=~".*/rescore|/v1/scoring/preview"}[5m]))) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Scoring p95 above 10s SLO"}
+      - alert: DlqDepthGrowing
+        expr: max(cortex_bus_dlq_depth) > 0 and delta(max(cortex_bus_dlq_depth)[30m:]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Dead-letter queue is growing"}
+      - alert: BusBacklogGrowing
+        expr: sum(rate(cortex_bus_published_total[10m])) > 1.5 * sum(rate(cortex_bus_processed_total[10m]))
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Bus backlog growing (publish rate far above processing rate)"}
+  - name: cortex-cost-trust
+    rules:
+      - alert: LlmDailyBudgetBreach
+        expr: max(cortex_llm_daily_spend_usd) >= max(cortex_llm_daily_cap_usd)
+        labels: {severity: critical}
+        annotations: {summary: "Daily LLM budget reached; calls are now refused"}
+      - alert: LlmBudgetRejections
+        expr: sum(increase(cortex_llm_budget_rejections_total[15m])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "LLM calls refused by budget ceilings"}
+      - alert: UnsourcedClaimSpike
+        expr: sum(increase(cortex_citation_rejections_total[1h])) > 20
+        labels: {severity: warning}
+        annotations: {summary: "Spike in unsourced-claim rejections (data-quality alert)"}
+      - alert: PolicyEngineErrors
+        expr: sum(increase(cortex_policy_decisions_total{outcome="error"}[5m])) > 0
+        labels: {severity: critical}
+        annotations: {summary: "OPA unreachable — requests are failing closed"}

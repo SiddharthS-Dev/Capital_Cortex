@@ -1,0 +1,10 @@
+# Same runtime image as infra/web/Dockerfile, from a host-built dist/ (npm run build in apps/web). Used when the
+# Docker builder is short of memory for tsc + vite (see RUNBOOK). Build context: a folder with dist/ and nginx/.
+FROM nginx:1.30-alpine
+RUN apk upgrade --no-cache
+COPY dist /usr/share/nginx/html
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY nginx/15-cortex-config.envsh /docker-entrypoint.d/15-cortex-config.envsh
+RUN chmod +x /docker-entrypoint.d/15-cortex-config.envsh
+ENV API_UPSTREAM=http://api:8000 OIDC_AUTHORITY=http://localhost:8380/realms/cortex OIDC_CLIENT_ID=cortex-web
+EXPOSE 8080

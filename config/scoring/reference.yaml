@@ -1,0 +1,39 @@
+# Reference tables used by factors (configurable assumptions, shown as the factor "method" in the UI).
+stages: [pre_seed, seed, series_a, series_b_plus, growth]
+stage_distance_values: [1.0, 0.6, 0.2, 0.0]   # same stage, 1 apart, 2 apart, ≥3 apart
+# Cold-start class-level success priors (probability_of_success until ml_scorer is trained, Phase 2).
+# Planning assumptions, labelled method="prior" everywhere they are used.
+class_priors:
+  venture_equity: 0.08
+  private_equity: 0.10
+  strategic_corporate: 0.10
+  grant: 0.20
+  government_program: 0.22
+  university_program: 0.30
+  foundation_esg: 0.18
+  debt_facility: 0.35
+  convertible: 0.15
+  equipment_finance: 0.45
+  revenue_based_financing: 0.40
+# timing: days to deadline → value (first matching upper bound)
+timing_curve:
+  - {max_days: 0, value: 0.0}      # deadline passed
+  - {max_days: 7, value: 0.2}
+  - {max_days: 14, value: 0.5}
+  - {max_days: 30, value: 0.8}
+  - {max_days: 120, value: 1.0}
+  - {max_days: 365, value: 0.7}
+  - {max_days: 100000, value: 0.5}
+# strategic_value by counterparty kind (optional factor)
+counterparty_value: {agency: 0.6, university: 0.7, association: 0.5, counterparty: 0.6}
+# pipeline stage probabilities (pipeline_engine, when no calibrated ML probability exists)
+stage_probability:
+  discovered: 0.05
+  qualified: 0.10
+  engaged: 0.20
+  submitted: 0.30
+  diligence: 0.45
+  term_sheet: 0.70
+  committed: 0.90
+  closed: 1.0
+  lost: 0.0

@@ -1,0 +1,9 @@
+name: grant
+title: Grant Agent
+role: Grant fit, eligibility and packaging, including foundation and ESG funding.
+goal: Decide whether the organisation is eligible and well-placed for this grant, and what a submission needs.
+tools: [opportunity_read, eligibility_check, grant_calendar, program_search, recall]
+model_tier: mid
+budget_tokens: 12000
+triggers: {classes: [grant, foundation_esg, government_program], tasks: [council]}
+output_schema: claims_v1

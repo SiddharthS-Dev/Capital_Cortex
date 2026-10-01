@@ -1,0 +1,28 @@
+# compliance_check (§6 L7): disclosure and forward-looking-statement checks on outbound collateral.
+# Deterministic rules first. With a small-tier LLM configured, extra findings are accepted only if they quote a
+# span that exists verbatim in the text (cited findings).
+version: 1
+rules:
+  - key: forward_looking_without_disclaimer
+    severity: warning
+    pattern: '\b(will|expects?|anticipates?|projected|projections?|forecasts?|plans? to|aims? to|targets?)\b'
+    requires_disclaimer: true
+    message: Forward-looking statement. The document must carry the forward-looking-statement disclaimer.
+  - key: guarantee_of_returns
+    severity: blocker
+    pattern: '\b(guarantee[ds]?|risk[- ]free|assured returns?|no risk|cannot lose|certain returns?)\b'
+    message: Guarantees or risk-free claims are not allowed in collateral.
+  - key: unsupported_superlative
+    severity: warning
+    pattern: '\b(best|leading|only|first|unique|world[- ]class|unrivalled|unmatched|number one|#1)\b'
+    message: Superlative. Keep it only if the cited record says so; otherwise rephrase.
+  - key: return_projection
+    severity: warning
+    pattern: '\b\d+(\.\d+)?\s?(%|x)\s+(return|irr|multiple|yield)\b'
+    message: Return projection. Needs Legal review and the risk disclaimer.
+  - key: personal_data
+    severity: warning
+    pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+    message: Personal contact data in collateral. Confirm the consent basis or remove it.
+# Severity "blocker" findings block submission for approval until the text is changed.
+blocking_severities: [blocker]

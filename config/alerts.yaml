@@ -1,0 +1,35 @@
+# Alert rules (FR-08). Defaults are created on first start and can be edited (or disabled) in the Alerts
+# Center. Channels: in_app, internal_email, webhook. External recipients are never alerted directly.
+version: 1
+internal_recipients: []          # e.g. [founder@inspironics.net]; must be in INTERNAL_EMAIL_DOMAINS
+defaults:
+  - name: New high-score opportunity
+    kind: new_opp
+    severity: info
+    channels: [in_app]
+    rule_expr: {min_score: 0.70, within_hours: 24}
+    description: A newly discovered opportunity scored in the high band.
+  - name: Deadline countdown
+    kind: deadline
+    severity: warning
+    channels: [in_app]
+    rule_expr: {offsets_days: [30, 14, 7, 2], critical_at_days: 7, bands: [high], stages: [qualified, engaged, submitted, diligence, term_sheet]}
+    description: T-30/14/7/2 reminders for high-band or in-pipeline opportunities.
+  - name: Overdue follow-up
+    kind: follow_up
+    severity: warning
+    channels: [in_app]
+    rule_expr: {grace_days: 0}
+    description: A follow-up milestone is past its due date.
+  - name: Runway below threshold
+    kind: runway_risk
+    severity: critical
+    channels: [in_app]
+    rule_expr: {months: 9}
+    description: Base-case runway (forecast_engine) is below the threshold.
+  - name: Commitment expiring
+    kind: expiring_commitment
+    severity: warning
+    channels: [in_app]
+    rule_expr: {within_days: 14}
+    description: A recorded commitment expires within the window.

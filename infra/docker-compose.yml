@@ -1,0 +1,325 @@
+# Capital Cortex — full dev/staging stack (HLD: Compose-first). `make up` from the repo root.
+# Every image is pinned (by tag, or by digest where upstream only publishes `latest`).
+# Host ports use a dedicated block (override in .env) so the stack coexists with other local projects.
+name: capital-cortex
+
+x-app-env: &app-env
+  ENV: ${CORTEX_ENV:-dev}
+  DATABASE_URL: postgresql+psycopg://cortex:${POSTGRES_PASSWORD:-cortex-dev-pw}@postgres:5432/cortex
+  REDIS_URL: redis://redis:6379/0
+  OBJECT_STORE: http://minio:9000
+  OBJECT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:-cortex}
+  OBJECT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-cortex-dev-minio}
+  OIDC_ISSUER: http://localhost:${KEYCLOAK_PORT:-8380}/realms/cortex
+  OIDC_JWKS_URL: http://keycloak:8080/realms/cortex/protocol/openid-connect/certs
+  OIDC_AUDIENCE: cortex-api
+  OIDC_TOKEN_URL: http://keycloak:8080/realms/cortex/protocol/openid-connect/token
+  OPA_URL: http://opa:8181
+  VAULT_ADDR: http://vault:8200
+  VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN:-dev-root-token}
+  LLM_ROUTER: "@/app/config/llm_router.json"
+  FEATURE_BUDGETS: "@/app/config/feature_budgets.json"
+  LLM_DAILY_BUDGET_USD: ${LLM_DAILY_BUDGET_USD:-25}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  MIN_CASH_BUFFER: ${MIN_CASH_BUFFER:-0}
+  RUNWAY_ALERT_MONTHS: ${RUNWAY_ALERT_MONTHS:-9}
+  DEMO_MODE: ${DEMO_MODE:-false}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  CORS_ORIGINS: '["http://localhost:${WEB_PORT:-3300}","http://localhost:5373"]'
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  OIDC_ENFORCE_MFA: ${CORTEX_MFA_REQUIRED:-true}
+  # Governed actuation (I3). No default signing key: approvals fail closed until one is set in .env.
+  APPROVAL_SIGNING_KEY: ${APPROVAL_SIGNING_KEY:-}
+  # Admin screen: users/roles via the Keycloak admin API; share links point external recipients here.
+  KEYCLOAK_ADMIN_URL: http://keycloak:8080
+  KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN:-kcadmin}
+  KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-kcadmin-dev-pw}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8300}
+  # Dev: e-mail released from the outbox goes to Mailpit (http://localhost:8383), never to the internet.
+  SMTP_URL: ${SMTP_URL:-smtp://mailpit:1025}
+  SMTP_FROM: ${SMTP_FROM:-capital-cortex@inspironics.net}
+  INTERNAL_EMAIL_DOMAINS: '${INTERNAL_EMAIL_DOMAINS:-["inspironics.net"]}'
+  ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+
+services:
+  # ---------------- data ----------------
+  postgres:
+    build: ./postgres
+    image: capital-cortex/postgres:16-age1.5.0-pgvector0.8.0
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cortex-dev-pw}
+      POSTGRES_DB: cortex
+    # WAL archiving (D-031, RUNBOOK §8): a finished segment is gzipped into the `pgwal` volume and
+    # archive_timeout forces a segment switch at least every 14 min, so RPO ≤ 15 min even on a quiet
+    # database; `wal-shipper` copies the archive to MinIO cortex-backups/wal/ every 30 s.
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=512MB", "-c", "wal_level=replica",
+              "-c", "archive_mode=on", "-c", "archive_timeout=840",
+              "-c", "archive_command=/usr/local/bin/archive-wal.sh %p %f"]
+    ports: ["${PG_PORT:-55432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data, pgwal:/var/lib/postgresql/wal-archive]
+    shm_size: 1gb  # Docker's 64 MB /dev/shm is too small for parallel query / VACUUM on large tables
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U cortex -d cortex"]  # TCP: the init-time temp server is socket-only
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  wal-shipper:  # D-031: mirrors archived WAL to MinIO (not in `make up`'s list: `make backup` starts it)
+    image: capital-cortex/minio-init:dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do sleep 2; done
+        mc mb --ignore-existing local/cortex-backups >/dev/null
+        echo "wal-shipper: mirroring /wal -> cortex-backups/wal every 30 s"
+        while true; do
+          mc mirror --quiet --exclude "*.part" /wal local/cortex-backups/wal >/dev/null 2>/tmp/err \
+            && date +%s > /tmp/last_ok || { echo "wal-shipper: mirror failed"; cat /tmp/err; }
+          sleep 30
+        done
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cortex}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cortex-dev-minio}
+    volumes: ["pgwal:/wal:ro"]
+    depends_on: [minio]
+    restart: unless-stopped
+    healthcheck:  # unhealthy when the last successful mirror is older than 5 min
+      test: ["CMD-SHELL", "test -f /tmp/last_ok && test $$(( $$(date +%s) - $$(cat /tmp/last_ok) )) -lt 300"]
+      interval: 60s
+      retries: 3
+      start_period: 60s
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports: ["${REDIS_PORT:-56379}:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  minio:
+    # MinIO stopped publishing community images to Docker Hub/quay (D-014); Chainguard build, digest-pinned.
+    image: cgr.dev/chainguard/minio@sha256:71674988a1c7ddd5724928633199152b11e4ddefd6c6ce2d60772ff4a8f22ca9
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cortex}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cortex-dev-minio}
+    ports: ["${MINIO_PORT:-9300}:9000", "${MINIO_CONSOLE_PORT:-9301}:9001"]
+    volumes: [miniodata:/data]
+
+  minio-init:
+    build: ./minio-init
+    image: capital-cortex/minio-init:dev
+    depends_on: [minio]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cortex}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cortex-dev-minio}
+    restart: "no"
+
+  # ---------------- identity / policy / secrets ----------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: cortex
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-cortex-dev-pw}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-kcadmin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-kcadmin-dev-pw}
+      # Browsers and containers must see the same issuer (tokens say iss=http://localhost:<KEYCLOAK_PORT>/...).
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8380}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports: ["${KEYCLOAK_PORT:-8380}:8080"]
+    volumes: ["./keycloak/realm-cortex.json:/opt/keycloak/data/import/realm-cortex.json:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+
+  opa:
+    image: openpolicyagent/opa:0.70.0
+    command: ["run", "--server", "--addr", ":8181", "--log-level", "info", "--ignore", "*_test.rego",
+              "/policies"]
+    environment:
+      CORTEX_MFA_REQUIRED: ${CORTEX_MFA_REQUIRED:-true}
+    ports: ["${OPA_PORT:-8381}:8181"]
+    volumes:
+      - ../config/policies:/policies/cortex:ro
+      - ../config/roles.yaml:/policies/rbac/data.yaml:ro
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--fail", "true"]
+      interval: 10s
+      retries: 10
+
+  vault:
+    image: hashicorp/vault:1.18
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN:-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports: ["${VAULT_PORT:-8382}:8200"]
+
+  # ---------------- observability ----------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.114.0
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes: ["./otel/collector.yaml:/etc/otel/collector.yaml:ro"]
+    depends_on: [tempo, loki]
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes: ["./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro", "tempodata:/var/tempo"]
+
+  loki:
+    image: grafana/loki:3.3.0
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes: ["./loki/loki.yaml:/etc/loki/loki.yaml:ro", "lokidata:/loki"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--web.enable-remote-write-receiver"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    ports: ["${PROMETHEUS_PORT:-9390}:9090"]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafana-dev-pw}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["${GRAFANA_PORT:-3301}:3000"]
+    depends_on: [prometheus, loki, tempo]
+
+  mailpit:  # dev SMTP catcher: the outbox sender's e-mail channel delivers here, nothing leaves the machine
+    image: axllent/mailpit:v1.21
+    ports: ["${MAILPIT_PORT:-8383}:8025"]
+
+  # ---------------- application ----------------
+  migrate:
+    build: {context: .., dockerfile: infra/api/Dockerfile}
+    image: capital-cortex/api:dev
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    image: capital-cortex/api:dev
+    command: ["uvicorn", "cortex.l8_actuation.api.app:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment: *app-env
+    ports: ["${API_PORT:-8300}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      opa: {condition: service_started}
+      keycloak: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 10s
+      retries: 20
+
+  worker:
+    image: capital-cortex/api:dev
+    command: ["python", "-m", "cortex.worker"]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: capital-cortex-worker
+      WORKER_CLIENT_ID: cortex-worker
+      WORKER_CLIENT_SECRET: ${WORKER_CLIENT_SECRET:-dev-worker-secret-change-me}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  web:
+    build: {context: ../apps/web, dockerfile: ../../infra/web/Dockerfile}
+    image: capital-cortex/web:dev
+    environment:
+      OIDC_AUTHORITY: http://localhost:${KEYCLOAK_PORT:-8380}/realms/cortex
+      OIDC_CLIENT_ID: cortex-web
+      DEMO_MODE: ${DEMO_MODE:-false}
+    ports: ["${WEB_PORT:-3300}:8080"]
+    depends_on: [api]
+
+  # ---------------- load test (profile `load`, `make load`; never started by `make up`) ----------------
+  # A separate Postgres server holds the 1M-node synthetic seed, so the live `cortex` database, its WAL
+  # archive and its backups never see load-test data. Same image and server settings as `postgres`
+  # (archiving off; a larger max_wal_size only speeds up the bulk seed).
+  postgres-load:
+    image: capital-cortex/postgres:16-age1.5.0-pgvector0.8.0
+    profiles: ["load"]
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cortex-dev-pw}
+      POSTGRES_DB: cortex_load
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=512MB", "-c", "wal_level=replica",
+              "-c", "max_wal_size=8GB", "-c", "maintenance_work_mem=512MB"]
+    volumes: [pgload:/var/lib/postgresql/data]
+    shm_size: 1gb
+    mem_limit: 2g  # the Docker VM is shared with other stacks: an OOM here must stay in this container
+    memswap_limit: 2g  # no swap: memory pressure must not spill into the shared VM
+    cpus: 6
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U cortex -d cortex_load"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate-load:
+    image: capital-cortex/api:dev
+    profiles: ["load"]
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql+psycopg://cortex:${POSTGRES_PASSWORD:-cortex-dev-pw}@postgres-load:5432/cortex_load
+    depends_on:
+      postgres-load: {condition: service_healthy}
+    restart: "no"
+
+  api-load:  # second API instance for k6, same image and settings as `api`, pointed at the load database
+    image: capital-cortex/api:dev
+    profiles: ["load"]
+    command: ["uvicorn", "cortex.l8_actuation.api.app:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql+psycopg://cortex:${POSTGRES_PASSWORD:-cortex-dev-pw}@postgres-load:5432/cortex_load
+      REDIS_URL: redis://redis:6379/1
+      SERVICE_NAME: capital-cortex-api-load
+    ports: ["${LOAD_API_PORT:-8384}:8000"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 2
+    depends_on:
+      postgres-load: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 10s
+      retries: 20
+
+volumes:
+  pgdata:
+  pgwal:
+  pgload:
+  redisdata:
+  miniodata:
+  tempodata:
+  lokidata:

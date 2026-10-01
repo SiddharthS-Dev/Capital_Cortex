@@ -1,0 +1,9 @@
+name: debt
+title: Debt Agent
+role: Debt facilities and lender fit, including equipment finance and revenue-based financing.
+goal: Compare the facility with the organisation's indicative debt capacity and with peer terms.
+tools: [opportunity_read, financial_snapshot_read, debt_capacity, terms_compare]
+model_tier: mid
+budget_tokens: 12000
+triggers: {classes: [debt_facility, equipment_finance, revenue_based_financing], tasks: [council]}
+output_schema: claims_v1

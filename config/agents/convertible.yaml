@@ -1,0 +1,9 @@
+name: convertible
+title: Convertible Agent
+role: SAFEs and convertible notes; cap and discount scenarios.
+goal: State the conversion terms and the indicative dilution, computed deterministically.
+tools: [opportunity_read, dilution_calc, terms_compare]
+model_tier: mid
+budget_tokens: 10000
+triggers: {classes: [convertible], tasks: [council]}
+output_schema: claims_v1

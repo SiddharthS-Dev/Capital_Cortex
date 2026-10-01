@@ -1,0 +1,22 @@
+# Capital Opportunity Score, canonical SyRS profile (R1). score = Σ(wᵢ·fᵢ)/Σ(wᵢ) over factors WITH evidence;
+# completeness = Σw(available)/Σw(all weighted). Missing factors are gaps, never imputed (I1).
+name: syrs_default
+version: 1
+description: SyRS canonical nine factors; LLD-only factors present at weight 0 (enable in Scoring Studio).
+factors:
+  strategic_fit:          {weight: 0.15}
+  technology_alignment:   {weight: 0.12, params: {full_match_cosine: 0.35}}
+  geography:              {weight: 0.08, params: {same_region: 0.6, hard_gate_classes: [grant, government_program]}}
+  stage:                  {weight: 0.12}
+  funding_size:           {weight: 0.10}
+  esg_relevance:          {weight: 0.08}
+  relationship_strength:  {weight: 0.12}
+  probability_of_success: {weight: 0.13}
+  timing:                 {weight: 0.10}
+  thesis_match:           {weight: 0.0, params: {full_match_cosine: 0.35}}
+  cost_dilution:          {weight: 0.0, inverse: true, params: {full_dilution_pct: 25}}
+  strategic_value:        {weight: 0.0}
+thresholds:
+  high: 0.70              # ≥ → council + human review
+  watchlist: 0.45         # 0.45–0.70 → watchlist; below → archive with reason
+  min_completeness: 0.60  # below → "Insufficient evidence", never routed above watchlist

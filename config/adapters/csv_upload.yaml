@@ -1,0 +1,28 @@
+# Upload CSV/XLSX lists (opportunities, investor lists, CRM exports). Headers are matched case-insensitively.
+key: csv_upload
+name: CSV / XLSX upload
+kind: file
+adapter: tabular
+enabled: true
+terms_note: User-supplied files. The uploader is responsible for the right to use the data.
+respect_robots: false
+max_items: 5000
+case_insensitive_keys: true
+mapping:
+  external_id: [id, external_id, reference, ref]
+  title: [title, opportunity, name, program, programme, fund_name]
+  description: [description, summary, notes, thesis]
+  url: [url, link, website]
+  counterparty_name: [organization, organisation, counterparty, investor, funder, agency, company]
+  counterparty_kind: [counterparty_kind, organization_type, org_type]
+  counterparty_country: [hq_country, organization_country]
+  countries: [country, countries, geography, eligible_countries, region]
+  deadline: [deadline, close_date, due_date, closing_date]
+  open_date: [open_date, start_date]
+  amount_min: [amount_min, min_amount, ticket_min, award_floor, min]
+  amount_max: [amount_max, max_amount, ticket_max, award_ceiling, amount, max]
+  currency: [currency, ccy]
+  class_hint: [class, type, instrument, capital_class]
+  stage_fit: [stage, stages, stage_fit]
+  sectors: [sector, sectors, industry, focus]
+  investor_type: [investor_type]

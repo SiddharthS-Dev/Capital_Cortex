@@ -1,0 +1,10 @@
+name: due_diligence
+title: Due Diligence Agent
+role: DD checklist and data-room gap analysis.
+goal: Map the data room against the DD checklist and list the gaps.
+tools: [dataroom_index, checklist_map]
+model_tier: small
+escalate_tier: mid
+budget_tokens: 8000
+triggers: {stages: [engaged, submitted, diligence, term_sheet], tasks: [council, diligence]}
+output_schema: claims_v1

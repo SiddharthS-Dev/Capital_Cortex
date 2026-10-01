@@ -1,0 +1,23 @@
+# Mailbox (IMAP, read-only, headers only). Opt-in: fill host/username, put the password in Vault or the
+# environment and point auth_ref at it, list your own addresses in self_addresses, then enable.
+key: mailbox_imap
+name: Mailbox (IMAP, read-only)
+kind: mailbox
+adapter: imap
+enabled: false
+schedule: "*/15 * * * *"
+terms_note: Your own mailbox, read-only and headers only (no bodies, no attachments). Only messages with known contacts are used.
+auth_ref: env:MAILBOX_IMAP_PASSWORD
+request:
+  host: imap.example.org
+  port: 993
+  username: founder@inspironics.net
+  folders: [INBOX, Sent]
+  since_days: 30
+  self_addresses: [founder@inspironics.net]
+respect_robots: false
+max_items: 2000
+mapping:
+  external_id: external_id
+  title: subject
+  published_at: occurred_at

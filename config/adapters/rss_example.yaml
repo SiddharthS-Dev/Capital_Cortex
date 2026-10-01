@@ -1,0 +1,20 @@
+# Template for any RSS/Atom feed of funding calls or investor news. Disabled until a feed is chosen and its
+# terms are checked (R11). Copy this file, set key/urls/terms_note, and enable it from Sources & Ingestion.
+key: rss_example
+name: RSS feed (template)
+kind: rss
+adapter: rss
+enabled: false
+schedule: "0 * * * *"
+terms_note: Template only. Set the feed URL and confirm the publisher's terms allow automated reading.
+urls: ["https://example.org/funding.rss"]
+rate_limit: {min_interval_seconds: 2.0}
+respect_robots: true
+max_items: 100
+mapping:
+  external_id: [id, link]
+  title: title
+  description: [summary, description]
+  url: link
+  published_at: [published, updated]
+  counterparty_name: feed_title

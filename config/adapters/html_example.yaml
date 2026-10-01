@@ -1,0 +1,24 @@
+# Template for an HTML listing page of funding calls (robots.txt and the rate limit always apply, R11).
+# Disabled until a page is chosen and its terms allow automated reading.
+key: html_example
+name: HTML listing page (template)
+kind: html
+adapter: html
+enabled: false
+schedule: "0 6 * * *"
+terms_note: Template only. Confirm the site terms allow automated reading; robots.txt is honoured.
+urls: ["https://example.org/funding-calls"]
+rate_limit: {min_interval_seconds: 3.0}
+respect_robots: true
+max_items: 100
+request:
+  selectors:
+    item: "article.call"
+    fields: {title: "h2", url: "h2 a@href", description: ".summary", deadline: ".deadline", funder: ".funder"}
+mapping:
+  external_id: url
+  title: title
+  description: description
+  url: url
+  deadline: deadline
+  counterparty_name: funder

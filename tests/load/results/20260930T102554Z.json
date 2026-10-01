@@ -1,0 +1,140 @@
+{
+  "at": "2026-09-30T10:25:53.506810+00:00",
+  "duration": "5m",
+  "endpoints": {
+    "dashboard_executive": {
+      "count": 91,
+      "error_rate": 0,
+      "max_ms": 8823,
+      "p50_ms": 1578,
+      "p95_ms": 5199,
+      "p99_ms": 8400,
+      "pass": false,
+      "slo_p95_ms": 3000
+    },
+    "graph_neighbourhood": {
+      "count": 271,
+      "error_rate": 0,
+      "max_ms": 1824,
+      "p50_ms": 59,
+      "p95_ms": 345,
+      "p99_ms": 804,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths": {
+      "count": 181,
+      "error_rate": 0,
+      "max_ms": 943,
+      "p50_ms": 73,
+      "p95_ms": 289,
+      "p99_ms": 807,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:connected": {
+      "count": 138,
+      "error_rate": null,
+      "max_ms": 943,
+      "p50_ms": 78,
+      "p95_ms": 298,
+      "p99_ms": 865,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:random": {
+      "count": 15,
+      "error_rate": null,
+      "max_ms": 295,
+      "p50_ms": 39,
+      "p95_ms": 173,
+      "p99_ms": 270,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "graph_paths:warm_intro": {
+      "count": 28,
+      "error_rate": null,
+      "max_ms": 440,
+      "p50_ms": 64,
+      "p95_ms": 180,
+      "p99_ms": 382,
+      "pass": true,
+      "slo_p95_ms": 5000
+    },
+    "opportunities_list": {
+      "count": 450,
+      "error_rate": 0,
+      "max_ms": 7025,
+      "p50_ms": 841,
+      "p95_ms": 3284,
+      "p99_ms": 6437,
+      "pass": false,
+      "slo_p95_ms": 3000
+    },
+    "rescore": {
+      "count": 271,
+      "error_rate": 0,
+      "max_ms": 1043,
+      "p50_ms": 100,
+      "p95_ms": 385,
+      "p99_ms": 819,
+      "pass": true,
+      "slo_p95_ms": 10000
+    }
+  },
+  "graph": {
+    "edges": {
+      "DERIVED_FROM": 200000,
+      "INTRODUCED": 100000,
+      "KNOWS": 200300,
+      "MANAGES": 20000,
+      "MENTIONS": 190000,
+      "OFFERS": 210000,
+      "PART_OF": 30000,
+      "RELATES_TO": 50000
+    },
+    "edges_total": 1000300,
+    "relational": {
+      "contact": 200000,
+      "db_size": "2782 MB",
+      "entity": 1000000,
+      "opportunity": 200000,
+      "organization": 150000,
+      "relationship": 200000,
+      "relationship_edge": 1000300,
+      "signal": 390000
+    },
+    "vertices": {
+      "Contact": 200000,
+      "Fund": 20000,
+      "GrantProgram": 10000,
+      "Investor": 30000,
+      "Opportunity": 200000,
+      "Organization": 150000,
+      "Signal": 390000
+    },
+    "vertices_total": 1000000
+  },
+  "hardware": {
+    "docker_cpus": "16",
+    "docker_mem_bytes": "7918927872"
+  },
+  "k6_exit": 99,
+  "label": "",
+  "memory_guard": {
+    "min_available_mb": 2547,
+    "tripped": null
+  },
+  "mode": "rate",
+  "rate_mult": 3.0,
+  "sampled": {
+    "neighbourhood_hubs": 20,
+    "paths_connected": 600,
+    "paths_random": 50,
+    "paths_warm": 100
+  },
+  "scenarios": "all",
+  "timeout": "120s",
+  "vus": 1
+}

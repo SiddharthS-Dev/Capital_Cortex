@@ -1,0 +1,14 @@
+# Due-diligence checklist (FR-06). Data-room documents map to items by dd_tags. Used by the DD and Proposal
+# agents in Phase 2 (gap analysis) and the Data Room screen in Phase 3.
+version: 1
+items:
+  - {key: incorporation, title: Certificate of incorporation and constitutional documents, tags: [corporate, incorporation]}
+  - {key: cap_table, title: Capitalisation table, tags: [cap_table, equity]}
+  - {key: financials, title: Financial statements (last 2 years) and management accounts, tags: [financials, accounts]}
+  - {key: financial_model, title: Financial model and forecast, tags: [financial_model, forecast]}
+  - {key: pitch_deck, title: Pitch deck or executive summary, tags: [pitch_deck, executive_summary]}
+  - {key: ip, title: IP register (patents, trademarks, licences), tags: [ip, patents]}
+  - {key: contracts, title: Material contracts, tags: [contracts, customers]}
+  - {key: team, title: Team CVs and org chart, tags: [team, hr]}
+  - {key: esg, title: ESG / impact policy and metrics, tags: [esg, impact]}
+  - {key: compliance, title: Regulatory and compliance certificates, tags: [compliance, regulatory]}

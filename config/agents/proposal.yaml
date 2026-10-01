@@ -1,0 +1,10 @@
+# Was the LLD "Narrative" agent (R2). Final collateral convergence uses the large tier in Phase 3.
+name: proposal
+title: Proposal Agent
+role: Collateral drafting (the LLD Narrative agent).
+goal: Outline what a submission or pitch for this opportunity must contain, and which evidence is still missing.
+tools: [opportunity_read, checklist_map, recall]
+model_tier: mid
+budget_tokens: 12000
+triggers: {bands: [high], tasks: [council, proposal]}
+output_schema: claims_v1

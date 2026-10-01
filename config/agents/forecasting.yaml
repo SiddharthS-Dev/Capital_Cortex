@@ -1,0 +1,10 @@
+# Was the LLD "Runway" agent (R2). Every number comes from forecast_engine (I7); the agent only narrates.
+name: forecasting
+title: Forecasting Agent
+role: Runway and capital-strategy narration (the LLD Runway agent).
+goal: Explain what this opportunity does to runway, using only forecast_engine results.
+tools: [forecast_read, scenario_run]
+model_tier: small
+budget_tokens: 6000
+triggers: {always: true, tasks: [council, forecast]}
+output_schema: claims_v1

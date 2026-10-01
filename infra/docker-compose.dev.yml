@@ -1,0 +1,22 @@
+# Dev override: mount the source tree into the app containers so code changes need a restart, not a rebuild.
+# make/make.ps1 include this file unless CORTEX_PROFILE=prod.
+services:
+  api:
+    command: ["uvicorn", "cortex.l8_actuation.api.app:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*", "--reload", "--reload-dir", "/app/cortex",
+              "--reload-dir", "/app/platform_core"]
+    volumes: &src
+      - ../cortex:/app/cortex:ro
+      - ../platform_core:/app/platform_core:ro
+      - ../config:/app/config:ro
+      - ../migrations:/app/migrations:ro
+      - ../seed:/app/seed:ro
+  worker:
+    volumes: *src
+  migrate:
+    volumes: *src
+  # load profile (make load): run the same source as `api`, without --reload
+  migrate-load:
+    volumes: *src
+  api-load:
+    volumes: *src

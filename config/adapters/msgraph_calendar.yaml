@@ -1,0 +1,20 @@
+# Microsoft 365 calendar via Graph (read-only). Opt-in: application permission Calendars.ReadBasic (admin consent).
+key: msgraph_calendar
+name: Microsoft 365 calendar (Graph, read-only)
+kind: calendar
+adapter: msgraph_calendar
+enabled: false
+schedule: "*/30 * * * *"
+terms_note: Your own tenant, read-only metadata. Only meetings attended by known contacts are used.
+auth_ref: env:MSGRAPH_CLIENT_SECRET
+request:
+  tenant_id: 00000000-0000-0000-0000-000000000000
+  client_id: 00000000-0000-0000-0000-000000000000
+  mailboxes: [founder@inspironics.net]
+  since_days: 60
+respect_robots: false
+max_items: 2000
+mapping:
+  external_id: external_id
+  title: subject
+  published_at: occurred_at

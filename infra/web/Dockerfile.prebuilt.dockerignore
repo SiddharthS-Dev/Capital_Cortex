@@ -1,0 +1,4 @@
+# Dockerfile.prebuilt packages the host-built dist/, so unlike apps/web/.dockerignore it must not exclude it.
+*
+!dist
+!nginx

@@ -1,0 +1,462 @@
+# SyRS → OCIF layer → modules → endpoints → UI screens → tests (§15).
+# scripts/check_traceability.py fails CI if any item has no linked test, or if a linked test does not exist.
+version: 1
+items:
+  FR-01:
+    title: Continuous discovery of capital opportunities
+    layer: L1
+    phase: 1
+    modules:
+    - cortex.l1_perception
+    - cortex.l1_perception.adapters.msgraph
+    endpoints:
+    - POST /v1/signals
+    - GET /v1/sources
+    - PATCH /v1/sources/{id}
+    - POST /v1/sources/{id}/run
+    - POST /v1/sources/{id}/upload
+    - POST /v1/sources/{id}/entries
+    - GET /v1/sources/{id}/runs
+    - GET /v1/ingestion/dlq
+    - POST /v1/ingestion/dlq/{dlq_id}/replay
+    - GET /v1/events/stream
+    - POST /v1/sources/{id}/upload (ics)
+    screens:
+    - sources
+    - radar
+    tests:
+    - tests/unit/test_l1_l2.py::test_grants_gov_normalization
+    - tests/unit/test_l1_l2.py::test_tabular_csv_and_normalize
+    - tests/unit/test_l1_l2.py::test_content_hash_changes_with_content_only
+    - tests/unit/test_bus.py::test_retry_then_dlq
+    - tests/unit/test_bus.py::test_dlq_replay
+    - tests/integration/test_api_flow.py::test_phase1_definition_of_done
+    - apps/web/e2e/phase1.spec.ts::screens render real data end to end
+    - tests/unit/test_phase2_adapters.py::test_ics_parse_and_normalize
+    - tests/unit/test_phase2_adapters.py::test_imap_headers_only
+    - tests/unit/test_phase2_adapters.py::test_html_adapter_honours_robots
+    - tests/unit/test_phase2_adapters.py::test_html_extract_selectors
+    - tests/unit/test_phase3_assets.py::test_graph_mail_and_event_items
+    - tests/unit/test_phase3_assets.py::test_graph_mail_adapter_fetches_with_client_credentials
+  FR-02:
+    title: Classification and the Capital Knowledge Graph
+    layer: L2
+    phase: 1
+    modules:
+    - cortex.l2_representation
+    - platform_core.db.age
+    - platform_core.db.vector
+    - cortex.l2_representation.graph_traversal
+    endpoints:
+    - GET /v1/graph/query
+    - GET /v1/graph/paths
+    - GET /v1/graph/stats
+    - GET /v1/entities/merge-queue
+    - POST /v1/entities/merge-queue
+    - POST /v1/entities/{id}/merge
+    - POST /v1/entities/{id}/unmerge
+    screens:
+    - graph
+    - radar
+    - admin
+    tests:
+    - tests/unit/test_l1_l2.py::test_classifier_rules
+    - tests/unit/test_l1_l2.py::test_ambiguous_programme_reports_low_confidence_and_runner_up
+    - tests/unit/test_l1_l2.py::test_typer_tags
+    - tests/unit/test_l1_l2.py::test_resolver_normalization_and_similarity
+    - tests/integration/test_pipeline.py::test_signal_becomes_scored_opportunity_in_graph
+    - tests/integration/test_pipeline.py::test_revised_listing_updates_same_opportunity_and_keeps_human_class
+    - tests/integration/test_pipeline.py::test_same_counterparty_resolves_to_one_organization
+    - tests/integration/test_schema.py::test_pgvector_hnsw_search
+    - evals/run.py::classification_accuracy
+    - tests/integration/test_graph_traversal.py::test_neighbourhood_and_paths_match_cypher
+  FR-03:
+    title: Capital Opportunity Score (configurable, explainable)
+    layer: L4
+    phase: 1
+    modules:
+    - cortex.l4_reasoning
+    - cortex.l4_reasoning.ml_scorer
+    endpoints:
+    - GET /v1/opportunities
+    - GET /v1/opportunities/{id}
+    - PATCH /v1/opportunities/{id}
+    - POST /v1/opportunities/bulk
+    - POST /v1/opportunities/{id}/rescore
+    - GET /v1/scoring/profiles
+    - POST /v1/scoring/profiles
+    - POST /v1/scoring/profiles/{id}/activate
+    - POST /v1/scoring/preview
+    - GET /v1/scoring/backtest
+    - GET /v1/organization/self
+    - PUT /v1/organization/self
+    - GET /v1/ml/models
+    - POST /v1/ml/models/train
+    screens:
+    - radar
+    - scoring
+    tests:
+    - tests/unit/test_scoring.py::test_formula_and_completeness
+    - tests/unit/test_scoring.py::test_insufficient_evidence_band
+    - tests/unit/test_scoring.py::test_gate_forces_archive
+    - tests/unit/test_scoring.py::test_missing_profile_yields_gaps_not_values
+    - tests/unit/test_scoring.py::test_monotonicity_raising_a_factor_never_lowers_score
+    - tests/integration/test_pipeline.py::test_profile_enables_scoring
+    - tests/integration/test_api_flow.py::test_phase1_definition_of_done
+    - evals/run.py::scoring_sanity
+    - tests/unit/test_phase2_agents.py::test_featurize_uses_missing_indicators_never_imputation
+    - tests/unit/test_phase2_agents.py::test_calibration_bins
+    - tests/unit/test_phase2_agents.py::test_calibrated_model_learns_signal_on_synthetic_data
+    - tests/integration/test_phase2_flow.py::test_alerts_and_outcomes_feedback_edge
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - tests/integration/test_feedback_loop.py::test_trains_on_decision_time_factors_and_promotes_only_better_models
+  FR-04:
+    title: Relationship intelligence
+    layer: L3
+    phase: 2
+    modules:
+    - cortex.l3_memory.relationship_service
+    - cortex.l3_memory.warmth
+    - cortex.l3_memory.recall_api
+    - cortex.l3_memory.memory_manager
+    - cortex.l3_memory.consolidation_job
+    - cortex.l3_memory.interaction_ingest
+    endpoints:
+    - GET /v1/contacts
+    - POST /v1/contacts
+    - GET /v1/contacts/{id}
+    - GET /v1/meetings
+    - POST /v1/meetings
+    - POST /v1/interactions
+    - GET /v1/relationships
+    - POST /v1/relationships
+    - GET /v1/milestones
+    - POST /v1/milestones
+    - PATCH /v1/milestones/{id}
+    - GET /v1/relationships/{contact_id}/timeline
+    - GET /v1/recall
+    - POST /v1/contacts/{id}/draft-follow-up
+    screens:
+    - relationships
+    tests:
+    - tests/unit/test_phase2_agents.py::test_warmth_hand_computed
+    - tests/unit/test_phase2_agents.py::test_warmth_decays_and_gaps
+    - tests/unit/test_phase2_agents.py::test_sparkline_is_oldest_first_and_monotone_with_new_touch
+    - tests/integration/test_phase2_flow.py::test_phase2_definition_of_done
+    - apps/web/e2e/phase2.spec.ts::analyst runs the council from the UI and sees the live deliberation
+  FR-05:
+    title: Proposal Factory (collateral generation)
+    layer: L8
+    phase: 3
+    modules:
+    - cortex.l8_actuation
+    - cortex.l8_actuation.proposal_builder
+    - cortex.l8_actuation.asset_generator
+    - cortex.l8_actuation.proposals
+    - cortex.l7_governance.compliance_check
+    endpoints:
+    - POST /v1/proposals/{id}/generate
+    - GET /v1/proposals/{id}/export
+    - GET /v1/proposals/catalogue
+    - GET /v1/proposals
+    - POST /v1/proposals
+    - GET /v1/proposals/{id}
+    - GET /v1/proposals/{id}/versions/{version}
+    - PUT /v1/proposals/{id}/sections/{key}
+    - POST /v1/proposals/{id}/sections/{key}/gaps/{gap_id}/resolve
+    - POST /v1/proposals/{id}/sections/{key}/gaps/{gap_id}/waive
+    - GET /v1/proposals/{id}/preview
+    - POST /v1/proposals/{id}/submit
+    - POST /v1/proposals/{id}/send
+    screens:
+    - proposals
+    tests:
+    - tests/contract/test_openapi_contract.py::test_api_contract
+    - tests/unit/test_phase3_assets.py::test_citation_numbering_and_appendix
+    - tests/unit/test_phase3_assets.py::test_waived_gap_renders_as_waived_not_required
+    - tests/unit/test_phase3_assets.py::test_docx_has_markers_gaps_and_appendix
+    - tests/unit/test_phase3_assets.py::test_pptx_has_section_slides_and_appendix
+    - tests/unit/test_phase3_assets.py::test_html_escapes_and_marks
+    - tests/unit/test_phase3_assets.py::test_financial_model_uses_live_formulas
+    - tests/unit/test_phase3_assets.py::test_financial_model_without_inputs_flags_gaps
+    - tests/unit/test_phase3_assets.py::test_budget_and_dd_checklist_formulas
+    - tests/unit/test_phase3_assets.py::test_compose_turns_missing_profile_inputs_into_gaps
+    - tests/unit/test_phase3_assets.py::test_all_eight_artefacts_are_covered_by_packages
+    - tests/unit/test_phase3_assets.py::test_compliance_rules_cite_spans
+    - tests/unit/test_phase3_assets.py::test_compliance_review_blocks_on_blocker
+    - tests/unit/test_phase3_assets.py::test_collateral_gaps_never_quote_stripped_claims
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - 'apps/web/e2e/phase3.spec.ts::analyst: packages, data room, board reports, forecast and Copilot'
+  FR-06:
+    title: Data room and DD packaging
+    layer: L8
+    phase: 3
+    modules:
+    - cortex.l8_actuation
+    - cortex.l8_actuation.dataroom
+    - cortex.l1_perception.adapters.dataroom_watcher
+    endpoints:
+    - GET /v1/dataroom/documents
+    - POST /v1/dataroom/packages
+    - GET /v1/dataroom/packages/{id}/manifest
+    - POST /v1/dataroom/documents
+    - GET /v1/dataroom/documents/{id}
+    - PATCH /v1/dataroom/documents/{id}
+    - GET /v1/dataroom/documents/{id}/download
+    - GET /v1/dataroom/checklist
+    - GET /v1/dataroom/access-log
+    - GET /v1/dataroom/packages
+    - GET /v1/dataroom/packages/{id}/download
+    - POST /v1/dataroom/packages/{id}/share
+    - POST /v1/dataroom/share-links/{id}/revoke
+    - GET /v1/share/{token}
+    screens:
+    - dataroom
+    tests:
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - 'apps/web/e2e/phase3.spec.ts::analyst: packages, data room, board reports, forecast and Copilot'
+  FR-07:
+    title: Dashboards, runway forecasting, weighted pipeline
+    layer: L5/L8
+    phase: 1
+    modules:
+    - cortex.l5_strategy
+    - cortex.l8_actuation
+    - cortex.l8_actuation.board_reports
+    - cortex.l5_strategy.copilot
+    endpoints:
+    - GET /v1/dashboards/{name}
+    - GET /v1/forecasts
+    - POST /v1/forecasts
+    - POST /v1/forecasts/scenarios/run
+    - GET /v1/forecasts/snapshots
+    - POST /v1/forecasts/snapshots/preview
+    - POST /v1/forecasts/snapshots/import
+    - GET /v1/calendar/events
+    - GET /v1/calendar/export.ics
+    - GET /v1/board-reports
+    - POST /v1/board-reports
+    - GET /v1/board-reports/{id}
+    - GET /v1/board-reports/{id}/export
+    - GET /v1/board-reports/{id}/preview
+    - PUT /v1/board-reports/{id}/recipients
+    - POST /v1/board-reports/{id}/submit
+    - POST /v1/copilot/ask
+    - GET /v1/copilot/suggestions
+    screens:
+    - command-center
+    - forecast
+    - calendar
+    - board-reports
+    - copilot
+    tests:
+    - tests/unit/test_forecast.py::test_base_runway_hand_computed
+    - tests/unit/test_forecast.py::test_insufficient_data_without_inputs
+    - tests/unit/test_forecast.py::test_downside_burn_and_inflows
+    - tests/unit/test_forecast.py::test_hires_and_raise
+    - tests/integration/test_api_flow.py::test_phase1_definition_of_done
+    - tests/integration/test_phase2_flow.py::test_alerts_and_outcomes_feedback_edge
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - 'apps/web/e2e/phase3.spec.ts::analyst: packages, data room, board reports, forecast and Copilot'
+    - tests/unit/test_scan_regressions.py::test_forecast_buckets_inflows_and_caps_detail
+  FR-08:
+    title: Alerts
+    layer: L8
+    phase: 2
+    modules:
+    - cortex.l8_actuation.alerts
+    endpoints:
+    - GET /v1/alerts
+    - POST /v1/alerts
+    - POST /v1/alerts/{id}/ack
+    - POST /v1/alerts/{id}/snooze
+    - POST /v1/alerts/{id}/assign
+    - POST /v1/alerts/{id}/resolve
+    - POST /v1/alerts/evaluate
+    - GET /v1/alert-rules
+    - POST /v1/alert-rules
+    - PATCH /v1/alert-rules/{id}
+    screens:
+    - alerts
+    tests:
+    - tests/unit/test_phase2_agents.py::test_alert_rule_validation
+    - tests/integration/test_phase2_flow.py::test_alerts_and_outcomes_feedback_edge
+  SyRS-7:
+    title: 13-agent capital council
+    layer: L6
+    phase: 2
+    modules:
+    - cortex.l6_agency.orchestrator
+    - cortex.l6_agency.agent_runtime
+    - cortex.l6_agency.tool_registry
+    - cortex.l6_agency.concurrency_governor
+    - cortex.l6_agency.agent_config
+    - platform_core.llm
+    endpoints:
+    - GET /v1/agents
+    - POST /v1/agents/run
+    - GET /v1/agents/runs
+    - GET /v1/agents/runs/{id}
+    - GET /v1/agents/runs/{id}/stream
+    - GET /v1/recommendations
+    - GET /v1/recommendations/{id}
+    - PATCH /v1/recommendations/{id}
+    screens:
+    - council
+    tests:
+    - tests/unit/test_llm.py::test_daily_cap_blocks
+    - tests/unit/test_llm.py::test_feature_cap_blocks
+    - tests/unit/test_llm.py::test_untrusted_wrapper_strips_injection
+    - tests/unit/test_phase2_agents.py::test_thirteen_syrs_agents_with_declared_tools
+    - tests/unit/test_phase2_agents.py::test_tool_calls_must_match_declared_registry
+    - tests/unit/test_phase2_agents.py::test_plan_fans_out_by_class_stage_and_band
+    - tests/unit/test_phase2_agents.py::test_governor_caps_parallelism
+    - tests/unit/test_phase2_agents.py::test_governor_limits_and_budgets
+    - tests/unit/test_phase2_agents.py::test_tally_is_confidence_weighted_and_failed_agents_abstain
+    - tests/unit/test_phase2_agents.py::test_confidence_is_computed_not_generated
+    - tests/integration/test_phase2_flow.py::test_phase2_definition_of_done
+  SyRS-10:
+    title: Security (identity, MFA, zero trust, secrets)
+    layer: L7
+    phase: 0
+    modules:
+    - platform_core.auth
+    - platform_core.policy
+    - platform_core.secrets
+    endpoints:
+    - GET /v1/me
+    - GET /v1/admin/users
+    - PUT /v1/admin/users
+    screens:
+    - admin
+    tests:
+    - tests/unit/test_auth.py::test_forged_signature_rejected
+    - tests/unit/test_auth.py::test_hs256_alg_confusion_rejected
+    - tests/unit/test_auth.py::test_mfa_required_roles
+    - tests/unit/test_auth.py::test_step_up
+    - tests/unit/test_auth.py::test_service_client_scoping
+    - tests/unit/test_opa_client.py::test_fail_closed_on_error
+    - tests/unit/test_api.py::test_admin_without_mfa_blocked
+    - tests/unit/test_api.py::test_step_up_on_approval_decision
+    - config/policies/authz_test.rego::test_admin_without_mfa_denied
+    - tests/unit/test_authz_matrix.py::test_matrix_covers_the_whole_api
+    - tests/unit/test_authz_matrix.py::test_every_endpoint_is_authorised_or_explicitly_public
+    - tests/unit/test_authz_matrix.py::test_role_by_endpoint_matrix
+    - tests/unit/test_authz_matrix.py::test_unauthenticated_requests_are_rejected
+    - 'apps/web/e2e/phase3.spec.ts::admin: Admin screen and audit retention'
+    - tests/unit/test_scan_regressions.py::test_validation_error_with_exception_context_is_a_422_problem
+    - tests/unit/test_scan_regressions.py::test_client_side_data_error_is_a_422
+    - tests/unit/test_scan_regressions.py::test_api_sends_cross_origin_resource_policy
+    - tests/unit/test_scan_regressions.py::test_dlq_replay_rejects_malformed_ids
+    - tests/unit/test_scan_regressions.py::test_copilot_validates_before_streaming
+  SyRS-11:
+    title: Governance and trust (approvals, outbox, audit, explainability)
+    layer: L7
+    phase: 2
+    modules:
+    - platform_core.audit
+    - cortex.l7_governance
+    - cortex.l7_governance.citation_checker
+    - cortex.l7_governance.approval_service
+    - cortex.l7_governance.outbox
+    - cortex.l7_governance.drafts
+    - platform_core.signing
+    - cortex.l7_governance.settings_service
+    - cortex.extensions
+    endpoints:
+    - GET /v1/audit
+    - GET /v1/audit/verify
+    - GET /v1/approvals
+    - GET /v1/approvals/{id}
+    - POST /v1/approvals/{id}/decision
+    - POST /v1/recommendations/{id}/approve
+    - GET /v1/outbox
+    - POST /v1/outbox
+    - PATCH /v1/outbox/{id}
+    - POST /v1/outbox/{id}/request-approval
+    - POST /v1/outbox/{id}/send
+    - GET /v1/admin/policies
+    - PUT /v1/admin/policies
+    - POST /v1/admin/policies/test
+    - GET /v1/admin/budgets
+    - PUT /v1/admin/budgets
+    - GET /v1/admin/llm-router
+    - PUT /v1/admin/llm-router
+    - GET /v1/admin/taxonomy
+    - PUT /v1/admin/taxonomy
+    - GET /v1/admin/extensions
+    screens:
+    - audit
+    - approvals
+    - admin
+    tests:
+    - tests/unit/test_audit_chain.py::test_tampered_meta_detected
+    - tests/unit/test_audit_chain.py::test_relinked_forgery_detected
+    - tests/integration/test_schema.py::test_audit_chain_append_verify_and_immutability
+    - tests/integration/test_schema.py::test_outbox_edit_invalidates_approval
+    - tests/integration/test_schema.py::test_i2_recommendation_needs_evidence
+    - config/policies/governance_test.rego::test_outbound_without_approval_denied
+    - config/policies/governance_test.rego::test_approval_for_other_hash_does_not_count
+    - tests/unit/test_phase2_governance.py::test_supported_claims_pass
+    - tests/unit/test_phase2_governance.py::test_unsupported_claims_are_rejected
+    - tests/unit/test_phase2_governance.py::test_revisions_then_strip_to_gaps
+    - tests/unit/test_phase2_governance.py::test_token_binds_subject_and_hash
+    - tests/unit/test_phase2_governance.py::test_token_expiry_and_key_rules
+    - config/policies/governance_test.rego::test_self_approval_does_not_count
+    - tests/integration/test_phase2_flow.py::test_phase2_definition_of_done
+    - evals/run.py::no_fabrication
+    - apps/web/e2e/phase2.spec.ts::an approver approves with a fresh sign-in and the outbox releases
+    - tests/unit/test_phase3_assets.py::test_settings_validation
+    - tests/unit/test_phase3_assets.py::test_extensions_are_interfaces_only
+    - tests/unit/test_authz_matrix.py::test_sessions_commit_before_the_response
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+  SyRS-12:
+    title: Compliance, provenance and data integrity
+    layer: L7
+    phase: 0
+    modules:
+    - platform_core.audit
+    - cortex.l7_governance
+    - cortex.l7_governance.retention
+    - cortex.l8_actuation.compliance_report
+    endpoints:
+    - GET /v1/audit/verify
+    - GET /v1/admin/retention
+    - PUT /v1/admin/retention
+    - POST /v1/admin/retention/run
+    - GET /v1/audit/compliance-report
+    screens:
+    - audit
+    tests:
+    - tests/integration/test_schema.py::test_i1_provenance_check
+    - tests/integration/test_schema.py::test_i1_inference_path
+    - tests/integration/test_schema.py::test_i6_outcome_label_source
+    - config/policies/governance_test.rego::test_pii_export_denied
+    - tests/integration/test_seed.py::test_seed_then_purge
+    - tests/unit/test_phase2_governance.py::test_content_flags_select_policies
+    - evals/run.py::no_fabrication
+    - tests/unit/test_phase3_assets.py::test_retention_policies_and_audit_immutability
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - 'apps/web/e2e/phase3.spec.ts::admin: Admin screen and audit retention'
+  SyRS-14:
+    title: Acceptance criteria (final demo)
+    layer: L1-L8
+    phase: 3
+    modules:
+    - cortex
+    endpoints: []
+    screens:
+    - command-center
+    - radar
+    - proposals
+    - forecast
+    - relationships
+    - board-reports
+    - approvals
+    tests:
+    - 'apps/web/e2e/shell.spec.ts::auditor: MFA login → role-aware nav → audit chain verifies'
+    - tests/integration/test_api_flow.py::test_phase1_definition_of_done
+    - tests/integration/test_phase2_flow.py::test_phase2_definition_of_done
+    - tests/integration/test_phase3_flow.py::test_phase3_definition_of_done
+    - 'apps/web/e2e/phase3.spec.ts::analyst: packages, data room, board reports, forecast and Copilot'
+    - 'apps/web/e2e/phase3.spec.ts::admin: Admin screen and audit retention'

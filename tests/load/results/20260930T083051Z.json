@@ -1,0 +1,76 @@
+{
+  "at": "2026-09-30T08:30:51.319188+00:00",
+  "duration": "5m",
+  "endpoints": {
+    "opportunities_list": {
+      "count": 324,
+      "error_rate": 0.21296296296296297,
+      "max_ms": 198174,
+      "p50_ms": 15901,
+      "p95_ms": 45427,
+      "p99_ms": 193850,
+      "pass": false,
+      "slo_p95_ms": 3000
+    },
+    "rescore": {
+      "count": 190,
+      "error_rate": 0.3105263157894737,
+      "max_ms": 13104,
+      "p50_ms": 2156,
+      "p95_ms": 9497,
+      "p99_ms": 12439,
+      "pass": true,
+      "slo_p95_ms": 10000
+    }
+  },
+  "graph": {
+    "edges": {
+      "DERIVED_FROM": 200000,
+      "INTRODUCED": 100000,
+      "KNOWS": 200300,
+      "MANAGES": 20000,
+      "MENTIONS": 190000,
+      "OFFERS": 210000,
+      "PART_OF": 30000,
+      "RELATES_TO": 50000
+    },
+    "edges_total": 1000300,
+    "relational": {
+      "contact": 200000,
+      "db_size": "2749 MB",
+      "entity": 1000000,
+      "opportunity": 200000,
+      "organization": 150000,
+      "relationship": 200000,
+      "relationship_edge": 1000300,
+      "signal": 390000
+    },
+    "vertices": {
+      "Contact": 200000,
+      "Fund": 20000,
+      "GrantProgram": 10000,
+      "Investor": 30000,
+      "Opportunity": 200000,
+      "Organization": 150000,
+      "Signal": 390000
+    },
+    "vertices_total": 1000000
+  },
+  "hardware": {
+    "docker_cpus": "16",
+    "docker_mem_bytes": "7918927872"
+  },
+  "k6_exit": 125,
+  "label": "pass A: opportunities list + rescore at target rates",
+  "mode": "rate",
+  "rate_mult": 1.0,
+  "sampled": {
+    "neighbourhood_hubs": 20,
+    "paths_connected": 600,
+    "paths_random": 50,
+    "paths_warm": 100
+  },
+  "scenarios": "opportunities,rescore",
+  "timeout": "120s",
+  "vus": 1
+}
