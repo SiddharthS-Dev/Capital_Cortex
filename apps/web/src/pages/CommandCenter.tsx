@@ -14,9 +14,9 @@ import type { ExecutiveDashboard, Kpi } from "@/lib/types";
 import { usePermission } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
-function KpiTile({ label, kpi, value, sub }: { label: string; kpi: Kpi; value: string; sub?: string }) {
+function KpiTile({ label, kpi, value, sub, title }: { label: string; kpi: Kpi; value: string; sub?: string; title?: string }) {
   const body = (
-    <Card className="h-full transition-colors hover:border-primary/50">
+    <Card className="h-full transition-colors hover:border-primary/50" title={title}>
       <CardContent className="space-y-1 p-4">
         <div className="text-xs font-medium text-muted-foreground">{label}</div>
         <div className={cn("text-2xl font-semibold tabular-nums", kpi.gap && "text-muted-foreground")}>{kpi.gap ? "—" : value}</div>
@@ -116,6 +116,11 @@ export function CommandCenter() {
   if (q.isError || !d) return <ErrorState error={q.error} />;
   const k = d.kpis;
   const rw = k.runway;
+  const wpBy = (k.weighted_pipeline.by_currency as Record<string, number> | undefined) ?? {};
+  const wpCcys = Object.keys(wpBy);
+  const wpCombined = k.weighted_pipeline.combined as
+    | { value: number | null; currency: string; rate_date: string | null; source: string; missing: string[] }
+    | null | undefined;
 
   return (
     <div className="space-y-6">
@@ -135,8 +140,10 @@ export function CommandCenter() {
           value={rw.months == null ? "—" : `${(rw.months as number).toFixed(1)} mo${rw.beyond_horizon ? "+" : ""}`}
           sub={rw.beyond_horizon ? "beyond forecast horizon" : rw.zero_cash_date ? `zero cash ${date(rw.zero_cash_date as string)}` : undefined} />
         <KpiTile label="Weighted pipeline" kpi={k.weighted_pipeline}
-          value={money(k.weighted_pipeline.value as number, k.weighted_pipeline.currency)}
-          sub={`${Object.keys((k.weighted_pipeline.by_currency as object) ?? {}).length > 1 ? "multi-currency · " : ""}stage-probability weighted`} />
+          value={money(wpCombined?.value ?? (k.weighted_pipeline.value as number), wpCombined?.currency ?? k.weighted_pipeline.currency)}
+          sub={wpCombined ? `${wpCcys.join(" + ")} at ECB rates of ${date(wpCombined.rate_date)}${wpCombined.missing.length ? ` (no rate: ${wpCombined.missing.join(", ")})` : ""}`
+            : `${wpCcys.length > 1 ? "multi-currency · " : ""}stage-probability weighted`}
+          title={`Stage-probability weighted, per currency: ${Object.entries(wpBy).map(([c, v]) => money(v, c)).join(" · ")}${wpCombined ? `. Combined at ${wpCombined.source} of ${wpCombined.rate_date}; stored amounts are not converted.` : ""}`} />
         <KpiTile label="Expected inflows (90 d)" kpi={k.inflows_90d} value={money(k.inflows_90d.value as number, k.inflows_90d.currency)}
           sub="qualified+ pipeline × p" />
         <KpiTile label="Active opportunities" kpi={k.active_opportunities} value={String(k.active_opportunities.value ?? 0)}

@@ -1,6 +1,7 @@
 import cytoscape, { type Core, type ElementDefinition, type NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
-import { useEffect, useRef } from "react";
+import { Maximize, ZoomIn, ZoomOut } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { GraphData } from "@/lib/types";
 import { chartTheme } from "./EChart";
 
@@ -34,6 +35,7 @@ function cytoTheme() {
 }
 
 const shorten = (s: string, max = 34) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const ZOOM_STEP = 1.6;
 
 function layoutOptions(name: Layout): cytoscape.LayoutOptions {
   const base = { name, animate: false, padding: 30, fit: true, nodeDimensionsIncludeLabels: true };
@@ -60,6 +62,7 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
+  const [zoom, setZoom] = useState(1);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -68,9 +71,10 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
       "text-background-shape": "roundrectangle" } as const;
     cy.current = cytoscape({
       container: ref.current,
-      wheelSensitivity: 0.3,
-      minZoom: 0.15,
-      maxZoom: 3,
+      // ~27% per mouse-wheel notch (the default is ~5%, so reaching readable labels took ~25 notches)
+      wheelSensitivity: 5,
+      minZoom: 0.1,
+      maxZoom: 4,
       style: [
         // Leaf labels only appear once zoomed in far enough to read them (min-zoomed-font-size).
         { selector: "node", style: { "background-color": "data(color)", label: "data(title)", color: t.fg, "font-size": 8,
@@ -105,6 +109,11 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
     c.on("mouseover", "node", (e) => focus(e.target));
     c.on("mouseout", "node", unfocus);
     c.on("select unselect", "node", unfocus);
+    // double-click on empty canvas zooms in on that point (double-click on a node still expands it)
+    c.on("dbltap", (e) => {
+      if (e.target === c) c.animate({ zoom: { level: c.zoom() * 2, renderedPosition: e.renderedPosition } }, { duration: 200 });
+    });
+    c.on("zoom", () => setZoom(c.zoom()));
     return () => c.destroy();
     // handlers are stable enough for a graph view; re-binding would reset the canvas
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -124,6 +133,7 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
     c.elements().remove();
     c.add(els);
     c.layout(layoutOptions(layout)).run();
+    setZoom(c.zoom());
   }, [data, layout]);
 
   useEffect(() => {
@@ -133,6 +143,35 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
     if (selected) c.getElementById(selected).select();
   }, [selected, data]);
 
-  return <div ref={ref} style={{ height }} className="w-full rounded-md border bg-background" role="img"
-    aria-label={`Knowledge graph with ${data.nodes.length} nodes and ${data.edges.length} edges`} />;
+  /** Zoom around the centre of the canvas, animated. */
+  const zoomBy = (factor: number) => {
+    const c = cy.current;
+    if (!c) return;
+    const level = Math.min(c.maxZoom(), Math.max(c.minZoom(), c.zoom() * factor));
+    c.stop().animate({ zoom: { level, renderedPosition: { x: c.width() / 2, y: c.height() / 2 } } }, { duration: 200 });
+  };
+  const fit = () => cy.current?.stop().animate({ fit: { eles: cy.current.elements(), padding: 30 } }, { duration: 250 });
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "+" || e.key === "=") zoomBy(ZOOM_STEP);
+    else if (e.key === "-" || e.key === "_") zoomBy(1 / ZOOM_STEP);
+    else if (e.key === "0") fit();
+    else return;
+    e.preventDefault();
+  };
+  const ctl = "flex size-8 items-center justify-center hover:bg-accent disabled:opacity-40";
+
+  return (
+    <div className="relative">
+      <div ref={ref} style={{ height }} tabIndex={0} onKeyDown={onKey} role="img"
+        className="w-full rounded-md border bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={`Knowledge graph with ${data.nodes.length} nodes and ${data.edges.length} edges. Plus and minus keys zoom, 0 fits.`} />
+      <div className="absolute right-2 top-2 flex flex-col overflow-hidden rounded-md border bg-card text-muted-foreground shadow-sm"
+        role="group" aria-label="Zoom">
+        <button type="button" className={ctl} onClick={() => zoomBy(ZOOM_STEP)} disabled={zoom >= 4} title="Zoom in (+)" aria-label="Zoom in"><ZoomIn className="size-4" /></button>
+        <button type="button" className={`${ctl} border-t`} onClick={() => zoomBy(1 / ZOOM_STEP)} disabled={zoom <= 0.1} title="Zoom out (−)" aria-label="Zoom out"><ZoomOut className="size-4" /></button>
+        <button type="button" className={`${ctl} border-t`} onClick={fit} title="Fit to screen (0)" aria-label="Fit to screen"><Maximize className="size-4" /></button>
+        <span className="border-t py-1 text-center text-[10px] tabular-nums" aria-live="polite">{Math.round(zoom * 100)}%</span>
+      </div>
+    </div>
+  );
 }

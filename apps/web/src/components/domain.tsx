@@ -45,6 +45,15 @@ export function DemoBadge() {
   return <Badge tone="demo" title="Synthetic seed data (is_demo)">DEMO</Badge>;
 }
 
+/** Record origin. Both kinds arrive through the same API; only where the record came from differs. */
+export function ProvenanceBadge({ demo }: { demo: boolean }) {
+  return demo ? (
+    <Badge tone="demo" className="px-1.5 text-[10px] tracking-wide" title="Demo / Synthetic Data: generated for demonstration (is_demo = true)">DEMO DATA</Badge>
+  ) : (
+    <Badge tone="success" className="px-1.5 text-[10px] tracking-wide" title="Ingested Data: from a connected data source (is_demo = false)">INGESTED</Badge>
+  );
+}
+
 export function CompletenessRing({ value, size = 44 }: { value: number | null; size?: number }) {
   const v = value ?? 0;
   const r = (size - 6) / 2;

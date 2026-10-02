@@ -22,6 +22,13 @@ export interface Meta {
   feature_phases: Record<string, number>;
   demo_mode: boolean;
   demo_data_present: boolean;
+  /** Active opportunities by origin, and the external feeds whose latest run worked. */
+  data_origins?: {
+    ingested: number;
+    demo: number;
+    live_sources: { key: string; name: string; last_run_at: string | null }[];
+    fx_rate_date: string | null;
+  };
 }
 
 export interface BudgetSummary {

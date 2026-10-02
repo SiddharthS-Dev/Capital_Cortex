@@ -167,7 +167,7 @@ export function GraphExplorer() {
           ) : (
             <CytoGraph data={visible} layout={layout} selected={selected} onSelect={setSelected} onExpand={expand} height={560} />
           )}
-          <p className="mt-1 text-xs text-muted-foreground">Hover a node to highlight its neighbours; click to inspect; double-click to expand. Scroll to zoom in for more labels. Dashed edges are provenance.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Hover a node to highlight its neighbours; click to inspect; double-click to expand. Zoom with the scroll wheel, the + / − buttons or keys, or double-click empty space; Fit (0) shows everything. Zoom in for more labels. Dashed edges are provenance.</p>
         </div>
         <div className="space-y-4">
           {selectedNode ? <Inspector node={selectedNode} onClose={() => setSelected(null)} /> : (
