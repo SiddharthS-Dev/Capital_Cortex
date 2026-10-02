@@ -10,6 +10,7 @@ from cortex.l1_perception.adapters.base import FetchContext, RobotsDisallowed, g
 from cortex.l1_perception.adapters.html import extract
 from cortex.l1_perception.adapters.ics import parse_ics
 from cortex.l1_perception.adapters.imap import parse_headers
+from cortex.l1_perception.models import RawItem
 from cortex.l1_perception.normalizer import normalize
 from cortex.l1_perception.registry import load_configs
 
@@ -102,3 +103,99 @@ def test_dataroom_watcher_is_registered():
     assert get_adapter("dataroom_watcher").name == "dataroom_watcher"
     with pytest.raises(ValueError):
         get_adapter("no_such_adapter")
+
+
+EU_HIT = {
+    "reference": "50145282TOPICSen",
+    "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-CL6-2027-02-COMMUNITIES-02",
+    "summary": "Empowering local urban food systems entrepreneurship and innovation",
+    "metadata": {
+        "type": ["1"],
+        "status": ["31094501"],
+        "identifier": ["HORIZON-CL6-2027-02-COMMUNITIES-02"],
+        "title": ["Empowering local urban food systems entrepreneurship and innovation"],
+        "descriptionByte": ['<p class="topicdescriptionkind">Expected Outcome:</p><p>Projects &amp; partners</p>'],
+        "startDate": ["2027-05-12T00:00:00.000+0000"],
+        "deadlineDate": ["2027-09-23T00:00:00.000+0000"],
+    },
+}  # fmt: skip
+
+
+@respx.mock
+async def test_eu_funding_tenders_multipart_query_and_mapping():
+    """The SEDIA search only honours its type/status/deadline query as multipart (a JSON body returns FAQ pages)."""
+    import json
+
+    cfg = load_configs()["eu_funding_tenders"].model_copy(update={"max_items": 2})
+    route = respx.post(url__startswith="https://api.tech.ec.europa.eu/search-api/prod/rest/search").mock(
+        side_effect=lambda req: httpx.Response(
+            200, json={"results": [EU_HIT] if b"pageNumber=1" in req.url.query else []}
+        )
+    )
+    ctx = FetchContext(min_interval_seconds=0, respect_robots=cfg.respect_robots)
+    items = [i async for i in get_adapter("json_api").fetch(cfg, ctx)]
+    await ctx.aclose()
+    req = route.calls[0].request
+    assert req.headers["content-type"].startswith("multipart/form-data")
+    body = req.content.decode()
+    must = json.loads(body.split("application/json\r\n\r\n", 1)[1].split("\r\n--", 1)[0])["bool"]["must"]
+    today = datetime.now(UTC).date().isoformat()
+    assert {"terms": {"type": ["1", "2"]}} in must
+    assert {"range": {"deadlineDate": {"gte": f"{today}T00:00:00.000+0000"}}} in must  # the API ignores "now"
+    assert b"text=innovation" in req.url.query and b"pageSize=20" in req.url.query
+    assert len(items) == 1  # duplicates across keywords are skipped; page 2 is empty
+    sig = normalize(cfg, items[0])
+    assert sig.external_id == "HORIZON-CL6-2027-02-COMMUNITIES-02"
+    assert sig.title.startswith("Empowering local urban food systems")
+    assert sig.deadline and sig.deadline.year == 2027 and sig.deadline.month == 9
+    assert "<p" not in (sig.description or "") and "&amp;" not in (sig.description or "")
+    assert sig.url.endswith("HORIZON-CL6-2027-02-COMMUNITIES-02")
+    assert len(sig.countries) == 27  # "EU" expands to the member states
+
+
+@respx.mock
+async def test_fetch_retries_transient_failures():
+    """One stalled response must not fail a whole run: timeouts, connection errors and 429/5xx are retried."""
+    url = "https://api.example.org/search"
+    route = respx.post(url).mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(503, headers={"Retry-After": "0"}),
+            httpx.Response(200, json={"ok": 1}),
+        ]
+    )
+    ctx = FetchContext(min_interval_seconds=0, respect_robots=False, retry_backoff_seconds=0)
+    assert (await ctx.request("POST", url)).json() == {"ok": 1} and route.call_count == 3
+    await ctx.aclose()
+
+
+@respx.mock
+async def test_fetch_gives_up_after_retries_and_never_retries_client_errors():
+    respx.get("https://api.example.org/slow").mock(side_effect=httpx.ReadTimeout("slow"))
+    missing = respx.get("https://api.example.org/missing").mock(return_value=httpx.Response(404))
+    ctx = FetchContext(min_interval_seconds=0, respect_robots=False, retries=2, retry_backoff_seconds=0)
+    with pytest.raises(httpx.ReadTimeout):
+        await ctx.request("GET", "https://api.example.org/slow")
+    assert respx.calls.call_count == 3  # first attempt + 2 retries
+    with pytest.raises(httpx.HTTPStatusError):
+        await ctx.request("GET", "https://api.example.org/missing")
+    assert missing.call_count == 1
+    await ctx.aclose()
+
+
+UKRI_CARD = """<div class="opportunity"><h3><a class="ukri-funding-opp__link" href="https://www.ukri.org/opportunity/japan-uk/">
+Japan-UK Joint call</a></h3><div class="entry-content"><p>Apply for funding to form partnerships.</p></div>
+<dl><div class="govuk-table__row"><dt>Opportunity status:</dt><dd>Open</dd></div>
+<div class="govuk-table__row"><dt>Funders:</dt><dd>Engineering and Physical Sciences Research Council (EPSRC)</dd></div>
+<div class="govuk-table__row"><dt>Co-funders:</dt><dd>NICT</dd></div>
+<div class="govuk-table__row"><dt>Maximum award:</dt><dd>£1,121,600</dd></div>
+<div class="govuk-table__row"><dt>Closing date:</dt><dd>6 October 2026 4:00pm UK time</dd></div></dl></div>"""
+
+
+def test_ukri_listing_extract_and_normalize():
+    cfg = load_configs()["ukri_opportunities"]
+    [rec] = extract(UKRI_CARD, cfg.urls[0], cfg.request["selectors"])
+    sig = normalize(cfg, RawItem(payload=rec, url=rec["url"], fetched_at=datetime.now(UTC)))
+    assert sig.counterparty_name.endswith("(EPSRC)")  # Funders, not the Co-funders row
+    assert sig.deadline.isoformat() == "2026-10-06T16:00:00+01:00"  # "UK time" is London time (BST here)
+    assert sig.amount_max == 1121600 and sig.currency == "GBP" and sig.countries == ["GB"]

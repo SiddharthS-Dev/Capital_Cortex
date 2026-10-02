@@ -96,3 +96,38 @@ async def test_dlq_replay(bus):
 def test_backoff_bounds():
     for a in range(10):
         assert 0 <= backoff_seconds(a, base=0.5, cap=10) <= 10
+
+
+async def test_scheduled_tick_publishes_once_per_period(bus, monkeypatch):
+    """A real AsyncIOScheduler must await schedule_tick (a lambda returning the coroutine never ran: no job fired)."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    import cortex.worker as worker
+
+    async def token():
+        return "svc"
+
+    monkeypatch.setattr(worker, "get_bus", lambda: bus)
+    monkeypatch.setattr(worker, "service_token", token)
+    sched = AsyncIOScheduler(timezone="UTC")
+    for _ in range(2):  # two workers firing in the same period: the Redis lock lets exactly one publish
+        sched.add_job(
+            worker.schedule_tick,
+            "date",
+            run_date=datetime.now(UTC),
+            args=["alerts.evaluate", {}, "alerts", "%Y%m%d%H%M"],
+        )
+    sched.start()
+    try:
+        for _ in range(50):
+            if await bus.r.xlen("system.jobs") and not sched.get_jobs():
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        sched.shutdown(wait=False)
+    assert await bus.r.xlen("system.jobs") == 1
+    keys = [k.decode() async for k in bus.r.scan_iter("sched:alerts:*")]
+    assert len(keys) == 1 and keys[0].startswith(f"sched:alerts:{datetime.now(UTC):%Y%m%d}")

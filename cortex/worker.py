@@ -15,7 +15,7 @@ import signal
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from cortex.l7_governance import audit_service
 from platform_core.auth.abac import Resource
@@ -160,6 +160,15 @@ async def _retrain(env: Envelope, principal: Principal) -> None:
             await bus.r.delete(RETRAIN_FLAG)
 
 
+async def _fx(env: Envelope, principal: Principal) -> None:
+    """Daily ECB reference rates for the combined weighted-pipeline figure (amounts are never rewritten)."""
+    from cortex.l5_strategy.fx import refresh
+
+    async with session_scope() as s:
+        out = await refresh(s)
+    log.info("fx rates refreshed", extra=out)
+
+
 async def _retention(env: Envelope, principal: Principal) -> None:
     """Nightly retention (R13); legal holds always win. Runs for real only when the payload says so."""
     from cortex.l7_governance import retention, settings_service
@@ -185,6 +194,8 @@ JOBS: dict[str, Job] = {
     "memory.maintenance": Job("memory:write", "memory", _memory),
     "ml.retrain": Job("ml:train", "ml_model", _retrain),
     "retention.run": Job("retention:run", "retention", _retention),
+    # reference data fetched like a source: the worker's existing source:run grant covers it
+    "fx.refresh": Job("source:run", "fx_rate", _fx),
 }
 
 STREAMS = {"system.jobs": "cortex-workers", "signals.raw": "cortex-l2", "agents.jobs": "cortex-agents"}
@@ -212,8 +223,13 @@ async def dispatch(env: Envelope) -> None:
     await job.fn(env, principal)
 
 
-async def schedule_tick(job_type: str, payload: dict, lock_key: str) -> None:
-    """Called by the cron scheduler in every worker; a Redis lock makes exactly one of them publish."""
+async def schedule_tick(job_type: str, payload: dict, lock: str, stamp: str) -> None:
+    """Called by the cron scheduler in every worker; a Redis lock makes exactly one of them publish.
+
+    Registered with APScheduler as the coroutine function itself (args passed separately): the asyncio executor
+    only awaits coroutine functions, so a lambda returning ``schedule_tick(...)`` was never run. The lock key is
+    ``sched:<lock>:<now formatted with stamp>``, computed at fire time so each period gets its own key."""
+    lock_key = f"sched:{lock}:{datetime.now(UTC).strftime(stamp)}"
     bus = get_bus()
     if not await bus.r.set(lock_key, socket.gethostname(), nx=True, ex=3600):
         return
@@ -254,12 +270,9 @@ async def run_scheduler(stop: asyncio.Event) -> None:
             trigger = CronTrigger.from_crontab(r.schedule, timezone="UTC")
             if existing is None or str(existing.trigger) != str(trigger):
                 sched.add_job(
-                    lambda r=r: schedule_tick(
-                        "ingest.run",
-                        {"source_id": str(r.id), "trigger": "schedule"},
-                        f"sched:{r.adapter_key}:{datetime.now(UTC):%Y%m%d%H%M}",
-                    ),
+                    schedule_tick,
                     trigger,
+                    args=["ingest.run", {"source_id": str(r.id), "trigger": "schedule"}, r.adapter_key, "%Y%m%d%H%M"],
                     id=jid,
                     replace_existing=True,
                     coalesce=True,
@@ -270,34 +283,51 @@ async def run_scheduler(stop: asyncio.Event) -> None:
     sched.add_job(reload, "interval", minutes=2, id="reload-sources", coalesce=True, max_instances=1)
     # deadlines move every day, so the timing factor does too
     sched.add_job(
-        lambda: schedule_tick(
-            "scoring.rescore", {"reason": "nightly timing refresh"}, f"sched:rescore:{datetime.now(UTC):%Y%m%d}"
-        ),
+        schedule_tick,
         CronTrigger.from_crontab("30 2 * * *", timezone="UTC"),
+        args=["scoring.rescore", {"reason": "nightly timing refresh"}, "rescore", "%Y%m%d"],
         id="nightly-rescore",
     )
     # Phase 2: alerts every 15 minutes, L3 memory upkeep nightly, ml_scorer retrain weekly
     from cortex.l4_reasoning.ml_scorer import ml_config
 
     sched.add_job(
-        lambda: schedule_tick("alerts.evaluate", {}, f"sched:alerts:{datetime.now(UTC):%Y%m%d%H%M}"),
+        schedule_tick,
         CronTrigger.from_crontab("*/15 * * * *", timezone="UTC"),
+        args=["alerts.evaluate", {}, "alerts", "%Y%m%d%H%M"],
         id="alerts",
     )
     sched.add_job(
-        lambda: schedule_tick("memory.maintenance", {}, f"sched:memory:{datetime.now(UTC):%Y%m%d}"),
+        schedule_tick,
         CronTrigger.from_crontab("15 2 * * *", timezone="UTC"),
+        args=["memory.maintenance", {}, "memory", "%Y%m%d"],
         id="memory-maintenance",
     )
     sched.add_job(
-        lambda: schedule_tick("ml.retrain", {}, f"sched:ml:{datetime.now(UTC):%Y%W}"),
+        schedule_tick,
         CronTrigger.from_crontab(ml_config().get("retrain_schedule", "0 4 * * 1"), timezone="UTC"),
+        args=["ml.retrain", {}, "ml", "%Y%W"],
         id="ml-retrain",
     )
     sched.add_job(
-        lambda: schedule_tick("retention.run", {"dry_run": False}, f"sched:retention:{datetime.now(UTC):%Y%m%d}"),
+        schedule_tick,
         CronTrigger.from_crontab("0 3 * * *", timezone="UTC"),
+        args=["retention.run", {"dry_run": False}, "retention", "%Y%m%d"],
         id="retention",
+    )
+    # ECB publishes around 16:00 CET on working days; also fetch shortly after start so rates exist right away
+    sched.add_job(
+        schedule_tick,
+        CronTrigger.from_crontab("30 15 * * *", timezone="UTC"),
+        args=["fx.refresh", {}, "fx", "%Y%m%d"],
+        id="fx-rates",
+    )
+    sched.add_job(
+        schedule_tick,
+        "date",
+        run_date=datetime.now(UTC) + timedelta(seconds=20),
+        args=["fx.refresh", {}, "fx-startup", "%Y%m%d%H"],
+        id="fx-rates-startup",
     )
     sched.start()
     log.info("scheduler started", extra={"jobs": [j.id for j in sched.get_jobs()]})
