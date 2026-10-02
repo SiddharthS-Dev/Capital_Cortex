@@ -1,0 +1,59 @@
+# UK Research and Innovation funding finder: the public listing filtered to open opportunities, soonest closing
+# first. Verified 2026-10-02: robots.txt only disallows /wp-admin/. The RSS feed carries no deadline or amount
+# and also lists closed calls, so the listing page is read instead. 10 per page; a page past the end returns 404
+# (which fails the run), so keep the list within the live page count (14 on 2026-10-02).
+key: ukri_opportunities
+name: UKRI funding opportunities (UK)
+kind: html
+adapter: html
+enabled: false
+schedule: "0 7 * * *"          # daily, UTC
+terms_note: >-
+  Public UKRI funding-finder pages (www.ukri.org/opportunity), Crown copyright, reusable under the Open
+  Government Licence v3.0 with attribution. robots.txt is honoured; one page every 3 seconds, at most 100
+  opportunities per run.
+urls:
+  - "https://www.ukri.org/opportunity/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/2/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/3/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/4/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/5/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/6/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/7/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/8/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/9/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+  - "https://www.ukri.org/opportunity/page/10/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
+rate_limit: {min_interval_seconds: 3.0}
+timeout_seconds: 60
+respect_robots: true
+max_items: 100
+request:
+  selectors:
+    item: "div.opportunity"
+    fields:
+      title: "a.ukri-funding-opp__link"
+      url: "a.ukri-funding-opp__link@href"
+      description: "div.entry-content"
+      status: 'div.govuk-table__row:-soup-contains("Opportunity status") dd'
+      funder: 'div.govuk-table__row:-soup-contains("Funders:") dd'     # the Funders row precedes Co-funders
+      funding_type: 'div.govuk-table__row:-soup-contains("Funding type") dd'
+      max_award: 'div.govuk-table__row:-soup-contains("Maximum award") dd'
+      opening_date: 'div.govuk-table__row:-soup-contains("Opening date") dd'
+      closing_date: 'div.govuk-table__row:-soup-contains("Closing date") dd'
+mapping:
+  external_id: url
+  title: title
+  description: description
+  url: url
+  deadline: closing_date
+  open_date: opening_date
+  published_at: opening_date
+  counterparty_name: funder
+  amount_max: max_award
+  instruments: funding_type
+defaults:
+  currency: GBP
+  countries: [GB]
+  counterparty_kind: agency
+  counterparty_country: GB
+  class_hint: grant
