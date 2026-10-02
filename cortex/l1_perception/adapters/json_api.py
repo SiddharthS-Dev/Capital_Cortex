@@ -1,8 +1,12 @@
 """Generic JSON API adapter: templated list request(s), optional per-item detail request, dotted-path items.
 
 Config (``request`` / ``detail`` blocks in config/adapters/<key>.yaml):
-  request: {method, url, json|params, items_path, id_path, vars: {name: [values…]}, page: {param, size, max_pages}}
-  detail:  {method, url, json|params, root_path}      # "{id}" is substituted from the list item
+  request: {method, url, json|params|multipart, items_path, id_path, vars: {name: [values…]}, page: {param, size, max_pages}}
+  detail:  {method, url, json|params|multipart, root_path}      # "{id}" is substituted from the list item
+
+``multipart`` sends multipart/form-data: an object or list value becomes a JSON part (application/json), anything
+else a plain text part. Some search APIs (EU Funding & Tenders) only accept their query that way.
+``{today}`` (UTC date, YYYY-MM-DD) is available in every template, e.g. for a "deadline from today" filter.
 """
 
 from __future__ import annotations
@@ -47,6 +51,11 @@ class JSONAPIAdapter:
             kw["json"] = _fill(spec["json"], values)
         if "params" in spec:
             kw["params"] = _fill(spec["params"], values)
+        if "multipart" in spec:
+            kw["files"] = {
+                k: (None, json.dumps(v), "application/json") if isinstance(v, dict | list) else (None, str(v))
+                for k, v in _fill(spec["multipart"], values).items()
+            }
         r = await ctx.request(spec.get("method", "GET"), _fill(spec["url"], values), **kw)
         return r.json()
 
@@ -63,7 +72,7 @@ class JSONAPIAdapter:
         seen: set[str] = set()
         emitted = 0
         for combo in combos:
-            values = dict(zip(var_names, combo, strict=True))
+            values = {"today": datetime.now(UTC).date().isoformat(), **dict(zip(var_names, combo, strict=True))}
             for page_no in range(int(page.get("max_pages", 1))):
                 if page:
                     values[page["param"]] = page_no * int(page.get("size", 1)) + int(page.get("start", 0))

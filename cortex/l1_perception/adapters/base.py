@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from cortex.l1_perception.registry import SourceConfig
 
 USER_AGENT = "InspironicsCapitalCortex/0.1 (+https://inspironics.net; capital-intelligence bot)"
+# Public APIs (Grants.gov, EU SEDIA) are slow at times: one stalled response used to fail a 150-request run.
+RETRY_STATUSES = {429, 502, 503, 504}
+MAX_RETRY_WAIT_SECONDS = 60.0
 
 
 class RobotsDisallowed(Exception):
@@ -31,6 +34,8 @@ class FetchContext:
     min_interval_seconds: float = 1.0
     respect_robots: bool = True
     timeout: float = 30.0
+    retries: int = 3  # extra attempts after a timeout, connection error or 429/502/503/504
+    retry_backoff_seconds: float = 2.0  # doubles per attempt; a Retry-After header wins when present
     max_items: int = 500
     upload: bytes | None = None
     upload_name: str | None = None
@@ -65,13 +70,30 @@ class FetchContext:
     async def request(self, method: str, url: str, **kw: Any) -> httpx.Response:
         if not await self._allowed(url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
-        wait = self.min_interval_seconds - (time.monotonic() - self._last)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        self._last = time.monotonic()
-        r = await self.client.request(method, url, **kw)
-        r.raise_for_status()
-        return r
+        for attempt in range(self.retries + 1):
+            wait = self.min_interval_seconds - (time.monotonic() - self._last)
+            if wait > 0:
+                await asyncio.sleep(wait)  # retries keep the polite rate limit
+            self._last = time.monotonic()
+            last = attempt == self.retries
+            try:
+                r = await self.client.request(method, url, **kw)
+            except httpx.TransportError:  # timeouts and connection errors; protocol bugs are not transport errors
+                if last:
+                    raise
+                await asyncio.sleep(self._backoff(attempt, None))
+                continue
+            if r.status_code in RETRY_STATUSES and not last:
+                await asyncio.sleep(self._backoff(attempt, r.headers.get("Retry-After")))
+                continue
+            r.raise_for_status()
+            return r
+        raise AssertionError("unreachable")
+
+    def _backoff(self, attempt: int, retry_after: str | None) -> float:
+        if retry_after and retry_after.strip().isdigit():
+            return min(float(retry_after), MAX_RETRY_WAIT_SECONDS)
+        return min(self.retry_backoff_seconds * 2**attempt, MAX_RETRY_WAIT_SECONDS)
 
     async def aclose(self) -> None:
         if self._client is not None:
