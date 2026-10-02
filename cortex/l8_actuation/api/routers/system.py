@@ -50,6 +50,21 @@ async def me(p: Principal = Depends(authenticate)) -> Me:
     )
 
 
+class LiveSource(BaseModel):
+    key: str
+    name: str
+    last_run_at: str | None
+
+
+class DataOrigins(BaseModel):
+    """Where the active opportunities come from: the ribbon names live external sources next to the demo count."""
+
+    ingested: int
+    demo: int
+    live_sources: list[LiveSource]
+    fx_rate_date: str | None
+
+
 class Meta(BaseModel):
     version: str
     env: str
@@ -57,6 +72,7 @@ class Meta(BaseModel):
     feature_phases: dict[str, int]
     demo_mode: bool
     demo_data_present: bool
+    data_origins: DataOrigins
 
 
 @router.get("/meta", response_model=Meta, summary="Build phase, feature availability, demo flags")
@@ -74,6 +90,30 @@ async def meta(
             )
         ).scalar()
     )
+    org = {"org": s.org_id}
+    counts = (
+        await session.execute(
+            text(
+                "SELECT count(*) FILTER (WHERE NOT is_demo) AS ingested, count(*) FILTER (WHERE is_demo) AS demo "
+                "FROM opportunity WHERE org_id = :org AND status IN ('active','watchlist')"
+            ),
+            org,
+        )
+    ).one()
+    # external feeds only (APIs, web listings, RSS) whose latest run worked: uploads and manual entry aren't "live"
+    live = (
+        await session.execute(
+            text(
+                "SELECT adapter_key, name, last_run_at FROM source WHERE org_id = :org AND enabled "
+                "AND kind IN ('api','html','rss') AND health IN ('ok','degraded') AND last_run_at IS NOT NULL "
+                "ORDER BY name"
+            ),
+            org,
+        )
+    ).all()
+    fx_date = (
+        await session.execute(text("SELECT max(rate_date) FROM fx_rate WHERE org_id = :org"), org)
+    ).scalar()  # fmt: skip
     return Meta(
         version=__version__,
         env=s.env,
@@ -81,6 +121,14 @@ async def meta(
         feature_phases=FEATURE_PHASES,
         demo_mode=s.demo_mode,
         demo_data_present=present,
+        data_origins=DataOrigins(
+            ingested=counts.ingested,
+            demo=counts.demo,
+            live_sources=[
+                LiveSource(key=r.adapter_key, name=r.name, last_run_at=r.last_run_at.isoformat()) for r in live
+            ],
+            fx_rate_date=fx_date.isoformat() if fx_date else None,
+        ),
     )
 
 

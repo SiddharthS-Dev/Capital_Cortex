@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.l5_strategy import fx
 from cortex.l5_strategy.forecasting import preset, run_scenarios
 from cortex.l5_strategy.pipeline_engine import weighted_pipeline
 from cortex.l8_actuation.api.common import row
@@ -239,6 +240,13 @@ async def dashboard(
             text("SELECT count(*) FROM approval WHERE org_id = :org AND decision = 'pending'"), {"org": org}
         )
     ).scalar()
+    # one figure across currencies, at the latest ECB rates; per-currency totals stay the source of truth
+    rate_date, rates = await fx.latest_rates(session)
+    combined = None
+    if ccy and len(pipe["total_by_currency"]) > 1 and rates:
+        total, missing = fx.combine(pipe["total_by_currency"], ccy, rates)
+        combined = {"value": total, "currency": ccy, "rate_date": rate_date.isoformat() if rate_date else None,
+                    "source": fx.SOURCE, "missing": missing}  # fmt: skip
     kpis = {
         "cash": {
             "value": (base.get("inputs") or {}).get("starting_cash"),
@@ -269,6 +277,7 @@ async def dashboard(
             "currency": ccy,
             "by_currency": pipe["total_by_currency"],
             "method": pipe["method"],
+            "combined": combined,
             "excluded_without_amount": pipe["excluded_without_amount"],
             "drill": "/radar?view=kanban",
         },

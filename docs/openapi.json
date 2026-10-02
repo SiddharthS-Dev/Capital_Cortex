@@ -16840,6 +16840,45 @@
         ],
         "title": "ContactIn"
       },
+      "DataOrigins": {
+        "properties": {
+          "ingested": {
+            "type": "integer",
+            "title": "Ingested"
+          },
+          "demo": {
+            "type": "integer",
+            "title": "Demo"
+          },
+          "live_sources": {
+            "items": {
+              "$ref": "#/components/schemas/LiveSource"
+            },
+            "type": "array",
+            "title": "Live Sources"
+          },
+          "fx_rate_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fx Rate Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ingested",
+          "demo",
+          "live_sources",
+          "fx_rate_date"
+        ],
+        "title": "DataOrigins",
+        "description": "Where the active opportunities come from: the ribbon names live external sources next to the demo count."
+      },
       "Decision": {
         "properties": {
           "reject": {
@@ -17303,6 +17342,36 @@
         ],
         "title": "IntroIn"
       },
+      "LiveSource": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "last_run_at"
+        ],
+        "title": "LiveSource"
+      },
       "ManualAlert": {
         "properties": {
           "message": {
@@ -17710,6 +17779,9 @@
           "demo_data_present": {
             "type": "boolean",
             "title": "Demo Data Present"
+          },
+          "data_origins": {
+            "$ref": "#/components/schemas/DataOrigins"
           }
         },
         "type": "object",
@@ -17719,7 +17791,8 @@
           "current_phase",
           "feature_phases",
           "demo_mode",
-          "demo_data_present"
+          "demo_data_present",
+          "data_origins"
         ],
         "title": "Meta"
       },
