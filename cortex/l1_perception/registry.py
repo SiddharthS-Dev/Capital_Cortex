@@ -30,6 +30,8 @@ class SourceConfig(BaseModel):
     auth_header: str = "Authorization"
     auth_scheme: str = "Bearer "
     rate_limit: dict[str, float] = Field(default_factory=lambda: {"min_interval_seconds": 1.0})
+    timeout_seconds: float = 30.0  # per request (connect, read, write)
+    retries: int = 3  # extra attempts on timeouts, connection errors and 429/502/503/504
     respect_robots: bool = True
     max_items: int = 500
     case_insensitive_keys: bool = False

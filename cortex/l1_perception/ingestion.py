@@ -99,6 +99,8 @@ async def run_source(
     ctx = FetchContext(
         min_interval_seconds=cfg.rate_limit.get("min_interval_seconds", 1.0),
         respect_robots=cfg.respect_robots,
+        timeout=cfg.timeout_seconds,
+        retries=cfg.retries,
         max_items=cfg.max_items,
         upload=upload,
         upload_name=upload_name,

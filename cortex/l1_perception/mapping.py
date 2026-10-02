@@ -22,7 +22,11 @@ from dateutil import tz
 _TOKEN = re.compile(r"([^.\[\]]+)|\[(\*|\d+)\]")
 _TAGS = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
+# "6 October 2026 4:00pm UK time" (UKRI) → the Europe/London zone, so BST/GMT is applied by date
+_UK_TIME = re.compile(r"\bUK time\b", re.IGNORECASE)
 _TZINFOS = {
+    "UKT": tz.gettz("Europe/London"),
+    "BST": tz.gettz("Europe/London"),
     "EST": tz.gettz("America/New_York"),
     "EDT": tz.gettz("America/New_York"),
     "CST": tz.gettz("America/Chicago"),
@@ -73,7 +77,7 @@ def to_date(v: Any) -> datetime | None:
         d = v
     else:
         try:
-            d = dateparser.parse(str(v), tzinfos=_TZINFOS)
+            d = dateparser.parse(_UK_TIME.sub("UKT", str(v)), tzinfos=_TZINFOS)
         except (ValueError, OverflowError):
             return None
     return d if d.tzinfo else d.replace(tzinfo=UTC)

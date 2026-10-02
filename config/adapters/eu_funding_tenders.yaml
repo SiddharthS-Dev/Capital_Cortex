@@ -1,27 +1,45 @@
-# EU Funding & Tenders portal: the SEDIA search API. Disabled until its current API terms are verified (§6/L1).
+# EU Funding & Tenders portal: the public SEDIA search API (the portal's own search). Verified reachable 2026-10-02.
+# The plain text search also returns FAQ and news pages, so the query part keeps only calls for proposals and
+# tenders (type 1, 2) that are forthcoming or open (status 31094501, 31094502) with a deadline still ahead: the
+# status alone is unreliable (2023 calls are still flagged open).
+# The API only honours that query as multipart/form-data. Pages are capped at 20: larger ones come back truncated.
 key: eu_funding_tenders
-name: EU Funding & Tenders (template)
+name: EU Funding & Tenders
 kind: api
 adapter: json_api
 enabled: false
-schedule: "30 3 * * *"
+schedule: "30 3 * * *"        # daily, UTC
 terms_note: >-
-  EU Funding & Tenders Portal search API (api.tech.ec.europa.eu). Verify the current terms and endpoint
-  before enabling. The mapping follows the public search response.
+  EU Funding & Tenders Portal search API (api.tech.ec.europa.eu, public apiKey SEDIA, no account). Public EU
+  information, reusable with attribution under the Commission reuse policy (Decision 2011/833/EU).
+  Polite use: one request every 2 seconds and at most 100 opportunities per run.
 rate_limit: {min_interval_seconds: 2.0}
-respect_robots: false
+timeout_seconds: 60            # 20-result pages are about 550 KB; cold queries take several seconds
+respect_robots: false            # an API endpoint, not a crawled page; its usage terms govern (R11)
 max_items: 100
 request:
   method: POST
-  url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text={keyword}&pageSize=50&pageNumber=1"
-  vars: {keyword: ["innovation"]}
+  url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text={keyword}&pageSize=20&pageNumber={pageNumber}"
+  multipart:
+    query:
+      bool:
+        must:
+          - terms: {type: ["1", "2"]}
+          - terms: {status: ["31094501", "31094502"]}
+          - range: {deadlineDate: {gte: "{today}T00:00:00.000+0000"}}   # "now" or a bare date is silently ignored
+    languages: ["en"]
+  vars:
+    keyword: ["innovation", "artificial intelligence", "clean energy", "advanced manufacturing", "digital"]
+  page: {param: pageNumber, size: 1, start: 1, max_pages: 2}
   items_path: results
-  id_path: reference
+  id_path: "metadata.identifier[0]"
 mapping:
-  external_id: reference
+  external_id: "metadata.identifier[0]"
   title: ["metadata.title[0]", summary]
-  description: ["metadata.description[0]", content]
-  url: url
+  description: {paths: ["metadata.descriptionByte[0]", "metadata.description[0]", content], transform: html}
+  url: ["metadata.url[0]", url]
+  published_at: "metadata.startDate[0]"
+  open_date: "metadata.startDate[0]"
   deadline: "metadata.deadlineDate[0]"
 defaults:
   currency: EUR

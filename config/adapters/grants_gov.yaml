@@ -10,6 +10,7 @@ terms_note: >-
   Official Grants.gov REST API (search2 / fetchOpportunity), public U.S. government data, no key required.
   Polite use: 1 request/second and at most 150 opportunities per run.
 rate_limit: {min_interval_seconds: 1.0}
+timeout_seconds: 60            # responses vary from 2 s to over 30 s
 respect_robots: false            # an API endpoint, not a crawled page; its usage terms govern (R11)
 max_items: 150
 request:
