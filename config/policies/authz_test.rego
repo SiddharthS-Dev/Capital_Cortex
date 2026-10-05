@@ -78,6 +78,17 @@ test_executive_board_report_only if {
 		with data.rbac as rbac
 }
 
+# A second role without approval:decide must not lift the executive narrowing (was `roles == ["executive"]`).
+test_executive_plus_other_role_still_board_report_only if {
+	not authz.allow with input as {"subject": user(["analyst", "executive"], true), "action": "approval:decide", "resource": {"type": "approval", "subject_type": "outbox"}}
+		with data.rbac as rbac
+}
+
+test_executive_plus_admin_decides_anything if {
+	authz.allow with input as {"subject": user(["admin", "executive"], true), "action": "approval:decide", "resource": {"type": "approval", "subject_type": "outbox"}}
+		with data.rbac as rbac
+}
+
 test_raw_cypher_admin_only if {
 	r := {"roles": {"analyst": {"mfa": "optional", "clearance": "confidential", "permissions": ["graph:*"]}}, "classifications": ["public"], "service_clients": {}}
 	not authz.allow with input as {"subject": user(["analyst"], false), "action": "graph:cypher", "resource": {"type": "graph"}} with data.rbac as r
