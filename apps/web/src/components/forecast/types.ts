@@ -11,6 +11,9 @@ export interface ScenarioResult {
   horizon_months: number;
   series: SeriesPoint[];
   runway_months: number | null;
+  /** runway counted from the current month (runway_months counts from the month after the last snapshot) */
+  runway_months_from_today?: number | null;
+  snapshot_age_months?: number | null;
   zero_cash_date: string | null;
   beyond_horizon: boolean;
   gaps: string[];
