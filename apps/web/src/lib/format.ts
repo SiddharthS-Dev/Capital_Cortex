@@ -97,10 +97,24 @@ export function score100(v: number | null | undefined): string {
   return v === null || v === undefined ? "—" : Math.round(v * 100).toString();
 }
 
+/** A plain date stored as a timestamp: "2026-10-15" or exactly midnight UTC ("2026-10-15T00:00:00Z"/"+00:00").
+ * Sources that publish only a date are stored that way; showing it in local time put it a day early west of UTC. */
+export function isDateOnly(v: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) || /^\d{4}-\d{2}-\d{2}T00:00(:00(\.0+)?)?(Z|[+-]00:?00)$/.test(v);
+}
+
+/** The calendar day a value falls on, as a UTC-midnight timestamp: its UTC day for plain dates, else the viewer's. */
+export function calendarDay(v: string): number {
+  const d = new Date(v);
+  return isDateOnly(v) ? Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    : Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
 export function date(v: string | null | undefined): string {
   if (!v) return "—";
   const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  if (Number.isNaN(d.getTime())) return v;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", ...(isDateOnly(v) ? { timeZone: "UTC" } : {}) });
 }
 
 export function dateTime(v: string | null | undefined): string {
@@ -109,16 +123,19 @@ export function dateTime(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? v : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** Whole calendar days from today to the value's day (0 = today, negative = past). Hour arithmetic with Math.ceil
+ * gave -0 ("Due today") for a deadline that passed hours ago and "2d left" for one 25 hours away. */
 export function daysUntil(v: string | null | undefined): number | null {
-  if (!v) return null;
-  return Math.ceil((new Date(v).getTime() - Date.now()) / 86_400_000);
+  if (!v || Number.isNaN(new Date(v).getTime())) return null;
+  const now = new Date();
+  return Math.round((calendarDay(v) - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86_400_000);
 }
 
 export function relativeDeadline(v: string | null | undefined): string {
   const d = daysUntil(v);
-  if (d === null) return "No deadline";
+  if (d === null || !v) return "No deadline";
   if (d < 0) return `Closed ${-d}d ago`;
-  if (d === 0) return "Due today";
+  if (d === 0) return !isDateOnly(v) && new Date(v).getTime() < Date.now() ? "Closed today" : "Due today";
   return `${d}d left`;
 }
 
