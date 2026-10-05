@@ -16,6 +16,10 @@ timezone: UTC
 # Default due date for new approval requests when the subject has no deadline of its own.
 approval_due_days: 3
 
+# A proposal sent for an opportunity of one of these capital classes is a grant submission
+# (grant_submission_requires_two_approvers).
+grant_submission_classes: [grant, government_program, university_program, foundation_esg]
+
 # Webhook deliveries may only go to these URL prefixes (SSRF guard). Empty = webhooks disabled.
 webhook_allowlist: []
 
