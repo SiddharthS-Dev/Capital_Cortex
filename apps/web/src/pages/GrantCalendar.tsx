@@ -15,7 +15,7 @@ import { ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Badge, Card, CardContent, CardHeader, CardTitle } from "@/components/ui/primitives";
 import { api, ApiError } from "@/lib/api";
-import { CLASS_COLORS, CLASS_LABELS, CLASSES, date } from "@/lib/format";
+import { calendarDay, CLASS_COLORS, CLASS_LABELS, CLASSES, date } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type EventType = "deadline" | "submission" | "follow_up" | "commitment_expiry";
@@ -103,7 +103,9 @@ export function GrantCalendar() {
     return {
       id: e.id,
       title: `${typeInfo(e.type).label}: ${e.title}`,
-      start: e.start,
+      // an all-day event takes a calendar date: a plain-date deadline (midnight UTC) must not move to the day before
+      // west of UTC, so use the day calendarDay() gives rather than the raw timestamp
+      start: e.type === "deadline" || !e.start.includes("T") ? new Date(calendarDay(e.start)).toISOString().slice(0, 10) : e.start,
       allDay: e.type === "deadline" || !e.start.includes("T"),
       backgroundColor: `${color}2e`,
       borderColor: color,
