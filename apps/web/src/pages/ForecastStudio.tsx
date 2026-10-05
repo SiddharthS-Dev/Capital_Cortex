@@ -159,7 +159,7 @@ export function ForecastStudio() {
                       <div className="text-sm text-band-insufficient">Insufficient data</div>
                     ) : (
                       <>
-                        <div className="text-2xl font-semibold tabular-nums">{r.runway_months == null ? "—" : r.runway_months.toFixed(1)}{r.beyond_horizon ? "+" : ""} <span className="text-sm font-normal">months</span></div>
+                        <div className="text-2xl font-semibold tabular-nums">{(r.runway_months_from_today ?? r.runway_months) == null ? "—" : (r.runway_months_from_today ?? r.runway_months)!.toFixed(1)}{r.beyond_horizon ? "+" : ""} <span className="text-sm font-normal">months</span></div>
                         <div className="text-xs text-muted-foreground">{r.zero_cash_date ? `zero cash ${date(r.zero_cash_date)}` : r.beyond_horizon ? "beyond horizon" : "—"}</div>
                       </>
                     )}
