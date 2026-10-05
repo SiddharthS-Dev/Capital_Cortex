@@ -7,6 +7,7 @@ enabled: true
 terms_note: User-supplied files. The uploader is responsible for the right to use the data.
 respect_robots: false
 max_items: 5000
+date_dayfirst: true   # our own files: 03/10/2026 is 3 October (India/UK convention); ISO dates unaffected
 case_insensitive_keys: true
 mapping:
   external_id: [id, external_id, reference, ref]
