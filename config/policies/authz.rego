@@ -81,8 +81,23 @@ deny contains "classification_exceeds_clearance" if {
 # ---------- executives approve only allowed subject types ----------
 deny contains "executive_cannot_approve_subject" if {
 	input.action == "approval:decide"
-	input.subject.roles == ["executive"]
+	"executive" in input.subject.roles
+	not approval_decide_beyond_executive
 	not input.resource.subject_type in data.rbac.executive_approvable_subjects
+}
+
+# Another role (or a direct grant) gives approval:decide unnarrowed. Holding "executive" plus a role without
+# that permission (e.g. analyst) must not widen what the executive role may approve.
+approval_decide_beyond_executive if {
+	some role in input.subject.roles
+	role != "executive"
+	some g in data.rbac.roles[role].permissions
+	matches(g, "approval:decide")
+}
+
+approval_decide_beyond_executive if {
+	some g in input.subject.grants
+	matches(g, "approval:decide")
 }
 
 # ---------- raw Cypher is admin-only (§8 /graph/query) ----------
