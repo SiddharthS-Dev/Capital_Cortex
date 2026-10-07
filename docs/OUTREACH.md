@@ -87,7 +87,7 @@ Run with the repo's own `tabular.read_rows` + `normalizer.normalize` + `classifi
 - [x] **Step 4 — Gates** (register, import, links, approval preview warning; *measured*: G1–G8 imported, re-import unchanged, G2 "NSF / DOE rows" suggests CC-015 and CC-016)
 - [x] **Step 5 — API + RBAC + OpenAPI** (outreach + eligibility-gate routers, opportunity list fields / filters / facets / `sort=outreach`, roles + Rego tests, OpenAPI 131 paths, docs/API.md, FR-04-OUT traceability)
 - [x] **Step 6 — UI** (Sources inspect-first upload dialog; Radar outreach columns hidden by default, facets, "Outreach: first actions" preset; Outreach tab; Relationships "Outreach tracker" + "Eligibility gates" tabs; approval gate warning; alert field labels; e2e spec)
-- [ ] **Step 7 — Docs and demo**
+- [ ] **Step 7 — Docs and demo** (DECISIONS D-079–D-086, traceability FR-04-OUT, this file, docs/DEMO_OUTREACH.md, RUNBOOK §14 done; e2e run + screenshots waiting on access to the running stack)
 
 ## Field map (workbook → Cortex)
 
@@ -128,3 +128,28 @@ categories, 13 stay unclassified and one is classified by an existing keyword ra
   "incubator" in its own text ("Official government incubator contact listed"). Left as is: it is evidence, not an alias.
 - Before D-085, CC-010 (Cleantech Open, "not guaranteed grant") and CC-020 (Emirates GBC, "no direct grant") were
   classified `grant`. They are now unclassified, as their categories (Accelerator, Industry consortium) say.
+
+## Operator runbook
+
+- **Refresh cadence** (*reported*, workbook Read_Me): recheck deadline, contact and eligibility immediately before
+  submission; review priority rows every 30 days and sources after 90 days. Encoded in `config/outreach.yaml#refresh`;
+  the "Outreach research stale" alerts fire on `verified_on`.
+- **Re-import rules** (*decided*): research fields are refreshed by a newer workbook; tracker fields, stage, owner,
+  gates, links and contacts never are. Procedure: `docs/RUNBOOK.md` §14.
+- **First contact** (*decided*, I3): draft from the Outreach tab → Approval Inbox → approve with MFA. Nothing is sent
+  from this register otherwise; no phone or web-form actions.
+- **Owners** (*decided*, D-084): fill `owners:` in `config/outreach.yaml` (proposed owner text → user id), then
+  Relationships → Outreach tracker → *Apply proposed owners…* (admin, dry run first).
+- **30-day playbook**: `11_30_Day_Playbook` stays the operating plan; it is not imported.
+- **Vertical pitches**: `13_Vertical_Pitches` are Proposal Factory package inputs; not imported.
+
+## Deferred and open (*decided*)
+
+- Entering a stated amount for an outreach opportunity has no UI or API today (amounts can't be edited on any
+  opportunity). Until it exists, outreach rows never reach the weighted pipeline. Not stubbed.
+- `09_Source_Register` evidence notes are not attached to `outreach_profile.source_ref` in this pass (optional in the
+  prompt).
+- Pre-existing, not from this work: `tests/integration/test_phase3_flow.py::test_phase3_definition_of_done` fails on
+  `feat/cortex_1.0` (WIP commit 27bac00): the outbox now blocks the board-pack attachment as "not a recorded proposal
+  export". Left for the owner of that change.
+

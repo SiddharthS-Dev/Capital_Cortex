@@ -302,3 +302,29 @@ would have lost): 1.9–184 s, against the 870 s bound. The longest observed gap
   `python scripts/scan.py --skip-trivy --network capital-cortex_default --ui http://web:8080 --api http://api-load:8000/v1/openapi.json --active --active-token-user dev-analyst`.
 - Findings, fixes, accepted risks and the app-code backlog are in `docs/SECURITY_SCAN.md`. CI runs the image scans,
   the dependency scan, the ZAP baseline and the safe API scan in `build-scan-smoke`.
+
+## 14. Capital outreach workbook: re-importing a newer version (FR-04-OUT)
+
+The CEO's outreach workbook (`docs/OUTREACH.md`) is imported through the `capital_outreach` source. Re-importing a
+newer version is safe by design:
+
+1. **Inspect first.** Sources → Capital Cortex outreach workbook → Upload → check the dialog: sheet
+   `12_Meris_Import`, every header matched (27 today), no "Missing" line, the row count you expect. A renamed column
+   shows as unmatched: fix `config/adapters/capital_outreach.yaml` (`mapping`), not the workbook. Rows without
+   `engine = Meris` and `module = Capital Cortex` are skipped as "not a Capital Cortex import row"; a formula cell
+   with no stored value fails its row (open and save the workbook in Excel so values are cached).
+2. **Import.** Unchanged prospects are duplicates. A prospect whose research changed (route, outlooks, priority,
+   programme status, next action, contact channel, verified date) is updated in place, keyed by `prospect_id`
+   (`capital_outreach:CC-001`); no duplicate opportunity is created.
+3. **What a re-import never touches:** the tracker (status, first sent, next action date, reply, eligibility
+   decision, notes), the pipeline stage, owner, status, a human class override, gate status and owner, links, and
+   contacts. The workbook's own `status` column is kept as `import_status` for reference only.
+4. **Gates:** Relationships → Eligibility gates → Import from workbook (dry run, then Import). Text is refreshed by
+   gate code; status, owner and links stay as people set them.
+5. **Check:** Radar → Outreach: first actions; the Outreach tab's *research_warnings* list any value outside the
+   workbook's vocabulary (stored empty, never guessed) and the ⚠ next to Analyst priority flags a stated priority
+   that disagrees with relevance×10 + accessibility×6 + readiness×4 (shown as stated, never corrected).
+
+Refresh cadence (workbook Read_Me, `config/outreach.yaml#refresh`): priority rows (analyst priority ≥ 80) are
+flagged for re-verification after 30 days and every row after 90 days ("Outreach research stale" alerts).
+Never copy old funding amounts into new calls: amounts are not imported from this workbook at all.
