@@ -61,8 +61,10 @@ def _filters(
     demo: bool | None,
 ) -> str:
     where = ["o.org_id = :org"]
+    # the facets report NULLs as 'unclassified' / 'unscored' / 'none'; filtering on those values must match the
+    # NULL rows (an "OR ... IS NULL" arm, not coalesce(), so the column indexes still apply)
     if cls:
-        where.append("o.class::text = ANY(:cls)")
+        where.append("(o.class::text = ANY(:cls) OR ('unclassified' = ANY(:cls) AND o.class IS NULL))")
         p["cls"] = cls
     if stage:
         where.append("o.pipeline_stage::text = ANY(:stage)")
@@ -71,7 +73,7 @@ def _filters(
         where.append("o.geography && CAST(:geo AS text[])")
         p["geo"] = [g.upper() for g in geo]
     if band:
-        where.append("o.score_band = ANY(:band)")
+        where.append("(o.score_band = ANY(:band) OR ('unscored' = ANY(:band) AND o.score_band IS NULL))")
         p["band"] = band
     where.append("o.status = ANY(:status)")
     p["status"] = status or ["active", "watchlist"]
@@ -93,7 +95,7 @@ def _filters(
         where.append("o.owner_id = :owner")
         p["owner"] = owner
     if source:
-        where.append("s.adapter_key = ANY(:src)")
+        where.append("(s.adapter_key = ANY(:src) OR ('none' = ANY(:src) AND s.adapter_key IS NULL))")
         p["src"] = source
     if demo is not None:
         where.append("o.is_demo = :demo")

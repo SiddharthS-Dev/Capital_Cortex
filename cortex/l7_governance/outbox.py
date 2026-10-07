@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.l7_governance import audit_service
 from cortex.l7_governance.approval_service import _decisions, _opa_approvals
-from cortex.l7_governance.policy_engine import evaluate_release, governance_config, release_input
+from cortex.l7_governance.policy_engine import effective_flags, evaluate_release, governance_config, release_input
 from platform_core import objectstore, secrets
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
@@ -43,6 +43,7 @@ from platform_core.signing import ApprovalTokenSigner, InvalidApprovalToken, Sig
 
 log = logging.getLogger(__name__)
 MAX_DELIVERY_ATTEMPTS = 5
+EXPORT_BUCKET = "cortex-docs"  # where proposal exports are stored (cortex.l8_actuation.proposals.DOCS_BUCKET)
 
 
 class ReleaseBlocked(Problem):
@@ -89,6 +90,23 @@ async def _attachments(payload: dict[str, Any]) -> list[tuple[str, bytes]]:
             )
         out.append((a["filename"], data))
     return out
+
+
+async def _check_attachment_provenance(s: AsyncSession, payload: dict[str, Any]) -> None:
+    """Every attachment must be a recorded proposal export (same object and checksum): nothing else is ever sent."""
+    for a in payload.get("attachments") or []:
+        ok = (
+            await s.execute(
+                text(
+                    "SELECT 1 FROM proposal_export WHERE org_id = :org AND storage_key = :k AND checksum = :c LIMIT 1"
+                ),
+                {"org": get_settings().org_id, "k": str(a.get("key") or ""), "c": str(a.get("sha256") or "")},
+            )
+        ).first()
+        if a.get("bucket") != EXPORT_BUCKET or ok is None:
+            raise ReleaseBlocked(
+                f"attachment {a.get('filename')} is not a recorded proposal export", ["attachment_not_allowed"]
+            )
 
 
 async def _activate_share_link(s: AsyncSession, row: dict[str, Any]) -> str:
@@ -195,6 +213,7 @@ async def verify_release(s: AsyncSession, row: dict[str, Any]) -> tuple[dict[str
         raise ReleaseBlocked(str(e), ["approval_token_invalid"]) from e
     if claims["jti"] != a["token_jti"] or digest != a["content_hash"]:
         raise ReleaseBlocked("the token does not belong to the current approval", ["approval_token_invalid"])
+    await _check_attachment_provenance(s, row["payload"])
     decisions = await _decisions(s, str(a["id"]))
     decision = await evaluate_release(
         release_input(
@@ -203,7 +222,7 @@ async def verify_release(s: AsyncSession, row: dict[str, Any]) -> tuple[dict[str
             subject_type="outbox",
             recipient_external=bool(row["recipient_external"]),
             digest=digest,
-            flags=dict(row["flags"] or {}),
+            flags=effective_flags(row["flags"], row["payload"], row["kind"], row["recipient"]),
             approvals=_opa_approvals(decisions),
             requested_by=a["requested_by"],
         )

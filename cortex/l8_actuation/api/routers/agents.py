@@ -20,6 +20,7 @@ from cortex.l6_agency.agent_config import agents
 from cortex.l6_agency.tool_registry import describe as describe_tools
 from cortex.l7_governance import approval_service, audit_service
 from cortex.l7_governance.approval_service import recommendation_content
+from cortex.l7_governance.policy_engine import content_flags
 from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
@@ -318,7 +319,8 @@ async def edit_recommendation(
     for o in (
         await session.execute(
             text(
-                "SELECT id, payload FROM outbox WHERE recommendation_id = :id AND status <> 'sent' AND channel = 'portal_export'"
+                "SELECT id, payload, kind, recipient FROM outbox WHERE recommendation_id = :id AND status <> 'sent' "
+                "AND channel = 'portal_export'"
             ),
             {"id": r["id"]},
         )
@@ -328,9 +330,10 @@ async def edit_recommendation(
             await session.execute(text("SELECT approval_id FROM outbox WHERE id = :id"), {"id": o["id"]})
         ).scalar()
         await session.execute(
-            text("UPDATE outbox SET payload = CAST(:p AS jsonb), content_hash = :h WHERE id = :id"),
-            {"p": json.dumps(payload, default=str), "h": content_hash(payload), "id": o["id"]},
-        )
+            text("UPDATE outbox SET payload = CAST(:p AS jsonb), content_hash = :h, flags = CAST(:f AS jsonb) WHERE id = :id"),
+            {"p": json.dumps(payload, default=str), "h": content_hash(payload), "id": o["id"],
+             "f": json.dumps(content_flags(payload, o["kind"], o["recipient"]))},
+        )  # fmt: skip
         invalidated += 1 if before else 0
     status = (await session.execute(text("SELECT status FROM recommendation WHERE id = :id"), {"id": r["id"]})).scalar()
     await audit_service.record(

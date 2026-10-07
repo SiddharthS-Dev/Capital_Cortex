@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.l7_governance import audit_service
 from cortex.l7_governance.policy_engine import (
     content_flags,
+    effective_flags,
     evaluate_release,
     governance_config,
     release_input,
@@ -135,7 +136,7 @@ async def load_subject(s: AsyncSession, subject_type: str, subject_id: str, lock
             r["kind"],
             r["channel"],
             bool(r["recipient_external"]),
-            dict(r["flags"] or {}) or content_flags(payload, r["kind"], r["recipient"]),
+            effective_flags(r["flags"], payload, r["kind"], r["recipient"]),
             {"channel": r["channel"], "kind": r["kind"], "recipient": r["recipient"], "payload": payload},
             r["deadline"],
             str(r["recommendation_id"]) if r["recommendation_id"] else None,

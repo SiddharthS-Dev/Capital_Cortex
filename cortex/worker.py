@@ -25,6 +25,7 @@ from platform_core.auth.principal import Principal
 from platform_core.bus import Envelope, get_bus
 from platform_core.config import get_settings
 from platform_core.db import session_scope
+from platform_core.errors import Forbidden
 from platform_core.observability.metrics import start_metrics_server
 from platform_core.observability.otel import setup_otel
 
@@ -33,7 +34,7 @@ log = logging.getLogger("cortex.worker")
 
 @dataclass(frozen=True)
 class Job:
-    permission: str
+    permission: str | tuple[str, ...]  # several = any one suffices
     resource: str
     fn: Callable[[Envelope, Principal], Awaitable[None]]
 
@@ -186,7 +187,8 @@ async def _retention(env: Envelope, principal: Principal) -> None:
 JOBS: dict[str, Job] = {
     "system.ping": Job("system:ping", "system", _ping),
     "ingest.run": Job("source:run", "source", _ingest),
-    "signal.ingested": Job("graph:write", "signal", _process_signal),
+    # processing a stored signal is the system consequence of an ingestion the actor was allowed to start
+    "signal.ingested": Job(("graph:write", "source:run"), "signal", _process_signal),
     "scoring.rescore": Job("opportunity:write", "opportunity", _rescore),
     "council.run": Job("agent:run", "agent_run", _council),
     "outbox.release": Job("outbox:send", "outbox", _release),
@@ -218,8 +220,18 @@ async def dispatch(env: Envelope) -> None:
     job = JOBS.get(env.type)
     if job is None:
         raise ValueError(f"no handler for job type {env.type!r}")
-    principal = await get_verifier().verify(env.actor_token)  # raises Unauthorized → DLQ (permanent)
-    await check_access(principal, job.permission, Resource(type=job.resource), {"job": env.type, "envelope": env.id})
+    # judged as of publishing: a job that waited in the queue past its token's lifetime still runs (I4 holds:
+    # the signature is verified and the actor must hold the job's permission); a forged/foreign token → DLQ
+    principal = await get_verifier().verify_job(env.actor_token, env.ts)
+    perms = (job.permission,) if isinstance(job.permission, str) else job.permission
+    ctx = {"job": env.type, "envelope": env.id}
+    for i, perm in enumerate(perms):  # any one of the listed permissions suffices
+        try:
+            await check_access(principal, perm, Resource(type=job.resource), ctx)
+            break
+        except Forbidden:
+            if i == len(perms) - 1:
+                raise
     await job.fn(env, principal)
 
 

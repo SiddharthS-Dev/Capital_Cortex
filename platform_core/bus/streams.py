@@ -107,7 +107,12 @@ class Bus:
     async def _handle_one(
         self, stream: str, group: str, msg_id: str, fields: dict[str, str], handler: Handler, delivery_count: int
     ) -> str:
-        env = Envelope.from_fields(fields)
+        try:
+            env = Envelope.from_fields(fields)
+        except Exception as e:  # malformed message: dead-letter it, never let it crash the consumer (poison message)
+            raw = Envelope(type=str(fields.get("type") or "malformed"), payload={"raw_fields": fields})
+            await self.dead_letter(stream, group, msg_id, raw, e)
+            return "dlq"
         idem_key = f"idem:{group}:{env.idempotency_key}"
         if await self.r.exists(idem_key):
             await self.r.xack(stream, group, msg_id)
@@ -204,19 +209,28 @@ class Bus:
             except aioredis.ConnectionError as e:
                 log.error("redis connection lost: %s", e)
                 await asyncio.sleep(backoff_seconds(3))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # e.g. dead-lettering itself failed: keep consuming; the message is reclaimed later
+                log.exception("consumer loop error", extra={"stream": stream, "group": group})
+                await asyncio.sleep(backoff_seconds(3))
 
     # ---------- DLQ ops ----------
     async def dlq_list(self, stream: str, count: int = 100) -> list[dict[str, Any]]:
         items: Any = await self.r.xrevrange(f"{stream}.dlq", count=count)
         return [{"dlq_id": _s(i), **_decode(f)} for i, f in items]
 
-    async def dlq_replay(self, stream: str, dlq_id: str) -> str | None:
+    async def dlq_replay(self, stream: str, dlq_id: str, actor_token: str | None = None) -> str | None:
+        """Republish one dead letter. ``actor_token`` replaces the stored one, so the job runs as whoever replays it
+        (never as the original actor, whose identity the replayer may not hold)."""
         rows: Any = await self.r.xrange(f"{stream}.dlq", min=dlq_id, max=dlq_id)
         if not rows:
             return None
         f = _decode(rows[0][1])
         env = Envelope.from_fields(f)
         env.attempt = 0
+        if actor_token is not None:
+            env.actor_token = actor_token
         new_id = await self.publish(f.get("source_stream", stream), env)
         await self.r.xdel(f"{stream}.dlq", dlq_id)
         return new_id

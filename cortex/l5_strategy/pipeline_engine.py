@@ -7,6 +7,7 @@ probability (config/scoring/reference.yaml). Amounts are summed per currency, ne
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from dateutil.relativedelta import relativedelta
@@ -84,8 +85,25 @@ async def weighted_pipeline(s: AsyncSession, include_demo: bool = True) -> dict[
     }
 
 
-async def expected_inflows(s: AsyncSession, currency: str, include_demo: bool = True) -> list[Inflow]:
-    """Inflows for the forecast: qualified+ opportunities, at deadline + class decision lag, weighted by p."""
+def _fx_factor(ccy: str | None, target: str, rates: dict[str, Decimal] | None) -> float | None:
+    """Multiplier from ``ccy`` into ``target`` via EUR cross rates; None when there is no rate (never guessed)."""
+    if ccy == target:
+        return 1.0
+    if not ccy or not rates or ccy not in rates or target not in rates:
+        return None
+    return float(rates[target] / rates[ccy])
+
+
+async def expected_inflows(
+    s: AsyncSession,
+    currency: str,
+    include_demo: bool = True,
+    rates: dict[str, Decimal] | None = None,
+    excluded: dict[str, int] | None = None,
+) -> list[Inflow]:
+    """Inflows for the forecast: qualified+ opportunities, at deadline + class decision lag, weighted by p.
+    Opportunities in another currency are converted with ``rates`` (EUR-based ECB rates); those without a rate
+    are counted in ``excluded`` by currency instead of silently disappearing."""
     a = assumptions()
     probs = reference()["stage_probability"]
     lag = a["decision_lag_months"]
@@ -94,10 +112,10 @@ async def expected_inflows(s: AsyncSession, currency: str, include_demo: bool = 
             await s.execute(
                 text(
                     "SELECT o.id, o.title, o.class::text AS class, o.pipeline_stage::text AS stage, o.deadline, o.amount_min, "
-                    f"o.amount_max FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy "
+                    f"o.amount_max, NULLIF(o.currency, '') AS currency FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} "
                     "AND o.pipeline_stage::text = ANY(:stages) AND (:demo OR NOT o.is_demo)"
                 ),
-                {"org": get_settings().org_id, "ccy": currency, "stages": a["inflow_stages"], "demo": include_demo},
+                {"org": get_settings().org_id, "stages": a["inflow_stages"], "demo": include_demo},
             )
         )
         .mappings()
@@ -112,13 +130,25 @@ async def expected_inflows(s: AsyncSession, currency: str, include_demo: bool = 
         )
         if mid is None:
             continue
+        factor = _fx_factor(r["currency"], currency, rates)
+        if factor is None:
+            if excluded is not None:
+                excluded[r["currency"] or "none"] = excluded.get(r["currency"] or "none", 0) + 1
+            continue
+        mid *= factor
         base = r["deadline"].date() if r["deadline"] else today
         when = month_start(max(base, today)) + relativedelta(months=int(lag.get(r["class"] or "", lag["default"])))
         out.append(Inflow(when, mid, float(probs.get(r["stage"], 0)), str(r["id"]), r["title"], r["class"]))
     return out
 
 
-async def grouped_inflows(s: AsyncSession, currency: str, include_demo: bool = True) -> list[Inflow]:
+async def grouped_inflows(
+    s: AsyncSession,
+    currency: str,
+    include_demo: bool = True,
+    rates: dict[str, Decimal] | None = None,
+    excluded: dict[str, int] | None = None,
+) -> list[Inflow]:
     """expected_inflows summed in SQL per (month, class, stage). Totals are identical, because p depends only on
     the stage. Use it where no per-opportunity probability override applies (dashboard and alert presets): at
     1M nodes this is one aggregate instead of ~50k Python rows."""
@@ -133,14 +163,13 @@ async def grouped_inflows(s: AsyncSession, currency: str, include_demo: bool = T
                     "WITH l AS (SELECT * FROM unnest(CAST(:classes AS text[]), CAST(:lags AS int[])) AS t(cls, lag)) "
                     "SELECT (date_trunc('month', GREATEST(COALESCE(o.deadline::date, current_date), current_date)) "
                     "+ make_interval(months => COALESCE(l.lag, :dlag)))::date AS month, o.class::text AS class, "
-                    f"o.pipeline_stage::text AS stage, sum(({_MID})::float8) AS amount, count(*) AS n "
-                    "FROM opportunity o LEFT JOIN l ON l.cls = o.class::text "
-                    f"WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy AND o.pipeline_stage::text = ANY(:stages) "
-                    f"AND (:demo OR NOT o.is_demo) AND ({_MID}) IS NOT NULL GROUP BY 1, 2, 3"
+                    f"o.pipeline_stage::text AS stage, NULLIF(o.currency, '') AS currency, sum(({_MID})::float8) AS amount, "
+                    "count(*) AS n FROM opportunity o LEFT JOIN l ON l.cls = o.class::text "
+                    f"WHERE o.org_id = :org AND {ACTIVE} AND o.pipeline_stage::text = ANY(:stages) "
+                    f"AND (:demo OR NOT o.is_demo) AND ({_MID}) IS NOT NULL GROUP BY 1, 2, 3, 4"
                 ),
                 {
                     "org": get_settings().org_id,
-                    "ccy": currency,
                     "stages": a["inflow_stages"],
                     "demo": include_demo,
                     "classes": classes,
@@ -152,15 +181,22 @@ async def grouped_inflows(s: AsyncSession, currency: str, include_demo: bool = T
         .mappings()
         .all()
     )
-    return [
-        Inflow(
-            r["month"],
-            float(r["amount"]),
-            float(probs.get(r["stage"], 0)),
-            f"group:{r['class'] or 'unclassified'}:{r['stage']}:{r['month']:%Y-%m}",
-            f"{r['n']} {r['stage']} opportunities",
-            r["class"],
-            int(r["n"]),
+    out = []
+    for r in rows:
+        factor = _fx_factor(r["currency"], currency, rates)
+        if factor is None:
+            if excluded is not None:
+                excluded[r["currency"] or "none"] = excluded.get(r["currency"] or "none", 0) + int(r["n"])
+            continue
+        out.append(
+            Inflow(
+                r["month"],
+                float(r["amount"]) * factor,
+                float(probs.get(r["stage"], 0)),
+                f"group:{r['class'] or 'unclassified'}:{r['stage']}:{r['currency']}:{r['month']:%Y-%m}",
+                f"{r['n']} {r['stage']} opportunities" + (f" ({r['currency']})" if r["currency"] != currency else ""),
+                r["class"],
+                int(r["n"]),
+            )
         )
-        for r in rows
-    ]
+    return out

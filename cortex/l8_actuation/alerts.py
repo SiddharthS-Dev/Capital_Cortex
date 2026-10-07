@@ -186,11 +186,12 @@ async def _runway(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[dic
         )
         if demo and not has_demo_only:
             continue
-        if res["status"] == "ok" and not res["beyond_horizon"] and res["runway_months"] < float(e.get("months", 9)):
+        months = res.get("runway_months_from_today", res["runway_months"])  # from today, not from the last snapshot
+        if res["status"] == "ok" and not res["beyond_horizon"] and months < float(e.get("months", 9)):
             out.append({
                 "key": f"runway:{'demo' if demo else 'real'}:{res['zero_cash_date']}", "subject": ("forecast", None), "demo": demo,
                 "drill": "/forecast",
-                "message": f"Base-case runway {res['runway_months']:.2f} months (< {e.get('months', 9)}); zero cash {res['zero_cash_date']}",
+                "message": f"Base-case runway {months:.2f} months (< {e.get('months', 9)}); zero cash {res['zero_cash_date']}",
             })  # fmt: skip
     return out
 

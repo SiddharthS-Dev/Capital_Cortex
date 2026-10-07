@@ -233,7 +233,7 @@ async def _slip(s: Any, ctx: ToolContext, opp: dict[str, Any], delay: int, pack:
                 gaps: list[str]) -> None:  # fmt: skip
     """Runway if this opportunity's money arrives ``delay`` months later (deterministic forecast_engine)."""
     from cortex.l5_strategy.forecast_engine import Scenario, assumptions, month_start
-    from cortex.l5_strategy.forecasting import run_scenarios
+    from cortex.l5_strategy.forecasting import run_scenarios, to_forecast_currency
     from cortex.l5_strategy.pipeline_engine import amount_mid
 
     mid = amount_mid(float(opp["amount_min"]) if opp.get("amount_min") is not None else None,
@@ -241,15 +241,23 @@ async def _slip(s: Any, ctx: ToolContext, opp: dict[str, Any], delay: int, pack:
     if mid is None:
         gaps.append("the opportunity states no amount, so its runway effect can't be computed")
         return
+    # the forecast runs in the snapshot currency: an INR or EUR amount must be converted, never added as-is
+    mid, fc_ccy = await to_forecast_currency(s, mid, opp.get("currency"), bool(opp.get("is_demo")))
+    if mid is None:
+        gaps.append(f"no exchange rate from {opp.get('currency') or 'an unstated currency'} to the forecast "
+                    f"currency ({fc_ccy or 'none'}), so its runway effect can't be computed")  # fmt: skip
+        return
     lag = assumptions()["decision_lag_months"]
     base_day = (opp.get("deadline") or datetime.now(UTC)).date()
     when = month_start(max(base_day, date.today())) + relativedelta(
         months=int(lag.get(opp.get("class") or "", lag["default"]))
     )
-    today = month_start(date.today())
-    off = (when.year - today.year) * 12 + when.month - today.month
-    sc = [Scenario(name="on_time", raise_amount=mid, raise_month_offset=max(0, off), raise_probability=1.0),
-          Scenario(name="slipped", raise_amount=mid, raise_month_offset=max(0, off + delay), raise_probability=1.0)]  # fmt: skip
+    # absolute months (the engine counts from the last snapshot, not today); the opportunity's own pipeline share
+    # is zeroed so the certain amount isn't counted twice
+    own = {str(opp["id"]): 0.0} if opp.get("id") else {}
+    sc = [Scenario(name="on_time", raise_amount=mid, raise_month=when, raise_probability=1.0, probability_overrides=own),
+          Scenario(name="slipped", raise_amount=mid, raise_month=when + relativedelta(months=delay), raise_probability=1.0,
+                   probability_overrides=own)]  # fmt: skip
     out = await run_scenarios(s, sc, include_demo=bool(opp.get("is_demo")))
     res = {r["scenario"]: r for r in out["results"]}
     if res["on_time"]["status"] != "ok":

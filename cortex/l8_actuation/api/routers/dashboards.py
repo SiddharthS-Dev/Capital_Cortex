@@ -118,13 +118,14 @@ async def _risks(s: AsyncSession, runway: dict[str, Any], demo: bool) -> list[di
     risks: list[dict[str, Any]] = []
     base = runway["base"]
     limit = get_settings().runway_alert_months
-    if base["status"] == "ok" and not base["beyond_horizon"] and base["runway_months"] < limit:
+    # counted from today: a stale snapshot must not hide a short runway
+    months = base.get("runway_months_from_today", base.get("runway_months"))
+    if base["status"] == "ok" and not base["beyond_horizon"] and months < limit:
         risks.append(
             {
                 "kind": "runway_risk",
                 "severity": "critical",
-                "message": f"Base-case runway {base['runway_months']:.1f} months (< {limit}); zero cash "
-                f"{base['zero_cash_date']}",
+                "message": f"Base-case runway {months:.1f} months (< {limit}); zero cash {base['zero_cash_date']}",
                 "drill": "/forecast",
             }
         )
@@ -265,7 +266,8 @@ async def dashboard(
             "gap": None if base["status"] == "ok" else "No burn data",
         },
         "runway": {
-            "months": base.get("runway_months"),
+            "months": base.get("runway_months_from_today", base.get("runway_months")),
+            "snapshot_age_months": base.get("snapshot_age_months"),
             "zero_cash_date": base.get("zero_cash_date"),
             "beyond_horizon": base.get("beyond_horizon"),
             "status": base["status"],
@@ -299,7 +301,7 @@ async def dashboard(
                 {
                     "scenario": r["scenario"],
                     "status": r["status"],
-                    "runway_months": r["runway_months"],
+                    "runway_months": r.get("runway_months_from_today", r["runway_months"]),
                     "zero_cash_date": r["zero_cash_date"],
                     "series": [{"month": m["month"], "cash_end": m["cash_end"]} for m in r["series"]],
                 }

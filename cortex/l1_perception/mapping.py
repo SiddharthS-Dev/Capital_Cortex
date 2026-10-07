@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -33,7 +34,25 @@ _TZINFOS = {
     "CDT": tz.gettz("America/Chicago"),
     "PST": tz.gettz("America/Los_Angeles"),
     "PDT": tz.gettz("America/Los_Angeles"),
+    # generic (DST-aware) names that listings use; unknown ones are otherwise silently read as UTC
+    "ET": tz.gettz("America/New_York"),
+    "CT": tz.gettz("America/Chicago"),
+    "MT": tz.gettz("America/Denver"),
+    "PT": tz.gettz("America/Los_Angeles"),
+    "MST": tz.gettz("America/Denver"),
+    "MDT": tz.gettz("America/Denver"),
+    "CET": tz.gettz("Europe/Brussels"),
+    "CEST": tz.gettz("Europe/Brussels"),
+    "EET": tz.gettz("Europe/Athens"),
+    "EEST": tz.gettz("Europe/Athens"),
+    "IST": tz.gettz("Asia/Kolkata"),
+    "SGT": tz.gettz("Asia/Singapore"),
+    "JST": tz.gettz("Asia/Tokyo"),
+    "AEST": tz.gettz("Australia/Sydney"),
+    "AEDT": tz.gettz("Australia/Sydney"),
 }
+_D1, _D2 = datetime(2000, 1, 1), datetime(2000, 1, 2)
+_YEAR_FIRST = re.compile(r"\d{4}[-/.]\d{1,2}")
 
 
 def get_path(obj: Any, path: str) -> Any:
@@ -70,29 +89,105 @@ def strip_html(s: str) -> str:
     return _WS.sub(" ", _TAGS.sub(" ", s).replace(" ", " ")).strip()
 
 
-def to_date(v: Any) -> datetime | None:
+def to_date(v: Any, *, dayfirst: bool = False, require_day: bool = False) -> datetime | None:
+    """Parse a date. ``dayfirst`` reads 03/10/2026 as 3 October (the source's convention; ISO dates are unaffected).
+    ``require_day`` rejects values without a day ("March 2027") instead of inventing one from today's date."""
     if _empty(v):
         return None
     if isinstance(v, datetime):
         d = v
     else:
+        text = _UK_TIME.sub("UKT", str(v))
+        # year-first (ISO) values are unambiguous; dateutil would read 2026-10-03 as 10 March under dayfirst
+        dayfirst = dayfirst and not _YEAR_FIRST.match(text.strip())
         try:
-            d = dateparser.parse(_UK_TIME.sub("UKT", str(v)), tzinfos=_TZINFOS)
+            d = dateparser.parse(text, tzinfos=_TZINFOS, dayfirst=dayfirst, default=_D1)
+            if require_day and dateparser.parse(text, tzinfos=_TZINFOS, dayfirst=dayfirst, default=_D2).day != d.day:
+                return None  # the day came from the default, not from the value
         except (ValueError, OverflowError):
             return None
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
-def to_number(v: Any) -> Decimal | None:
-    if _empty(v):
-        return None
+_MULTIPLIERS = {
+    "k": 10**3, "thousand": 10**3, "m": 10**6, "mn": 10**6, "mm": 10**6, "mio": 10**6, "million": 10**6,
+    "millions": 10**6, "b": 10**9, "bn": 10**9, "billion": 10**9, "billions": 10**9,
+}  # fmt: skip
+# one amount: optional sign, digits with separators (or scientific), optional magnitude word
+_AMOUNT = re.compile(
+    r"(?P<neg>-)?\s*(?P<num>\d[\d.,' ]*\d|\d)(?P<exp>[eE][+-]?\d+)?\s*(?P<mult>thousand|millions?|billions?|mio|mn|mm|bn|k|m|b)?\b",
+    re.IGNORECASE,
+)
+_RANGE_SEP = re.compile(
+    r"\d\s*(?:[kmb]|bn|mn|million|billion|thousand)?\s*(?:-|–|—|\bto\b|\bbis\b|\bà\b)\s*\D{0,4}\d", re.I
+)
+
+
+def _plain_number(s: str) -> Decimal | None:
+    """Digits with thousands/decimal separators in either convention: 1,250,000.50 · 1.250.000,50 · 1 250 000."""
+    s = s.replace(" ", "").replace("'", "")
+    if "," in s and "." in s:  # the later one is the decimal separator
+        s = s.replace(",", "") if s.rfind(".") > s.rfind(",") else s.replace(".", "").replace(",", ".")
+    elif s.count(",") > 1 or re.fullmatch(r"\d{1,3}(,\d{3})+", s):
+        s = s.replace(",", "")
+    elif "," in s:  # one comma, not 3 digits after it: European decimal ("1,5")
+        s = s.replace(",", ".")
+    elif s.count(".") > 1 or re.fullmatch(r"\d{1,3}(\.\d{3}){2,}", s):
+        s = s.replace(".", "")
     try:
-        return Decimal(re.sub(r"[^\d.\-]", "", str(v)))
+        return Decimal(s)
     except InvalidOperation:
         return None
 
 
-TRANSFORMS = {
+def _amounts(text: str) -> list[Decimal]:
+    out = []
+    for m in _AMOUNT.finditer(text):
+        n = _plain_number(m["num"].strip())
+        if n is None:
+            continue
+        if m["exp"]:
+            n = n.scaleb(int(m["exp"][1:]))
+        if m["mult"]:
+            n *= _MULTIPLIERS[m["mult"].lower()]
+        out.append(-n if m["neg"] else n)
+    return out
+
+
+def to_range(v: Any) -> tuple[Decimal, Decimal] | None:
+    """ "10000 to 50000", "€10k–€50k", "1-2 million" → (low, high); None unless the value is a range."""
+    if _empty(v) or isinstance(v, int | float | Decimal) or not _RANGE_SEP.search(str(v)):
+        return None
+    text = str(v).replace("–", " - ").replace("—", " - ")
+    parts = re.split(r"\s+-\s+|(?<=\d)-(?=\d)|(?<=[kmb])-(?=\d)|\bto\b|\bbis\b|\bà\b", text, maxsplit=1, flags=re.I)
+    if len(parts) != 2:
+        return None
+    lo, hi = _amounts(parts[0]), _amounts(parts[1])
+    if len(lo) != 1 or len(hi) != 1:
+        return None
+    low, high = lo[0], hi[0]
+    mult_lo, mult_hi = _AMOUNT.search(parts[0]), _AMOUNT.search(parts[1])
+    if mult_hi and mult_hi["mult"] and not (mult_lo and mult_lo["mult"]):  # "1-2 million": scale both ends
+        low *= _MULTIPLIERS[mult_hi["mult"].lower()]
+    return (low, high) if low <= high else (high, low)
+
+
+def to_number(v: Any) -> Decimal | None:
+    """One amount from text: "$1,250,000" · "$5M" · "Up to £500k" · "€1.000.000" · "2.5e6" · "(5,000)" (negative).
+    A range or several numbers is ambiguous → None (never guessed); use ``to_range`` for ranges."""
+    if _empty(v):
+        return None
+    if isinstance(v, int | float | Decimal) and not isinstance(v, bool):
+        return Decimal(str(v))
+    text = str(v).strip()
+    negative = text.startswith("(") and text.endswith(")")
+    found = _amounts(text.strip("()"))
+    if len(found) != 1:
+        return None
+    return -found[0] if negative else found[0]
+
+
+TRANSFORMS: dict[str, Callable[[Any], Any]] = {
     "date": to_date,
     "number": to_number,
     "html": lambda v: strip_html(str(v)) if not _empty(v) else None,

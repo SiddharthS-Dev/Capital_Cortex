@@ -161,19 +161,19 @@ async def patch_document(id: str, body: DocPatch, request: Request, p: Principal
 
 
 @router.get("/checklist", summary="DD checklist auto-mapped to documents (covered / pending approval / missing)")
-async def checklist(include_demo: bool | None = None, _: Principal = Depends(authorize("dataroom:read", "document")),
+async def checklist(include_demo: bool | None = None, p: Principal = Depends(authorize("dataroom:read", "document")),
                     session: AsyncSession = Depends(get_session, scope="function")) -> dict[str, Any]:  # fmt: skip
-    return await svc.checklist(session, include_demo)
+    return await svc.checklist(session, include_demo, actor=p)
 
 
 @router.get("/access-log", summary="Who opened, downloaded, packaged or shared what")
 async def access_log(document_id: str | None = None, limit: int = Query(100, ge=1, le=500),
-                     _: Principal = Depends(authorize("dataroom:read", "document")),
+                     p: Principal = Depends(authorize("dataroom:read", "document")),
                      session: AsyncSession = Depends(get_session, scope="function")) -> dict[str, Any]:  # fmt: skip
     rows = (
         (
             await session.execute(
-                text("SELECT a.id, a.document_id, d.title, a.package_id, a.share_link_id, a.actor, a.action, a.detail, a.created_at FROM document_access a "
+                text("SELECT a.id, a.document_id, d.title, d.classification, a.package_id, a.share_link_id, a.actor, a.action, a.detail, a.created_at FROM document_access a "
                      "LEFT JOIN document d ON d.id = a.document_id WHERE a.org_id = :org AND (CAST(:d AS uuid) IS NULL OR a.document_id = CAST(:d AS uuid)) "
                      "ORDER BY a.created_at DESC LIMIT :n"),
                 {"org": get_settings().org_id, "d": document_id, "n": limit},
@@ -182,7 +182,9 @@ async def access_log(document_id: str | None = None, limit: int = Query(100, ge=
         .mappings()
         .all()
     )  # fmt: skip
-    return {"items": [row(r) for r in rows]}
+    # entries about documents above the reader's clearance are left out (their titles are sensitive too)
+    visible = [r for r in rows if r["classification"] is None or svc._can_read(p, r["classification"])]
+    return {"items": [{k: v for k, v in row(r).items() if k != "classification"} for r in visible]}
 
 
 class PackageIn(BaseModel):
@@ -203,14 +205,14 @@ async def assemble(
 
 @router.get("/packages", summary="Assembled packages with their share links")
 async def packages(
-    _: Principal = Depends(authorize("dataroom:read", "document")),
+    p: Principal = Depends(authorize("dataroom:read", "document")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     rows = (
         (
             await session.execute(
                 text("SELECT p.id, p.name, p.opportunity_id, cardinality(p.document_ids) AS files, p.checksum, p.size_bytes, p.created_by, p.created_at, p.is_demo, "
-                     "(SELECT coalesce(jsonb_agg(jsonb_build_object('id', l.id, 'recipient', l.recipient, 'status', l.status, 'expires_at', l.expires_at, "
+                     "p.manifest, (SELECT coalesce(jsonb_agg(jsonb_build_object('id', l.id, 'recipient', l.recipient, 'status', l.status, 'expires_at', l.expires_at, "
                      "'accessed_count', l.accessed_count, 'outbox_id', l.outbox_id)), '[]'::jsonb) FROM share_link l WHERE l.package_id = p.id) AS share_links "
                      "FROM dataroom_package p WHERE p.org_id = :org ORDER BY p.created_at DESC LIMIT 100"),
                 {"org": get_settings().org_id},
@@ -219,16 +221,17 @@ async def packages(
         .mappings()
         .all()
     )  # fmt: skip
-    return {"items": [row(r) for r in rows]}
+    readable = [r for r in rows if svc.package_readable(p, r["manifest"])]
+    return {"items": [{k: v for k, v in row(r).items() if k != "manifest"} for r in readable]}
 
 
 @router.get("/packages/{id}/manifest", summary="Package manifest with checksums")
 async def manifest(
     id: str,
-    _: Principal = Depends(authorize("dataroom:read", "document")),
+    p: Principal = Depends(authorize("dataroom:read", "document")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    pkg = await svc.package(session, id)
+    pkg = await svc.package(session, id, p)
     return {
         "id": id,
         "name": pkg["name"],
@@ -246,7 +249,7 @@ async def download_package(
 ) -> Response:
     from platform_core import objectstore
 
-    pkg = await svc.package(session, id)
+    pkg = await svc.package(session, id, p)
     data = await objectstore.get_bytes(svc.BUCKET, pkg["storage_key"])
     await svc.log_access(session, p, "download", package_id=id)
     return Response(

@@ -15,10 +15,13 @@ from jwt import PyJWKClient
 
 from platform_core.auth.principal import KNOWN_ROLES, Principal
 from platform_core.config import Settings, get_settings
-from platform_core.errors import Unauthorized
+from platform_core.errors import ServiceUnavailable, Unauthorized
 
 log = logging.getLogger(__name__)
 
+# A queued job may wait behind long runs or a worker restart: its token must have been valid when the job was
+# published, and the job must not be older than this (bounds how long a since-revoked token can still act).
+MAX_JOB_QUEUE_SECONDS = 6 * 3600
 ALLOWED_ALGS = ["RS256", "RS384", "RS512", "ES256", "PS256"]
 
 
@@ -27,9 +30,17 @@ class TokenVerifier:
         self.settings = settings or get_settings()
         self._jwks = jwk_client or PyJWKClient(self.settings.jwks_url, cache_keys=True, lifespan=3600)
 
-    def _decode(self, token: str) -> dict[str, Any]:
+    def _decode(self, token: str, verify_exp: bool = True) -> dict[str, Any]:
         try:
             key = self._jwks.get_signing_key_from_jwt(token)
+        except jwt.PyJWKClientError as e:
+            # the IdP's keys couldn't be fetched (IdP restarting, network): temporary, so 503 rather than a 401
+            # that makes the UI re-login and the bus dead-letter a job that would succeed on retry
+            log.warning("jwks lookup failed: %s", e)
+            raise ServiceUnavailable("Unable to fetch the token signing keys; retry shortly") from e
+        except jwt.InvalidTokenError as e:
+            raise Unauthorized(f"Invalid token: {e}") from e
+        try:
             return jwt.decode(
                 token,
                 key.key,
@@ -37,11 +48,8 @@ class TokenVerifier:
                 audience=self.settings.oidc_audience,
                 issuer=self.settings.oidc_issuer,
                 leeway=30,
-                options={"require": ["exp", "iat", "iss", "sub"]},
+                options={"require": ["exp", "iat", "iss", "sub"], "verify_exp": verify_exp},
             )
-        except jwt.PyJWKClientError as e:
-            log.warning("jwks lookup failed: %s", e)
-            raise Unauthorized("Unable to validate token signing key") from e
         except jwt.InvalidTokenError as e:
             raise Unauthorized(f"Invalid token: {e}") from e
 
@@ -80,6 +88,22 @@ class TokenVerifier:
     async def verify(self, token: str) -> Principal:
         # PyJWKClient does blocking I/O on a cache miss; keep it off the event loop.
         return await asyncio.to_thread(self.verify_sync, token)
+
+    def verify_job_sync(self, token: str, published_at: float, now: float | None = None) -> Principal:
+        """A queued job's token: signature, issuer and audience as usual, but expiry is judged at publish time
+        (the actor was authorised when the job was queued), within MAX_JOB_QUEUE_SECONDS of publishing."""
+        if not token:
+            raise Unauthorized()
+        now = time.time() if now is None else now
+        claims = self._decode(token, verify_exp=False)
+        if now - published_at > MAX_JOB_QUEUE_SECONDS or published_at > now + 30:
+            raise Unauthorized("Job is too old to run on its original authorisation")
+        if float(claims["exp"]) + 30 < published_at or float(claims["iat"]) - 30 > published_at:
+            raise Unauthorized("Token was not valid when the job was published")
+        return self.principal_from_claims(claims, token)
+
+    async def verify_job(self, token: str, published_at: float) -> Principal:
+        return await asyncio.to_thread(self.verify_job_sync, token, published_at)
 
 
 _verifier: TokenVerifier | None = None

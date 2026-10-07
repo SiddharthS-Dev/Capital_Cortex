@@ -58,6 +58,24 @@ def content_flags(payload: dict[str, Any], kind: str, recipient: str | None = No
     }
 
 
+def is_grant_class(capital_class: str | None) -> bool:
+    return bool(capital_class) and capital_class in governance_config().get("grant_submission_classes", [])
+
+
+def effective_flags(
+    stored: dict[str, Any] | None, payload: dict[str, Any], kind: str, recipient: str | None = None
+) -> dict[str, bool]:
+    """Flags the policies act on: recomputed from the content as it is now, OR-ed with any flag stored on the item.
+
+    Stored flags alone can go stale when a payload is rewritten outside the draft-edit path (e.g. a recommendation
+    edit regenerating a linked export), which would let financial or PII content skip its stricter release rule."""
+    current = content_flags(payload, kind, recipient)
+    stored = stored or {}
+    return {k: bool(stored.get(k)) or v for k, v in current.items()} | {
+        k: bool(v) for k, v in stored.items() if k not in current
+    }
+
+
 def local_now() -> dict[str, int]:
     tz = ZoneInfo(str(governance_config().get("timezone") or "UTC"))
     now = datetime.now(UTC).astimezone(tz)

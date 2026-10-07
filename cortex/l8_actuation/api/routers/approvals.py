@@ -21,7 +21,7 @@ from platform_core.auth.principal import Principal
 from platform_core.bus import Envelope, get_bus
 from platform_core.config import get_settings
 from platform_core.db import get_session, session_scope
-from platform_core.errors import NotFound
+from platform_core.errors import NotFound, Problem
 
 router = APIRouter(prefix="/v1", tags=["approvals"])
 
@@ -220,6 +220,10 @@ async def create_outbox(
     p: Principal = Depends(authorize("outbox:draft", "outbox")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    if body.payload.get("attachments"):
+        # only the system attaches files (proposal exports, by checksum); a client-chosen bucket/key could point at
+        # any stored object, e.g. a restricted data-room document
+        raise Problem(422, "Attachments not allowed", "attachments are added by the system", "validation")
     return await drafts.create_draft(
         session,
         p,

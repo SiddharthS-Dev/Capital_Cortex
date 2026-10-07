@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from cortex.l1_perception.mapping import resolve, strip_html, to_date, to_number
+from pydantic import ValidationError
+
+from cortex.l1_perception.mapping import resolve, strip_html, to_date, to_number, to_range
 from cortex.l1_perception.models import RawItem, Signal
 from cortex.l1_perception.registry import SourceConfig
 from platform_core.geo import normalize_countries
@@ -58,9 +60,17 @@ def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
     for f in list(fields):
         v = fields[f]
         if f in DATE_FIELDS:
-            fields[f] = to_date(v)
+            fields[f] = to_date(v, dayfirst=cfg.date_dayfirst, require_day=True)
         elif f in NUMBER_FIELDS:
-            fields[f] = to_number(v)
+            rng = to_range(v)
+            if rng:  # "10,000 to 50,000" in one field fills both ends (an explicit other field still wins)
+                fields[f] = rng[0] if f == "amount_min" else rng[1]
+                other = "amount_max" if f == "amount_min" else "amount_min"
+                if other not in fields:
+                    fields[other] = rng[1] if f == "amount_min" else rng[0]
+                    sources[other] = sources[f]
+            else:
+                fields[f] = to_number(v)
         elif f in LIST_FIELDS:
             fields[f] = _as_list(v)
         elif f in TEXT_FIELDS:
@@ -82,11 +92,18 @@ def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
         fields["description"] = fields["description"][:20_000]
     if not fields.get("title"):
         raise NormalizationError("mapping produced no title")
+    # a non-positive amount means "not stated" (e.g. Grants.gov's 0 ceiling): drop it first, then order min/max;
+    # swapping first dropped the real figure and kept the 0
+    for k in ("amount_min", "amount_max"):
+        if fields.get(k) is not None and fields[k] <= 0:
+            fields.pop(k)
+            sources.pop(k, None)
     amin, amax = fields.get("amount_min"), fields.get("amount_max")
     if amin is not None and amax is not None and amin > amax:
         fields["amount_min"], fields["amount_max"] = amax, amin
-    if amin is not None and amin <= 0:
-        fields.pop("amount_min")
-    if amax is not None and amax <= 0:
-        fields.pop("amount_max")
-    return Signal(source_key=cfg.key, field_sources=sources, **fields)
+        if "amount_min" in sources and "amount_max" in sources:
+            sources["amount_min"], sources["amount_max"] = sources["amount_max"], sources["amount_min"]
+    try:
+        return Signal(source_key=cfg.key, field_sources=sources, **fields)
+    except ValidationError as e:  # one bad row (e.g. a number where text belongs) fails that row, not the run
+        raise NormalizationError(f"invalid field values: {e.error_count()} error(s): {e.errors()[0]['msg']}") from e

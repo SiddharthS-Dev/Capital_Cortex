@@ -21,6 +21,7 @@ from cortex.l5_strategy.forecast_engine import assumptions as forecast_assumptio
 from cortex.l7_governance import approval_service, audit_service, compliance_check
 from cortex.l7_governance.citation_checker import check_with_revisions
 from cortex.l7_governance.drafts import create_draft
+from cortex.l7_governance.policy_engine import is_grant_class
 from cortex.l7_governance.refs import DBRefResolver
 from cortex.l8_actuation import asset_generator as ag
 from cortex.l8_actuation.evidence_labels import labels
@@ -385,8 +386,14 @@ async def send(s: AsyncSession, actor: Principal, pid: str, channel: str, to: st
                    "body": f"Please find attached: {', '.join(a['filename'] for a in attachments)}.\n\n{packages().get('disclaimer', '')}"}  # fmt: skip
     else:
         payload = {**base, "portal": to or "counterparty portal", "title": p["title"]}
+    # a proposal for a grant-type opportunity is a grant submission: it needs two distinct approvers
     draft = await create_draft(
-        s, actor, "email" if channel == "email" else "portal_export", payload, opportunity_id=str(p["opportunity_id"])
+        s,
+        actor,
+        "email" if channel == "email" else "portal_export",
+        payload,
+        opportunity_id=str(p["opportunity_id"]),
+        kind="submission" if is_grant_class(p["class"]) else None,
     )
     req = await approval_service.request_approval(s, actor, "outbox", draft["id"])
     return {"outbox_id": draft["id"], "approval_id": req["approval_id"], "attachments": len(attachments)}

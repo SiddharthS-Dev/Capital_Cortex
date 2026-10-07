@@ -66,7 +66,8 @@ class Scenario:
     inflow_delay_months: int = 0
     hires: list[dict[str, Any]] = field(default_factory=list)  # [{start_month_offset, monthly_cost}]
     raise_amount: float | None = None
-    raise_month_offset: int | None = None
+    raise_month_offset: int | None = None  # months after the forecast start (the month after the last snapshot)
+    raise_month: date | None = None  # or an absolute calendar month (what-ifs: "the money lands in March")
     raise_probability: float = 1.0
     probability_overrides: dict[str, float] = field(default_factory=dict)  # opportunity_id → p
 
@@ -80,6 +81,9 @@ class ForecastResult:
     runway_months: float | None = None
     zero_cash_date: str | None = None
     beyond_horizon: bool = False
+    # runway counted from the current month (runway_months counts from the month after the last snapshot)
+    runway_months_from_today: float | None = None
+    snapshot_age_months: int | None = None
     gaps: list[str] = field(default_factory=list)
     inputs: dict[str, Any] = field(default_factory=dict)
 
@@ -102,6 +106,7 @@ def forecast(
     *,
     horizon: int | None = None,
     min_cash_buffer: float | None = None,
+    as_of: date | None = None,
 ) -> ForecastResult:
     a = assumptions()
     horizon = horizon or int(a["horizon_months"])
@@ -152,7 +157,11 @@ def forecast(
             by_class[i["class"] or "unclassified"] = by_class.get(i["class"] or "unclassified", 0.0) + i["expected"]
         month_inflows.sort(key=lambda i: -i["expected"])
         raise_in = 0.0
-        if scenario.raise_amount and scenario.raise_month_offset == t:
+        raise_t = scenario.raise_month_offset
+        if scenario.raise_month is not None:  # absolute month; one already past lands in the first month
+            rm = month_start(scenario.raise_month)
+            raise_t = max(0, (rm.year - start.year) * 12 + rm.month - start.month)
+        if scenario.raise_amount and raise_t == t:
             raise_in = scenario.raise_amount * scenario.raise_probability
         inflow_total = sum(float(i["expected"]) for i in month_inflows) + raise_in
         cash_start = cash
@@ -194,9 +203,16 @@ def forecast(
             "assumptions_ref": "config/forecast.yaml",
         },
     )
+    today = month_start(as_of or date.today())
+    age = max(0, (today.year - start.year) * 12 + today.month - start.month)  # months since the forecast start
+    result.snapshot_age_months = age
+    if age:
+        result.gaps.append(f"The latest financial snapshot is {age} month(s) old; runway is counted from today.")
     if runway is None:
         result.runway_months, result.beyond_horizon = float(horizon), True
+        result.runway_months_from_today = float(max(0, horizon - age))
     else:
+        result.runway_months_from_today = round(max(0.0, runway - age), 2)
         result.runway_months = runway
         zero = start + relativedelta(months=int(runway), days=int((runway % 1) * 30))
         result.zero_cash_date = zero.isoformat()

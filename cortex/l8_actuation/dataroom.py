@@ -187,7 +187,8 @@ async def set_approved(s: AsyncSession, actor: Principal, did: str, approved: bo
     return {"id": did, "approved_repo": approved}
 
 
-async def checklist(s: AsyncSession, demo: bool | None = None) -> dict[str, Any]:
+async def checklist(s: AsyncSession, demo: bool | None = None, actor: Principal | None = None) -> dict[str, Any]:
+    """DD checklist. With ``actor``, documents above their clearance are left out (titles and checksums included)."""
     items = yaml.safe_load((get_settings().config_dir / "dd_checklist.yaml").read_text(encoding="utf-8"))["items"]
     docs = (
         (
@@ -202,6 +203,8 @@ async def checklist(s: AsyncSession, demo: bool | None = None) -> dict[str, Any]
         .mappings()
         .all()
     )
+    if actor is not None:
+        docs = [d for d in docs if _can_read(actor, d["classification"])]
     out = []
     for it in items:
         matched = [row(d) for d in docs if set(d["dd_tags"] or []) & set(it["tags"])]
@@ -215,7 +218,7 @@ async def assemble(s: AsyncSession, actor: Principal, name: str, document_ids: l
                    from_checklist: bool) -> dict[str, Any]:  # fmt: skip
     org = get_settings().org_id
     if from_checklist:
-        cl = await checklist(s)
+        cl = await checklist(s, actor=actor)
         document_ids = list(dict.fromkeys(d["id"] for i in cl["items"] for d in i["documents"] if d["approved_repo"]))
     if not document_ids:
         raise Problem(422, "Nothing to package", "no approved documents selected", "validation")
@@ -277,7 +280,9 @@ async def assemble(s: AsyncSession, actor: Principal, name: str, document_ids: l
     return {"id": pid, "files": len(docs), "sha256": hashlib.sha256(blob).hexdigest(), "manifest": manifest}
 
 
-async def package(s: AsyncSession, pid: str) -> dict[str, Any]:
+async def package(s: AsyncSession, pid: str, actor: Principal | None = None) -> dict[str, Any]:
+    """A package; with ``actor``, only if every file in it is within their clearance (a package is as sensitive as
+    its most sensitive document, at packaging time or now, whichever is higher)."""
     r = (
         (
             await s.execute(
@@ -290,13 +295,28 @@ async def package(s: AsyncSession, pid: str) -> dict[str, Any]:
     )
     if r is None:
         raise NotFound("package not found")
+    if actor is not None:
+        current = (
+            await s.execute(
+                text("SELECT classification FROM document WHERE id = ANY(:ids)"), {"ids": list(r["document_ids"] or [])}
+            )
+        ).scalars()
+        levels = [f.get("classification") or "internal" for f in (r["manifest"] or {}).get("files", [])] + list(current)
+        if not all(_can_read(actor, c) for c in levels):
+            raise Forbidden(
+                "This package contains documents above your clearance", reasons=["classification_exceeds_clearance"]
+            )
     return dict(r)
+
+
+def package_readable(actor: Principal, manifest: dict[str, Any] | None) -> bool:
+    return all(_can_read(actor, f.get("classification") or "internal") for f in (manifest or {}).get("files", []))
 
 
 async def request_share(
     s: AsyncSession, actor: Principal, pid: str, recipient: str, expires_in_days: int, message: str | None
 ) -> dict[str, Any]:
-    pkg = await package(s, pid)
+    pkg = await package(s, pid, actor)
     sid = str(
         (
             await s.execute(

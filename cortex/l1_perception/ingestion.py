@@ -67,7 +67,24 @@ async def _store_signal(s, source_id: str, adapter_version: str, raw, sig) -> st
             },
         )
     ).scalar()
-    return str(row) if row else None
+    if row:
+        return str(row)
+    if sig.external_key:
+        # same content seen before. If the listing went A -> B -> A, the opportunity now reflects B: re-apply A
+        # (bumping it to the latest version, so reconcile never prefers the older B)
+        reapply = (
+            await s.execute(
+                text(
+                    "UPDATE signal sg SET ingested_at = now() WHERE sg.org_id = :org AND sg.content_hash = :hash "
+                    "AND EXISTS (SELECT 1 FROM opportunity o WHERE o.org_id = :org AND o.external_key = :key "
+                    "AND o.signal_id IS DISTINCT FROM sg.id) RETURNING sg.id"
+                ),
+                {"org": org, "hash": content_hash, "key": sig.external_key},
+            )
+        ).scalar()
+        if reapply:
+            return f"{reapply}#reapply"
+    return None
 
 
 async def run_source(
@@ -126,14 +143,18 @@ async def run_source(
                 sid = await _store_signal(s, source_id, adapter.version, raw, sig)
             if sid:
                 stats["new"] += 1
-                # publish immediately so each opportunity appears live, not at the end of the run
+                sid, _, reapply = sid.partition("#")
+                # publish immediately so each opportunity appears live, not at the end of the run; a re-applied
+                # earlier version needs its own key (its first publish is still in the idempotency window)
                 await bus.publish(
                     SIGNALS_STREAM,
                     Envelope(
                         type="signal.ingested",
                         payload={"signal_id": sid},
                         actor_token=service_token or principal.token,
-                        idempotency_key=f"signal:{sid}",
+                        idempotency_key=f"signal:{sid}:{reapply}:{datetime.now(UTC):%Y%m%d%H%M%S}"
+                        if reapply
+                        else f"signal:{sid}",
                     ),
                 )
             else:
@@ -206,6 +227,10 @@ async def reconcile_unprocessed(source_id: str, actor_token: str, limit: int = 1
                         "SELECT sg.id FROM signal sg WHERE sg.source_id = CAST(:src AS uuid) "
                         "AND sg.ingested_at < now() - interval '10 minutes' AND NOT EXISTS "
                         "(SELECT 1 FROM entity e WHERE e.ref_table = 'signal' AND e.ref_id = sg.id) "
+                        # only the latest version of a listing: republishing an older one would overwrite the
+                        # opportunity with stale content
+                        "AND NOT EXISTS (SELECT 1 FROM signal newer WHERE newer.source_id = sg.source_id "
+                        "AND newer.external_id = sg.external_id AND newer.ingested_at > sg.ingested_at) "
                         "ORDER BY sg.ingested_at LIMIT :n"
                     ),
                     {"src": source_id, "n": limit},

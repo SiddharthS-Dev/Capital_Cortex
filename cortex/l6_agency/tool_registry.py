@@ -967,25 +967,32 @@ async def forecast_read(ctx: ToolContext) -> ToolResult:
 )
 async def scenario_run(ctx: ToolContext) -> ToolResult:
     from cortex.l5_strategy.forecast_engine import Scenario, assumptions, month_start
-    from cortex.l5_strategy.forecasting import run_scenarios
+    from cortex.l5_strategy.forecasting import run_scenarios, to_forecast_currency
     from cortex.l5_strategy.pipeline_engine import amount_mid
 
     mid = amount_mid(_f(ctx.opp.get("amount_min")), _f(ctx.opp.get("amount_max")))
     if mid is None:
         return ToolResult("scenario", {}, gaps=["Scenario needs the opportunity's amount"])
+    mid, fc_ccy = await to_forecast_currency(ctx.s, mid, ctx.opp.get("currency"), ctx.demo)
+    if mid is None:
+        return ToolResult("scenario", {}, gaps=[f"No exchange rate from {ctx.opp.get('currency') or 'an unstated currency'} "
+                                                f"to the forecast currency ({fc_ccy or 'none'})"])  # fmt: skip
     lag = assumptions()["decision_lag_months"]
     base_day = (ctx.opp.get("deadline") or ctx.now).date()
     when = month_start(max(base_day, date.today())) + relativedelta(
         months=int(lag.get(ctx.opp.get("class") or "", lag["default"]))
     )
-    today = month_start(date.today())
-    offset = (when.year - today.year) * 12 + (when.month - today.month)
+    own = {str(ctx.opp["id"]): 0.0} if ctx.opp.get("id") else {}  # don't count its pipeline share twice
     out = await run_scenarios(
         ctx.s,
         [
             Scenario(name="base"),
             Scenario(
-                name="with_opportunity", raise_amount=mid, raise_month_offset=max(0, offset), raise_probability=1.0
+                name="with_opportunity",
+                raise_amount=mid,
+                raise_month=when,  # absolute month: the engine counts from the last snapshot, not today
+                raise_probability=1.0,
+                probability_overrides=own,
             ),
         ],
         include_demo=ctx.demo,

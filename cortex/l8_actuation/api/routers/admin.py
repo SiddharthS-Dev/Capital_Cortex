@@ -267,11 +267,17 @@ async def dlq(
 async def dlq_replay(
     dlq_id: str = PathParam(pattern=r"^\d{1,20}-\d{1,20}$", description="Redis stream id, e.g. 1727600000000-0"),
     stream: str = Query("signals.raw"),
-    _: Principal = Depends(authorize("source:run", "dlq")),
+    p: Principal = Depends(authorize("source:run", "dlq")),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     if stream not in KNOWN_STREAMS:
         raise NotFound(f"unknown stream {stream}")
-    new_id = await get_bus().dlq_replay(stream, dlq_id)
+    # the job runs under the replayer's own token: the worker re-checks the job's permission against them, so a
+    # replay can't borrow an approver's or admin's identity (e.g. an outbox.release)
+    new_id = await get_bus().dlq_replay(stream, dlq_id, actor_token=p.token)
     if new_id is None:
         raise NotFound("DLQ message not found")
+    await audit_service.record(
+        session, p, "ingestion.dlq_replayed", f"bus:{stream}/{dlq_id}", {"new_stream_id": new_id}
+    )
     return {"replayed": dlq_id, "new_stream_id": new_id}
