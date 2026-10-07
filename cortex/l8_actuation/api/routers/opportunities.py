@@ -42,6 +42,7 @@ LIST_COLUMNS = (
     # workbook's judgement, never the Capital Opportunity Score (D-080)
     "op.route AS outreach_route, op.engagement_outlook AS outreach_engagement, op.cash_outlook AS outreach_cash_outlook, "
     "op.outreach_status, op.next_action_on AS outreach_next_action_on, op.analyst_priority, "
+    "op.proposed_owner_text AS outreach_proposed_owner, "
     "op.country_order AS outreach_country_order, op.country_rank AS outreach_country_rank, "
     "CASE WHEN op.id IS NULL THEN NULL ELSE (SELECT count(*) FROM eligibility_gate_link gl JOIN eligibility_gate eg "
     "ON eg.id = gl.gate_id WHERE gl.opportunity_id = o.id AND eg.status IN ('open','blocked')) END AS open_gates"
@@ -98,6 +99,7 @@ def _filters(
     outreach_status: list[str] | None = None,
     priority_band: list[str] | None = None,
     gate_open: bool | None = None,
+    proposed_owner: list[str] | None = None,
 ) -> str:
     where = ["o.org_id = :org"]
     # the facets report NULLs as 'unclassified' / 'unscored' / 'none'; filtering on those values must match the
@@ -148,6 +150,12 @@ def _filters(
     if outreach_status:
         where.append("op.outreach_status = ANY(:ostatus)")
         p["ostatus"] = outreach_status
+    if proposed_owner:
+        where.append(
+            "(op.proposed_owner_text = ANY(:powner) OR "
+            "('none' = ANY(:powner) AND op.id IS NOT NULL AND op.proposed_owner_text IS NULL))"
+        )
+        p["powner"] = proposed_owner
     if priority_band:
         where.append(f"op.id IS NOT NULL AND {_priority_band_sql()} = ANY(:pband)")
         p["pband"] = priority_band
@@ -177,6 +185,7 @@ async def list_opportunities(
         None, description="Analyst priority (workbook) band: high >= 80, medium 60-79, low < 60"
     ),
     gate_open: bool | None = Query(None, description="Has an open or blocked eligibility gate"),
+    proposed_owner: list[str] | None = Query(None, description="Outreach workbook 'Proposed owner' text"),
     outreach: bool = Query(False, description="Add the outreach facets (route, engagement, status, priority, gate)"),
     sort: Literal["score", "deadline", "amount", "recent", "completeness", "outreach"] = "score",
     limit: int = Query(50, ge=1, le=500),
@@ -188,7 +197,7 @@ async def list_opportunities(
     p: dict[str, Any] = {"org": get_settings().org_id}
     where = _filters(
         p, cls, stage, geo, band, status, deadline_before, deadline_after, q, min_completeness, owner, source, demo,
-        route, engagement, outreach_status, list(priority_band or []), gate_open,
+        route, engagement, outreach_status, list(priority_band or []), gate_open, proposed_owner,
     )  # fmt: skip
     offset = decode_cursor(cursor)
     order = _outreach_order_sql() if sort == "outreach" else SORTS[sort]
@@ -252,6 +261,7 @@ async def list_opportunities(
                 ("route", "op.route"),
                 ("engagement", "op.engagement_outlook"),
                 ("outreach_status", "op.outreach_status"),
+                ("proposed_owner", "coalesce(op.proposed_owner_text, 'none')"),
                 ("priority_band", _priority_band_sql()),
                 ("gate_open", f"CASE WHEN {_GATE_OPEN} THEN 'true' ELSE 'false' END"),
             ):

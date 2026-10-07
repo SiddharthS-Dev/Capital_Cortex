@@ -28,6 +28,7 @@ export function OutreachTracker() {
   const [country, setCountry] = useState("");
   const [route, setRoute] = useState("");
   const [status, setStatus] = useState("");
+  const [proposedOwner, setProposedOwner] = useState("");
   const [sort, setSort] = useState<"workbook" | "overdue">("workbook");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [bulkStatus, setBulkStatus] = useState<string>("Prepared");
@@ -35,7 +36,8 @@ export function OutreachTracker() {
   if (country) params.set("country", country);
   if (route) params.set("route", route);
   if (status) params.set("outreach_status", status);
-  const q = useQuery({ queryKey: ["outreach", "list", params.toString()], queryFn: () => api<{ items: OutreachRow[]; total: number }>(`/v1/outreach?${params}`) });
+  if (proposedOwner) params.set("proposed_owner", proposedOwner);
+  const q = useQuery({ queryKey: ["outreach", "list", params.toString()], queryFn: () => api<{ items: OutreachRow[]; total: number; proposed_owners?: { name: string; count: number }[] }>(`/v1/outreach?${params}`) });
   const refresh = () => { void qc.invalidateQueries({ queryKey: ["outreach"] }); void qc.invalidateQueries({ queryKey: ["opportunities"] }); };
 
   const bulk = useMutation({
@@ -73,6 +75,8 @@ export function OutreachTracker() {
             <option value="">All routes</option>{ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}</select>
           <select aria-label="Status" className={select} value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All statuses</option>{OUTREACH_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
+          <select aria-label="Proposed owner" className={select} value={proposedOwner} onChange={(e) => setProposedOwner(e.target.value)}>
+            <option value="">All proposed owners</option>{(q.data?.proposed_owners ?? []).map((o) => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}</select>
           <div className="flex rounded-md border p-0.5" role="group" aria-label="Order">
             {(["workbook", "overdue"] as const).map((s) => (
               <button key={s} type="button" aria-pressed={sort === s} onClick={() => setSort(s)}
@@ -122,9 +126,10 @@ export function OutreachTracker() {
                 <tr>
                   {canWrite && <th className="px-2 py-2"><span className="sr-only">Select</span></th>}
                   <th className="px-2 py-2 font-medium">ID</th><th className="px-2 py-2 font-medium">Organisation</th><th className="px-2 py-2 font-medium">Route</th>
+                  <th className="px-2 py-2 font-medium">Proposed owner</th>
                   <th className="px-2 py-2 font-medium">Engagement</th><th className="px-2 py-2 font-medium" title={PRIORITY_TOOLTIP}>Analyst priority</th>
                   <th className="px-2 py-2 font-medium">Status</th><th className="px-2 py-2 font-medium">Stage</th><th className="px-2 py-2 font-medium">First sent</th>
-                  <th className="px-2 py-2 font-medium">Next follow-up / action</th><th className="px-2 py-2 font-medium">Next action</th>
+                  <th className="px-2 py-2 font-medium">Next follow-up / action</th><th className="px-2 py-2 font-medium">Reply / eligibility / notes</th><th className="px-2 py-2 font-medium">Next action</th>
                 </tr>
               </thead>
               <tbody>{rows.map((r) => (
@@ -134,6 +139,7 @@ export function OutreachTracker() {
                   <td className="min-w-48 px-2 py-2"><Link to={`/opportunities/${r.opportunity_id}?tab=outreach`} className="font-medium hover:underline">{r.title}</Link>
                     <div className="text-xs text-muted-foreground">{r.category}{r.open_gates > 0 && <Badge tone="warning" className="ml-1">gate open</Badge>}{r.stale && <Badge tone="warning" className="ml-1">re-verify</Badge>}</div></td>
                   <td className="whitespace-nowrap px-2 py-2 text-xs">{r.route ?? "—"}</td>
+                  <td className="min-w-40 px-2 py-2 text-xs" title="From the workbook: a proposal, not an assignment">{r.proposed_owner_text ?? "—"}</td>
                   <td className="px-2 py-2"><EngagementBadge value={r.engagement_outlook} /></td>
                   <td className="px-2 py-2"><PriorityValue value={r.analyst_priority} inconsistent={r.priority_inconsistent} /></td>
                   <td className="px-2 py-2"><OutreachStatusBadge status={r.outreach_status} /></td>
@@ -143,6 +149,15 @@ export function OutreachTracker() {
                     {isOverdue(r) && <AlertTriangle className="mr-1 inline size-3 text-warning" aria-label="due" />}
                     {r.next_follow_up_at ? <span><Clock className="mr-1 inline size-3" aria-hidden />{date(r.next_follow_up_at)}</span> : null}
                     {r.next_action_on ? <div>action {date(r.next_action_on)}</div> : !r.next_follow_up_at ? "—" : null}
+                  </td>
+                  <td className="max-w-64 px-2 py-2 text-xs">
+                    {!r.reply_summary && !r.eligibility_decision && !r.notes ? <span className="text-muted-foreground">—</span> : (
+                      <dl className="space-y-0.5">
+                        {r.reply_summary && <div className="line-clamp-2" title={r.reply_summary}><dt className="inline text-muted-foreground">Reply: </dt><dd className="inline">{r.reply_summary}</dd></div>}
+                        {r.eligibility_decision && <div className="line-clamp-2" title={r.eligibility_decision}><dt className="inline text-muted-foreground">Eligibility: </dt><dd className="inline">{r.eligibility_decision}</dd></div>}
+                        {r.notes && <div className="line-clamp-2" title={r.notes}><dt className="inline text-muted-foreground">Notes: </dt><dd className="inline">{r.notes}</dd></div>}
+                      </dl>
+                    )}
                   </td>
                   <td className="max-w-80 px-2 py-2 text-xs text-muted-foreground">{r.next_action}</td>
                 </tr>))}

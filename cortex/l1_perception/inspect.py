@@ -7,7 +7,7 @@ import string
 from datetime import UTC, datetime
 from typing import Any
 
-from cortex.l1_perception.adapters.tabular import read_rows, sheet_names
+from cortex.l1_perception.adapters.tabular import apply_joins, join_indexes, read_rows, sheet_names
 from cortex.l1_perception.models import RawItem
 from cortex.l1_perception.normalizer import NormalizationError, norm_key, normalize
 from cortex.l1_perception.registry import SourceConfig
@@ -44,6 +44,17 @@ def inspect_upload(
         chosen = names[0]
     headers = [h for h in (rows[0] if rows else {}) if not str(h).startswith("_")]
     by_key = {_key(cfg, h): h for h in headers}
+    # joined sheets (join_sheets): their prefixed headers can feed fields; their unused columns aren't "unmapped"
+    joins = join_indexes(cfg, data, filename)
+    joined: list[dict[str, Any]] = []
+    for j, index in joins:
+        cols = {h for r in index.values() for h in r if not str(h).startswith("_")}
+        by_key = {**{_key(cfg, f"{j.prefix}{h}"): f"{j.sheet}: {h}" for h in cols}, **by_key}
+        matched_rows = sum(1 for r in rows if index.get(str(r.get(j.main_key) or "").strip().casefold()))
+        joined.append({"sheet": j.sheet, "key": j.key, "rows_matched": matched_rows})
+    for r in rows:
+        apply_joins(r, joins)
+    main_keys = {_key(cfg, h) for h in headers}
 
     fields: list[dict[str, Any]] = []
     used: set[str] = set()
@@ -61,8 +72,7 @@ def inspect_upload(
                            "missing": [c for c in cols if c not in by_key]})  # fmt: skip
             continue
         hit = next((c for c in cols if c in by_key), None)
-        if hit:
-            used.add(hit)
+        used.update(c for c in cols if c in by_key)  # a fallback column is mapped too, not "unmapped"
         fields.append({"field": field, "kind": "path", "matched": hit is not None,
                        "header": by_key.get(hit) if hit else None, "candidates": cols})  # fmt: skip
 
@@ -99,7 +109,8 @@ def inspect_upload(
         "headers": headers,
         "fields": fields,
         "mapped": sorted(matched),
-        "unmapped_headers": [h for k, h in by_key.items() if k not in used],
+        "unmapped_headers": [h for k, h in by_key.items() if k in main_keys and k not in used],
+        "joined_sheets": joined,
         "required_missing": required_missing,
         "rows": len(rows),
         "would_import": ok,

@@ -169,10 +169,14 @@ export function OutreachTab({ opportunityId }: { opportunityId: string }) {
 
       <Card>
         <CardHeader><CardTitle>Tracker</CardTitle>
-          <p className="text-xs text-muted-foreground">Yours: a newer workbook never overwrites these. Status moves the pipeline stage forward only.</p></CardHeader>
+          <p className="text-xs text-muted-foreground">Yours: a newer workbook fills only what is still blank and never overwrites what is set here. Status moves the pipeline stage forward only.</p></CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-end gap-3">
             <div className="text-sm">Now: <OutreachStatusBadge status={d.outreach_status} /> <span className="text-xs text-muted-foreground">{d.status_set_by ? `by ${d.status_set_by} · ${dateTime(d.status_set_at)}` : ""}</span></div>
+            {d.import_status && (
+              <div className="text-sm">Workbook: <OutreachStatusBadge status={d.import_status} />
+                {d.import_status !== d.outreach_status && <span className="ml-1 text-xs text-warning">differs from the tracker; set it here to adopt it</span>}</div>
+            )}
             {canWrite && (
               <>
                 <label className="text-xs"><span className="text-muted-foreground">New status</span>

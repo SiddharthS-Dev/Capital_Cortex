@@ -54,6 +54,7 @@ export interface OpportunityListItem {
   outreach_cash_outlook?: string | null;
   outreach_status?: string | null;
   outreach_next_action_on?: string | null;
+  outreach_proposed_owner?: string | null;
   /** Workbook analyst priority (0-100): never the Capital Opportunity Score. */
   analyst_priority?: number | null;
   outreach_country_order?: number | null;
@@ -67,7 +68,7 @@ export interface OpportunityList {
   next_cursor: string | null;
   facets?: Record<"class" | "stage" | "band" | "source" | "geo", Record<string, number>> & {
     geo_meta: Record<string, { name: string; numeric: string | null }>;
-  } & Partial<Record<"route" | "engagement" | "outreach_status" | "priority_band" | "gate_open", Record<string, number>>>;
+  } & Partial<Record<"route" | "engagement" | "outreach_status" | "proposed_owner" | "priority_band" | "gate_open", Record<string, number>>>;
 }
 
 export interface OpportunityDetail extends OpportunityListItem {
@@ -194,6 +195,20 @@ export interface ExecutiveDashboard {
   grant_calendar: (OpportunityListItem & { drill: string })[];
   top: (OpportunityListItem & { drill: string })[];
   risks: { kind: string; severity: "info" | "warning" | "critical"; message: string; drill: string }[];
+  /** Which records the figures cover; cash, burn, runway, inflows and approvals are always company-wide. */
+  scope: { origins: DataOrigin[]; sources: string[]; filtered: boolean; include_demo: boolean; radar_query: string; company_wide: string[] };
+  by_origin: OriginBreakdown[];
+}
+
+export type DataOrigin = "demo" | "live" | "upload" | "manual";
+
+interface OriginFigures { count: number; with_amount: number; high: number; weighted_by_currency: Record<string, number>; drill: string }
+
+/** Active records per data origin (derived from each record's source), and per source inside it. */
+export interface OriginBreakdown extends OriginFigures {
+  origin: DataOrigin;
+  label: string;
+  sources: (OriginFigures & { key: string; name: string })[];
 }
 
 export interface ScoringProfile {

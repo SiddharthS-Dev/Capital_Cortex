@@ -84,6 +84,7 @@ async def list_outreach(
     cash_outlook: list[str] | None = Query(None),
     outreach_status: list[str] | None = Query(None),
     owner: str | None = Query(None, max_length=200),
+    proposed_owner: list[str] | None = Query(None, description="Workbook 'Proposed owner' text, exact match"),
     due_before: date | None = Query(None, description="Next action or open follow-up due on or before this date"),
     stale: bool | None = Query(None, description="Research older than the refresh cadence"),
     sort: Literal["workbook", "overdue"] = "workbook",
@@ -99,6 +100,7 @@ async def list_outreach(
         ("op.engagement_outlook", engagement_outlook, "eng"),
         ("op.cash_outlook", cash_outlook, "cash"),
         ("op.outreach_status", outreach_status, "ost"),
+        ("op.proposed_owner_text", proposed_owner, "powner"),
     ):
         if val:
             where.append(f"{col} = ANY(:{key})")
@@ -127,12 +129,23 @@ async def list_outreach(
         .all()
     )
     total = (await session.execute(text(f"SELECT count(*) {FROM} WHERE {w}"), p)).scalar()
+    # every proposed owner in the register (unfiltered), so the tracker's owner filter never loses its options
+    owners = (
+        await session.execute(
+            text(
+                "SELECT proposed_owner_text, count(*) FROM outreach_profile WHERE org_id = :org "
+                "AND proposed_owner_text IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1"
+            ),
+            {"org": p["org"]},
+        )
+    ).all()
     return {
         "items": [row(r) for r in rows[:limit]],
         "total": int(total or 0),
         "next_cursor": encode_cursor(off + limit) if len(rows) > limit else None,
         "statuses": svc.statuses(),
         "routes": outreach_config()["route_order"],
+        "proposed_owners": [{"name": n, "count": c} for n, c in owners],
     }
 
 

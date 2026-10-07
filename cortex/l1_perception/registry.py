@@ -15,6 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from platform_core.config import get_settings
 
 
+class JoinSheet(BaseModel):
+    sheet: str
+    main_key: str  # key column in the main sheet ("on" would be YAML's boolean true)
+    key: str  # key column in this sheet
+    prefix: str  # prepended to this sheet's headers in the payload
+
+
 class SourceConfig(BaseModel):
     key: str
     name: str
@@ -40,6 +47,9 @@ class SourceConfig(BaseModel):
     # rows must carry these column values (compared case-insensitively) or fail as "not a <name> import row"
     require_values: dict[str, str] = Field(default_factory=dict)
     require_values_message: str = "row does not carry this source's required values"
+    # XLSX: more worksheets merged into each row by a key column, their headers prefixed (e.g. the outreach
+    # workbook's 10_Outreach_Tracker by Prospect ID). A workbook without that sheet is read without it.
+    join_sheets: list[JoinSheet] = Field(default_factory=list)
     mapping: dict[str, Any] = Field(default_factory=dict)
     defaults: dict[str, Any] = Field(default_factory=dict)
 

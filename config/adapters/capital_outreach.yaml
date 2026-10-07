@@ -15,6 +15,10 @@ date_dayfirst: false
 case_insensitive_keys: true
 require_values: {engine: Meris, module: Capital Cortex}
 require_values_message: not a Capital Cortex import row
+# the 10_Outreach_Tracker sheet carries the tracker's status details (Status, First sent, Next action date, reply,
+# eligibility decision, notes) per Prospect ID; they reach outreach_profile on first import and fill blanks after
+join_sheets:
+  - {sheet: 10_Outreach_Tracker, main_key: prospect_id, key: Prospect ID, prefix: tracker_}
 mapping:
   external_id: [prospect_id]
   title: [organization]
@@ -42,5 +46,10 @@ mapping:
   attr_verified_on: [verified_on]
   attr_programme_status: [programme_status]
   attr_next_action: [next_action]
-  attr_status: [status]
+  attr_status: [tracker_status, status]           # the tracker sheet's Status wins over the flat copy
+  attr_first_sent_on: [tracker_first_sent]
+  attr_next_action_on: [tracker_next_action_date]
+  attr_reply_summary: [tracker_confirmed_contact_reply]
+  attr_eligibility_decision: [tracker_eligibility_decision]
+  attr_notes: [tracker_notes_outcome]
   attr_proposed_owner: [proposed_owner]

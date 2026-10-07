@@ -27,14 +27,24 @@ RESEARCH_COLUMNS = (
     "phones", "official_source_url", "verified_on", "programme_status", "next_action", "proposed_owner_text",
     "import_status", "research_warnings",
 )  # fmt: skip
-# Built once from the fixed column list (no input reaches the SQL text). On conflict only research columns are
-# refreshed: tracker columns keep what people set.
+# tracker details from the workbook's 10_Outreach_Tracker sheet (attribute key → column)
+TRACKER_COLUMNS = {
+    "first_sent_on": "first_sent_on", "next_action_on": "next_action_on", "reply_summary": "reply_summary",
+    "eligibility_decision": "eligibility_decision", "notes": "notes",
+}  # fmt: skip
+# Built once from the fixed column lists (no input reaches the SQL text). On conflict research columns are
+# refreshed; a tracker column is only filled while it is still blank, so what people set is never overwritten.
 _UPSERT = (
-    f"INSERT INTO outreach_profile (org_id, opportunity_id, {', '.join(RESEARCH_COLUMNS)}, outreach_status, "  # noqa: S608
+    f"INSERT INTO outreach_profile (org_id, opportunity_id, {', '.join(RESEARCH_COLUMNS)}, "  # noqa: S608
+    f"{', '.join(TRACKER_COLUMNS.values())}, outreach_status, "
     "status_set_by, status_set_at, source_ref, is_demo) VALUES (:org, CAST(:opp AS uuid), "
     + ", ".join("CAST(:research_warnings AS jsonb)" if c == "research_warnings" else f":{c}" for c in RESEARCH_COLUMNS)
+    + ", "
+    + ", ".join(f":{c}" for c in TRACKER_COLUMNS.values())
     + ", :status, :by, now(), CAST(:src AS jsonb), :demo) ON CONFLICT (opportunity_id) DO UPDATE SET "
     + ", ".join(f"{c} = EXCLUDED.{c}" for c in RESEARCH_COLUMNS)
+    + ", "
+    + ", ".join(f"{c} = COALESCE(outreach_profile.{c}, EXCLUDED.{c})" for c in TRACKER_COLUMNS.values())
     + ", source_ref = EXCLUDED.source_ref RETURNING outreach_status, (xmax = 0) AS created"
 )
 
@@ -113,6 +123,20 @@ def priority(attrs: dict[str, Any], formula: dict[str, int] | None = None) -> tu
     if all(v is not None for v in parts.values()):
         computed = sum(int(parts[k] or 0) * int(w) for k, w in formula.items())
     return stated, computed, stated is not None and computed is not None and stated != computed
+
+
+def tracker_values(sig: Signal) -> dict[str, Any]:
+    """The workbook's tracker details. Dates must be dates: anything else is left blank, never guessed."""
+    a = sig.attributes
+    out: dict[str, Any] = {}
+    for key, col in TRACKER_COLUMNS.items():
+        v = a.get(key)
+        if col.endswith("_on"):
+            v = _date(v)
+        elif v is not None:
+            v = str(v).strip() or None
+        out[col] = v
+    return out
 
 
 def research_values(sig: Signal) -> dict[str, Any]:
@@ -196,6 +220,7 @@ async def write_outreach_profile(
     }
     params: dict[str, Any] = {
         **{c: vals[c] for c in RESEARCH_COLUMNS},
+        **tracker_values(sig),
         "research_warnings": json.dumps(vals["research_warnings"], default=str),
         "org": get_settings().org_id,
         "opp": opportunity_id,

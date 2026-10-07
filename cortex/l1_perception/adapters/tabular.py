@@ -12,7 +12,7 @@ from cortex.l1_perception.adapters.base import FetchContext, register
 from cortex.l1_perception.models import RawItem
 
 if TYPE_CHECKING:
-    from cortex.l1_perception.registry import SourceConfig
+    from cortex.l1_perception.registry import JoinSheet, SourceConfig
 
 
 class SheetNotFound(ValueError):
@@ -94,6 +94,33 @@ def read_rows(data: bytes, filename: str, sheet: str | None = None, *, with_meta
     ]
 
 
+def _key(v: Any) -> str:
+    return str(v).strip().casefold() if v not in (None, "") else ""
+
+
+def join_indexes(cfg: SourceConfig, data: bytes, filename: str) -> list[tuple[JoinSheet, dict[str, dict[str, Any]]]]:
+    """({key: row} of each ``join_sheets`` sheet present in the workbook; a missing sheet is skipped."""
+    if not cfg.join_sheets or not _is_xlsx(filename):
+        return []
+    available = set(sheet_names(data, filename))
+    return [
+        (j, {_key(r.get(j.key)): r for r in read_rows(data, filename, j.sheet) if _key(r.get(j.key))})
+        for j in cfg.join_sheets
+        if j.sheet in available
+    ]
+
+
+def apply_joins(row: dict[str, Any], joins: list[tuple[JoinSheet, dict[str, dict[str, Any]]]]) -> bool:
+    """Merge each joined sheet's matching row into ``row`` under its prefix. True when any sheet matched."""
+    hit = False
+    for j, index in joins:
+        match = index.get(_key(row.get(j.main_key)))
+        if match:
+            row.update({f"{j.prefix}{h}": v for h, v in match.items()})
+            hit = True
+    return hit
+
+
 class TabularAdapter:
     name = "tabular"
     version = "tabular-1.0"
@@ -102,9 +129,12 @@ class TabularAdapter:
         if ctx.upload is None:
             raise ValueError("tabular sources ingest uploaded files; use POST /v1/sources/{id}/upload")
         sheet = ctx.sheet or cfg.sheet
-        for n, row in enumerate(read_rows(ctx.upload, ctx.upload_name or "upload.csv", sheet, with_meta=True)):
+        name = ctx.upload_name or "upload.csv"
+        joins = join_indexes(cfg, ctx.upload, name)
+        for n, row in enumerate(read_rows(ctx.upload, name, sheet, with_meta=True)):
             if n >= ctx.max_items:
                 break
+            apply_joins(row, joins)
             r = row.pop("_row", n + 2)
             where = f"sheet={sheet}&row={r}" if sheet else f"row={r}"
             yield RawItem(
