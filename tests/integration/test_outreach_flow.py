@@ -433,6 +433,76 @@ async def test_outreach_alerts_next_action_and_staleness(client, make_token):
     assert not {g for g in got if g[1] == "CC-030"}
 
 
+async def test_eligibility_gates_import_links_and_approval_warning(client, make_token):
+    from cortex.l7_governance import approval_service, drafts
+    from cortex.l7_governance import eligibility_gates as gates
+
+    h = {"Authorization": f"Bearer {make_token(['admin'], auth_age=5)}"}
+    await _ensure_workbook(client, h)
+    actor = oidc.get_verifier().verify_sync(make_token(["analyst"], username="ana", auth_age=5))
+    data = WORKBOOK.read_bytes()
+
+    async with session_scope() as s:
+        dry = await gates.import_gates(s, actor, data, WORKBOOK.name, dry_run=True)
+        assert (await s.execute(text("SELECT count(*) FROM eligibility_gate"))).scalar() == 0
+    assert dry["created"] == [f"G{i}" for i in range(1, 9)] and dry["errors"] == []
+    async with session_scope() as s:
+        await gates.import_gates(s, actor, data, WORKBOOK.name, dry_run=False)
+    async with session_scope() as s:
+        listed = await gates.list_gates(s)
+    assert [g["gate_code"] for g in listed] == [f"G{i}" for i in range(1, 9)]
+    g2 = next(g for g in listed if g["gate_code"] == "G2")
+    assert g2["scope"] == "US federal SBIR/STTR" and g2["affected_text"] == "NSF / DOE rows" and g2["status"] == "open"
+    assert g2["links"] == [] and g2["source_ref"]["sheet"] == "07_Eligibility_Gates" and g2["source_ref"]["row"] == 3
+
+    # a person moves G1 on; re-importing the same sheet changes nothing and keeps the human status
+    g1 = next(g for g in listed if g["gate_code"] == "G1")
+    async with session_scope() as s:
+        await gates.update_gate(s, actor, str(g1["id"]), {"status": "in_review", "owner_id": "balaji"})
+        again = await gates.import_gates(s, actor, data, WORKBOOK.name, dry_run=False)
+    assert again["created"] == [] and again["updated"] == [] and len(again["unchanged"]) == 8
+    async with session_scope() as s:
+        g1 = await gates.get_gate(s, str(g1["id"]))
+    assert (g1["status"], g1["owner_id"]) == ("in_review", "balaji")
+
+    # links are suggested from the free text, confirmed by a person
+    async with session_scope() as s:
+        sug = await gates.suggest_links(s, str(g2["id"]))
+        everyone = await gates.suggest_links(s, str(next(g for g in listed if g["gate_code"] == "G8")["id"]))
+    assert {x["prospect_id"] for x in sug["suggestions"]} == {"CC-015", "CC-016"}  # NSF, DOE
+    assert everyone["suggestions"] == []  # "All rows" names nothing specific
+    doe = await _opp_id("CC-016")
+    async with session_scope() as s:
+        await gates.link(s, actor, str(g2["id"]), doe)
+        again = await gates.link(s, actor, str(g2["id"]), doe)  # idempotent
+        assert again["new"] is False
+        warn = await gates.gates_for(s, doe, warn_only=True)
+    assert [g["gate_code"] for g in warn] == ["G2"]
+
+    # the approval detail warns about the open gate; it does not block, and the preview hash is untouched
+    async with session_scope() as s:
+        d = await drafts.create_draft(
+            s,
+            actor,
+            "email",
+            {"to": "sbir@science.doe.gov", "subject": "DOE SBIR", "body": "Hello"},
+            opportunity_id=doe,
+        )
+        a = await approval_service.request_approval(s, actor, "outbox", d["id"])
+        det = await approval_service.detail(s, a["approval_id"])
+    assert det["content_current"] is True
+    assert [w["message"] for w in det["eligibility_warnings"]] == ["Open eligibility gate: G2 US federal SBIR/STTR"]
+    assert "eligibility" not in str(det["current_preview"]).lower()
+
+    # cleared gates stop warning; unlinking is audited
+    async with session_scope() as s:
+        await gates.update_gate(s, actor, str(g2["id"]), {"status": "cleared"})
+        assert await gates.gates_for(s, doe, warn_only=True) == []
+        await gates.unlink(s, actor, str(g2["id"]), doe)
+        n = (await s.execute(text("SELECT count(*) FROM audit_log WHERE action LIKE 'eligibility_gate.%'"))).scalar()
+    assert n >= 7  # 2 imports + dry run, update ×2, link, unlink
+
+
 # last in this module: it drops and recreates the outreach tables
 def test_migration_0007_downgrades_and_upgrades(pg_url):
     import os

@@ -534,6 +534,13 @@ async def detail(s: AsyncSession, approval_id: str) -> dict[str, Any]:
         out["current_preview"] = v.preview
         out["recommendation_id"] = v.recommendation_id
         out["opportunity_id"] = v.opportunity_id
+        if v.opportunity_id:
+            # D-083: an open or blocked eligibility gate on the opportunity is a warning next to the preview (outside
+            # it, so it never changes the content hash). It never blocks the decision.
+            from cortex.l7_governance.eligibility_gates import gates_for, warning_text
+
+            gates = await gates_for(s, v.opportunity_id, warn_only=True)
+            out["eligibility_warnings"] = [{**g, "id": str(g["id"]), "message": warning_text(g)} for g in gates]
     except NotFound:
         out["content_current"] = False
     prev = None
