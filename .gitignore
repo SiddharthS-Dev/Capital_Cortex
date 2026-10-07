@@ -17,3 +17,6 @@ infra/terraform/.terraform/
 infra/terraform/*.tfstate*
 *.tfplan
 compose-logs.txt
+
+# over GitHub's 100 MB file limit: kept locally, not in git
+docs/video/Capital_Cortex_Full_Walkthrough.mp4
