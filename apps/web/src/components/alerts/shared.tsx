@@ -80,7 +80,12 @@ export const CHANNELS: { id: Channel; text: string }[] = [
   { id: "webhook", text: "Internal webhook" },
 ];
 
-export const FIELD_LABELS: Record<string, string> = { score: "Score", completeness: "Evidence completeness", days_to_deadline: "Days to deadline" };
+export const FIELD_LABELS: Record<string, string> = {
+  score: "Score", completeness: "Evidence completeness", days_to_deadline: "Days to deadline",
+  outreach_days_to_next_action: "Outreach: days to next action",
+  outreach_research_age_days: "Outreach: days since research verified",
+  outreach_priority_research_age_days: "Outreach: days since verified (priority rows)",
+};
 export const OPS = [">=", "<=", ">", "<", "="] as const;
 
 export function defaultExpr(kind: string): Record<string, unknown> {

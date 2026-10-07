@@ -33,3 +33,23 @@ defaults:
     channels: [in_app]
     rule_expr: {within_days: 14}
     description: A recorded commitment expires within the window.
+  # Outreach register (FR-04-OUT). Follow-ups created by an outreach "Sent" are milestones, so "Overdue follow-up"
+  # above already covers them. Refresh cadence comes from config/outreach.yaml (30 days priority rows, 90 sources).
+  - name: Outreach next action due
+    kind: custom
+    severity: warning
+    channels: [in_app]
+    rule_expr: {field: outreach_days_to_next_action, op: "<=", value: 0}
+    description: An outreach next-action date has arrived (tracker on the opportunity's Outreach tab).
+  - name: Outreach research stale (priority rows)
+    kind: custom
+    severity: info
+    channels: [in_app]
+    rule_expr: {field: outreach_priority_research_age_days, op: ">=", value: 30}
+    description: A priority outreach row was last verified 30+ days ago; recheck the official page before contact.
+  - name: Outreach sources stale
+    kind: custom
+    severity: info
+    channels: [in_app]
+    rule_expr: {field: outreach_research_age_days, op: ">=", value: 90}
+    description: An outreach row's sources were last verified 90+ days ago; refresh the research.

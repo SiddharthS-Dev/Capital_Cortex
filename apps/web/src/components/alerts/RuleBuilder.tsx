@@ -100,7 +100,7 @@ function ExprFields({ kind, expr, set, customFields }: { kind: string; expr: Exp
             </select>
           </Field>
           <NumberField label="Threshold" step="any" value={expr.value} onChange={(v) => set("value", v)}
-            hint={expr.field === "days_to_deadline" ? "Days" : "0–1 scale"} />
+            hint={String(expr.field ?? "").includes("days") ? "Days" : "0–1 scale"} />
           <Field label="Class (optional)">
             <select className={selectCls} value={String(expr.class ?? "")} onChange={(e) => set("class", e.target.value || undefined)}>
               <option value="">Any class</option>

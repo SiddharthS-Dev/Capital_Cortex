@@ -325,3 +325,65 @@ def test_contact_channel_parser_on_the_workbook_strings(channel, emails, phones,
     out = parse_contact_channel(channel)
     assert [e["email"] for e in out["emails"]] == emails
     assert out["phones"] == phones and out["person"] == person
+
+
+# ----------------------------------------------------------------------------------------- tracker (step 3)
+@pytest.mark.parametrize(
+    ("current", "status", "expected"),
+    [
+        ("discovered", "Not contacted", None),
+        ("discovered", "Prepared", "qualified"),
+        ("discovered", "Sent", "engaged"),
+        ("qualified", "Reply received", "engaged"),
+        ("engaged", "Meeting booked", None),  # already there
+        ("engaged", "Applied", "submitted"),
+        ("submitted", "Sent", None),  # never backwards: a human-advanced stage stays
+        ("diligence", "Prepared", None),
+        ("term_sheet", "Declined", "lost"),  # the two exceptions may go backwards…
+        ("closed", "Won", "committed"),
+        ("engaged", "Watchlist", None),  # …and these two leave the stage alone
+        ("qualified", "Eligibility hold", None),
+    ],
+)
+def test_status_moves_the_stage_forward_only(current, status, expected):
+    from cortex.l3_memory.outreach_service import stage_after
+
+    assert stage_after(current, status) == expected
+
+
+def test_status_config_matches_the_workbook_validation_list():
+    from cortex.l2_representation.outreach_writer import outreach_config
+
+    cfg = outreach_config()
+    # 10_Outreach_Tracker data validation, verbatim
+    assert list(cfg["statuses"]) == [
+        "Not contacted", "Prepared", "Sent", "Reply received", "Meeting booked", "Eligibility hold", "Applied",
+        "Declined", "Won", "Watchlist",
+    ]  # fmt: skip
+    assert [f["offset_days"] for f in cfg["follow_ups"]] == [5, 12]
+    assert cfg["statuses"]["Declined"]["opportunity_status"] == "lost"
+    assert cfg["statuses"]["Won"]["opportunity_status"] == "won"
+    assert cfg["owners"] == {}  # D-084: nobody is assigned automatically
+
+
+def test_contacts_are_planned_only_from_published_emails(signals):
+    from cortex.l3_memory.outreach_service import plan_contacts
+
+    plans = {s.external_id: plan_contacts(s.title, s.attributes["contact_channel"]) for s in signals}
+    assert plans["CC-001"] == [] and plans["CC-018"] == [] and plans["CC-052"] == []  # role routes, office phone
+    assert plans["CC-002"] == [
+        {"email": "info@colab.is", "name": "CO.LAB / The Company Lab programme team", "role": "Programme contact"}
+    ]
+    assert plans["CC-004"] == [{"email": "dhugh@ahla.com", "name": "Darrel Hugh", "role": None}]
+    assert [c["role"] for c in plans["CC-026"]] == ["Programme contact (research)", "Programme contact (licensing)"]
+    assert sum(len(p) for p in plans.values()) == 31 and sum(1 for p in plans.values() if p) == 30
+
+
+def test_first_contact_template_uses_the_next_action_and_is_only_a_start():
+    from cortex.l3_memory.outreach_service import first_contact_template
+
+    t = first_contact_template({"title": "AWS Activate", "next_action": "Check prior credits, then apply."})
+    assert t["subject"] == "Inspironics × AWS Activate: introduction"
+    assert "Tailored first ask: Check prior credits, then apply." in t["body"] and t["body"].startswith("Dear team,")
+    t = first_contact_template({"title": "AHLA", "next_action": None}, {"name": "Darrel Hugh", "role": None})
+    assert t["body"].startswith("Dear Darrel Hugh,") and "[tailored first ask]" in t["body"]

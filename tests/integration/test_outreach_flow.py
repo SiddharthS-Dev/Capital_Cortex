@@ -208,6 +208,232 @@ async def test_outreach_status_events_are_append_only(engine):
                 await s.execute(text(stmt))
 
 
+async def _ensure_workbook(client, h) -> None:
+    src = await _source_id(client, h, "capital_outreach")
+    await client.post(f"/v1/sources/{src}/upload", headers=h, files=_file())
+    await drain_signals()
+
+
+async def _opp_id(pid: str) -> str:
+    return str((await _profile(pid))["opportunity_id"])
+
+
+async def _opp(opp_id: str) -> dict:
+    async with session_scope() as s:
+        r = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT pipeline_stage::text AS stage, status, owner_id FROM opportunity "
+                        "WHERE id = CAST(:i AS uuid)"
+                    ),
+                    {"i": opp_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return dict(r)
+
+
+async def _follow_ups(opp_id: str) -> list[dict]:
+    async with session_scope() as s:
+        rows = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT title, due_at, owner_id, status FROM milestone WHERE opportunity_id = CAST(:i AS uuid) "
+                        "AND kind = 'follow_up' AND source_ref->>'kind' = 'outreach_follow_up' ORDER BY due_at, status"
+                    ),
+                    {"i": opp_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]
+
+
+async def test_status_machine_follow_ups_and_stage(client, make_token):
+    from datetime import date
+
+    from cortex.l3_memory import outreach_service as svc
+    from platform_core.errors import Problem
+
+    h = {"Authorization": f"Bearer {make_token(['admin'], auth_age=5)}"}
+    await _ensure_workbook(client, h)
+    actor = oidc.get_verifier().verify_sync(make_token(["analyst"], username="ana", auth_age=5))
+    opp = await _opp_id("CC-003")
+
+    # Sent: stage forward to engaged, +5/+12 follow-ups, unowned because the opportunity is unowned
+    async with session_scope() as s:
+        r = await svc.set_status(s, actor, opp, "Sent", first_sent_on=date(2026, 10, 8))
+    assert r["stage_changed"] and r["pipeline_stage"] == "engaged" and len(r["follow_ups_created"]) == 2
+    fus = await _follow_ups(opp)
+    assert [f["due_at"].date().isoformat() for f in fus] == ["2026-10-13", "2026-10-20"]
+    assert {f["owner_id"] for f in fus} == {None} and {f["status"] for f in fus} == {"open"}
+    assert fus[0]["title"].startswith("Follow-up 1: ")
+    async with session_scope() as s:
+        await svc.set_status(s, actor, opp, "Sent")  # again: no second pair of follow-ups
+    assert len(await _follow_ups(opp)) == 2
+
+    # a reply cancels the open follow-ups; the stage stays engaged
+    async with session_scope() as s:
+        r = await svc.set_status(s, actor, opp, "Reply received", reason="replied by email")
+    assert len(r["follow_ups_cancelled"]) == 2 and not r["stage_changed"]
+    assert {f["status"] for f in await _follow_ups(opp)} == {"cancelled"}
+
+    # forward only: Applied moves to submitted, then Prepared leaves it there
+    async with session_scope() as s:
+        await svc.set_status(s, actor, opp, "Applied")
+        r = await svc.set_status(s, actor, opp, "Prepared")
+    assert r["pipeline_stage"] == "submitted" and not r["stage_changed"]
+    assert (await _opp(opp))["stage"] == "submitted"
+
+    # Declined is allowed to go to lost, and closes the opportunity as lost
+    async with session_scope() as s:
+        await svc.set_status(s, actor, opp, "Declined")
+    assert (await _opp(opp)) == {"stage": "lost", "status": "lost", "owner_id": None}
+
+    async with session_scope() as s:
+        events = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT to_status FROM outreach_status_event WHERE opportunity_id = CAST(:i AS uuid) ORDER BY at"
+                    ),
+                    {"i": opp},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        audited = (
+            await s.execute(
+                text("SELECT count(*) FROM audit_log WHERE action = 'outreach.status' AND target = :r"),
+                {"r": f"opportunity:{opp}"},
+            )
+        ).scalar()
+    # "Sent" twice: the second records an event and an audit row (the date may change), creates no follow-ups
+    assert events == ["Not contacted", "Sent", "Sent", "Reply received", "Applied", "Prepared", "Declined"]
+    assert audited == 6
+
+    # follow-ups go to the opportunity owner when there is one
+    owned = await _opp_id("CC-005")
+    async with session_scope() as s:
+        await s.execute(text("UPDATE opportunity SET owner_id = 'kumar' WHERE id = CAST(:i AS uuid)"), {"i": owned})
+        await svc.set_status(s, actor, owned, "Sent", first_sent_on=date(2026, 10, 9))
+    assert {f["owner_id"] for f in await _follow_ups(owned)} == {"kumar"}
+
+    # Eligibility hold needs a linked gate or a recorded decision; it leaves the stage alone
+    held = await _opp_id("CC-015")
+    with pytest.raises(Problem, match="link an eligibility gate or record the eligibility decision"):
+        async with session_scope() as s:
+            await svc.set_status(s, actor, held, "Eligibility hold")
+    async with session_scope() as s:
+        r = await svc.set_status(s, actor, held, "Eligibility hold", eligibility_decision="G2: cap table pending")
+    assert not r["stage_changed"] and (await _profile("CC-015"))["eligibility_decision"] == "G2: cap table pending"
+
+    # Watchlist sets the opportunity status only
+    watch = await _opp_id("CC-017")
+    async with session_scope() as s:
+        await svc.set_status(s, actor, watch, "Watchlist")
+    assert (await _opp(watch))["status"] == "watchlist" and (await _opp(watch))["stage"] == "discovered"
+
+
+async def test_contacts_owners_and_first_contact_draft(client, make_token):
+    from cortex.l3_memory import outreach_service as svc
+
+    h = {"Authorization": f"Bearer {make_token(['admin'], auth_age=5)}"}
+    await _ensure_workbook(client, h)
+    actor = oidc.get_verifier().verify_sync(make_token(["admin"], username="root", auth_age=5))
+    created_kind = "SELECT count(*) FROM contact WHERE source_ref->>'kind' = 'outreach_contact_channel'"
+
+    async with session_scope() as s:
+        plan = await svc.import_contacts(s, actor, dry_run=True)
+        assert (await s.execute(text(created_kind))).scalar() == 0  # the dry run wrote nothing
+    assert len(plan["planned"]) == 31 and not plan["created"]
+    assert {x["prospect_id"] for x in plan["skipped"]} >= {"CC-001", "CC-018", "CC-052"}
+    async with session_scope() as s:
+        done = await svc.import_contacts(s, actor, dry_run=False)
+    assert len(done["created"]) == 31
+    async with session_scope() as s:
+        again = await svc.import_contacts(s, actor, dry_run=False)  # idempotent on the email
+        rows = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT name, role, emails, consent_basis, organization_id IS NOT NULL AS has_org FROM contact "
+                        "WHERE source_ref->>'kind' = 'outreach_contact_channel' ORDER BY name"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert not again["created"] and len(rows) == 31
+    assert {r["consent_basis"] for r in rows} == {"public_professional"} and all(r["has_org"] for r in rows)
+    assert next(r for r in rows if r["name"] == "Darrel Hugh")["emails"] == ["dhugh@ahla.com"]
+
+    # owners: the map is empty, so nothing is assigned and every proposed name is reported
+    async with session_scope() as s:
+        o = await svc.apply_proposed_owners(s, actor, dry_run=False)
+    assert o["applied"] == [] and sum(u["rows"] for u in o["unmapped"]) >= 40
+
+    # first contact: a draft in the outbox, never sent
+    opp = await _opp_id("CC-004")
+    async with session_scope() as s:
+        cid = (await s.execute(text("SELECT id FROM contact WHERE 'dhugh@ahla.com' = ANY(emails)"))).scalar()
+        d = await svc.draft_first_contact(s, actor, opp, str(cid))
+        ob = (
+            (
+                await s.execute(
+                    text("SELECT status, recipient, payload, opportunity_id FROM outbox WHERE id = CAST(:i AS uuid)"),
+                    {"i": d["id"]},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert ob["status"] == "draft" and ob["recipient"] == "dhugh@ahla.com" and str(ob["opportunity_id"]) == opp
+    assert ob["payload"]["body"].startswith("Dear Darrel Hugh,") and "Tailored first ask:" in ob["payload"]["body"]
+
+
+async def test_outreach_alerts_next_action_and_staleness(client, make_token):
+    from cortex.l8_actuation import alerts
+
+    h = {"Authorization": f"Bearer {make_token(['admin'], auth_age=5)}"}
+    await _ensure_workbook(client, h)
+    async with session_scope() as s:
+        await s.execute(text("UPDATE outreach_profile SET next_action_on = CURRENT_DATE WHERE prospect_id = 'CC-006'"))
+        # research dates are workbook facts; moved back here only to exercise the refresh rules
+        await s.execute(
+            text("UPDATE outreach_profile SET verified_on = CURRENT_DATE - 100 WHERE prospect_id = 'CC-007'")
+        )
+        await s.execute(
+            text(
+                "UPDATE outreach_profile SET verified_on = CURRENT_DATE - 40 WHERE prospect_id IN ('CC-001', 'CC-030')"
+            )
+        )
+        await alerts.seed_default_rules(s)
+        await alerts.evaluate(s)
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT r.name, p.prospect_id FROM alert a JOIN alert_rule r ON r.id = a.rule_id "
+                    "JOIN outreach_profile p ON p.opportunity_id = a.subject_id WHERE r.name LIKE 'Outreach%'"
+                )
+            )
+        ).all()
+    got = {(n, p) for n, p in rows}
+    assert ("Outreach next action due", "CC-006") in got
+    assert ("Outreach sources stale", "CC-007") in got
+    # a priority row (CC-001, priority 100) is stale after 30 days; a low-priority row (CC-030) only after 90
+    assert ("Outreach research stale (priority rows)", "CC-001") in got
+    assert not {g for g in got if g[1] == "CC-030"}
+
+
+# last in this module: it drops and recreates the outreach tables
 def test_migration_0007_downgrades_and_upgrades(pg_url):
     import os
     import subprocess

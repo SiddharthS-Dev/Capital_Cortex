@@ -34,6 +34,14 @@ CUSTOM_FIELDS = {
     "score": "o.score",
     "completeness": "o.completeness",
     "days_to_deadline": "EXTRACT(EPOCH FROM (o.deadline - now())) / 86400",
+    # outreach register (FR-04-OUT): NULL for opportunities without an outreach profile, so they never match
+    "outreach_days_to_next_action": "(SELECT op.next_action_on - CURRENT_DATE FROM outreach_profile op "
+    "WHERE op.opportunity_id = o.id AND op.outreach_status NOT IN ('Declined','Won'))",
+    "outreach_research_age_days": "(SELECT CURRENT_DATE - op.verified_on FROM outreach_profile op "
+    "WHERE op.opportunity_id = o.id)",
+    # priority rows only (analyst priority at or above refresh.priority_row_min_score in config/outreach.yaml)
+    "outreach_priority_research_age_days": "(SELECT CURRENT_DATE - op.verified_on FROM outreach_profile op "
+    "WHERE op.opportunity_id = o.id AND op.analyst_priority >= :prio_min)",
 }
 CUSTOM_OPS = {">=": ">=", "<=": "<=", ">": ">", "<": "<", "=": "="}
 
@@ -201,6 +209,10 @@ async def _custom(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[dic
     expr, op = CUSTOM_FIELDS[e["field"]], CUSTOM_OPS[e["op"]]
     where = [f"{expr} {op} :v", "o.org_id = :org", "o.status = 'active'"]
     p: dict[str, Any] = {"v": float(e["value"]), "org": get_settings().org_id}
+    if ":prio_min" in expr:
+        from cortex.l2_representation.outreach_writer import outreach_config
+
+        p["prio_min"] = int(outreach_config()["refresh"]["priority_row_min_score"])
     if e.get("class"):
         where.append("o.class::text = :cls")
         p["cls"] = e["class"]

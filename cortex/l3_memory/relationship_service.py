@@ -466,10 +466,12 @@ async def create_milestone(
     organization_id: str | None = None,
     meeting_id: str | None = None,
     owner_id: str | None = None,
+    owner_default_to_actor: bool = True,
     description: str | None = None,
     source_ref: dict[str, Any] | None = None,
     is_demo: bool = False,
 ) -> dict[str, Any]:
+    """``owner_default_to_actor=False`` keeps an unowned milestone unowned instead of giving it to the caller."""
     if kind not in ("deadline", "follow_up", "commitment_expiry", "submission"):
         raise Problem(422, "Invalid kind", "unknown milestone kind", "validation")
     src = source_ref or manual_ref(actor)
@@ -487,7 +489,7 @@ async def create_milestone(
                     "k": kind,
                     "t": title,
                     "due": due_at,
-                    "own": owner_id or (None if isinstance(actor, str) else actor.sub),
+                    "own": owner_id or (None if isinstance(actor, str) or not owner_default_to_actor else actor.sub),
                     "c": contact_id,
                     "o": organization_id,
                     "m": meeting_id,
