@@ -41,6 +41,9 @@ mapping:
   published_at: "metadata.startDate[0]"
   open_date: "metadata.startDate[0]"
   deadline: "metadata.deadlineDate[0]"
+  # per-grant EU contribution of this topic's own actions (the call's budget table lists every topic)
+  amount_min: {paths: ["metadata.budgetOverview[0]"], transform: eu_contribution_min}
+  amount_max: {paths: ["metadata.budgetOverview[0]"], transform: eu_contribution_max}
 defaults:
   currency: EUR
   countries: [EU]

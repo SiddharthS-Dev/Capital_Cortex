@@ -6,11 +6,13 @@ A mapping entry is one of:
   {"template": "https://x/{id}"}  format string over the payload's top-level keys
   {"value": "USD"}                a literal (recorded as a source default in field_sources)
   {"paths": [...], "transform": "date" | "number" | "html" | "list" | "upper"}
+  {"paths": [...], "transform": "eu_contribution_min" | "eu_contribution_max"}   (also reads the payload)
 """
 
 from __future__ import annotations
 
 import html
+import json
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -187,12 +189,36 @@ def to_number(v: Any) -> Decimal | None:
     return -found[0] if negative else found[0]
 
 
+def eu_contribution(v: Any, payload: dict[str, Any], end: str) -> Decimal | None:
+    """EU Funding & Tenders ``budgetOverview``: the per-grant EU contribution (``minContribution`` /
+    ``maxContribution``) of the actions that belong to this topic. A call lists every topic's actions, so only the
+    actions named after the topic identifier count; with none (or no identifier) the value is not stated."""
+    try:
+        overview = json.loads(v) if isinstance(v, str) else v
+        actions = [a for group in (overview.get("budgetTopicActionMap") or {}).values() for a in group]
+    except (ValueError, AttributeError, TypeError):
+        return None
+    topic = str(get_path(payload, "metadata.identifier[0]") or "").strip()
+    if not topic:
+        return None
+    own = [a for a in actions if str(a.get("action", "")).split(" ", 1)[0] == topic]
+    values = [n for a in own if (n := to_number(a.get(f"{end}Contribution"))) is not None and n > 0]
+    if not values:
+        return None
+    return min(values) if end == "min" else max(values)
+
+
 TRANSFORMS: dict[str, Callable[[Any], Any]] = {
     "date": to_date,
     "number": to_number,
     "html": lambda v: strip_html(str(v)) if not _empty(v) else None,
     "upper": lambda v: str(v).upper() if not _empty(v) else None,
     "list": lambda v: v if isinstance(v, list) else ([] if _empty(v) else [v]),
+}
+# transforms that also read the rest of the payload (value, payload) → value
+PAYLOAD_TRANSFORMS: dict[str, Callable[[Any, dict[str, Any]], Any]] = {
+    "eu_contribution_min": lambda v, p: eu_contribution(v, p, "min"),
+    "eu_contribution_max": lambda v, p: eu_contribution(v, p, "max"),
 }
 
 
@@ -218,7 +244,9 @@ def resolve(payload: dict[str, Any], spec: Any) -> tuple[Any, str | None]:
     for p in paths:
         v = get_path(payload, p)
         if not _empty(v):
-            if transform:
+            if transform in PAYLOAD_TRANSFORMS:
+                v = PAYLOAD_TRANSFORMS[transform](v, payload)
+            elif transform:
                 v = TRANSFORMS[transform](v)
             if not _empty(v):
                 return v, f"raw:{p}"

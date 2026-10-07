@@ -38,6 +38,8 @@ request:
       funder: 'div.govuk-table__row:-soup-contains("Funders:") dd'     # the Funders row precedes Co-funders
       funding_type: 'div.govuk-table__row:-soup-contains("Funding type") dd'
       max_award: 'div.govuk-table__row:-soup-contains("Maximum award") dd'
+      min_award: 'div.govuk-table__row:-soup-contains("Minimum award") dd'
+      award_range: 'div.govuk-table__row:-soup-contains("Award range") dd'   # "£50,000 - £100,000"
       opening_date: 'div.govuk-table__row:-soup-contains("Opening date") dd'
       closing_date: 'div.govuk-table__row:-soup-contains("Closing date") dd'
 mapping:
@@ -49,7 +51,8 @@ mapping:
   open_date: opening_date
   published_at: opening_date
   counterparty_name: funder
-  amount_max: max_award
+  amount_max: [max_award, award_range]   # a range fills both ends (normalizer)
+  amount_min: [min_award, award_range]
   instruments: funding_type
 defaults:
   currency: GBP
