@@ -13,6 +13,9 @@ engagement_outlooks: [High, Medium, Low, Very low]
 # stated priority disagrees is flagged priority_inconsistent, never corrected. Never the Capital Opportunity Score (D-080).
 priority_formula: {relevance: 10, accessibility: 6, readiness: 4}
 
+# Analyst-priority bands for the Radar facet (workbook judgement, not the Capital Opportunity Score).
+priority_bands: {high: 80, medium: 60}   # high >= 80, medium 60-79, low < 60, none = not stated
+
 # Tracker statuses (10_Outreach_Tracker). pipeline_stage moves forward only (D-081); `stage: null` leaves it alone.
 # `opportunity_status` sets opportunity.status when given.
 statuses:

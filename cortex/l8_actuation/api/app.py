@@ -24,6 +24,7 @@ from cortex.l8_actuation.api.routers import (
     copilot,
     dashboards,
     dataroom,
+    eligibility_gates,
     entities,
     events,
     forecasts,
@@ -31,6 +32,7 @@ from cortex.l8_actuation.api.routers import (
     opportunities,
     organization,
     outcomes,
+    outreach,
     phased,
     proposals,
     relationships,
@@ -157,6 +159,8 @@ def create_app() -> FastAPI:
         dataroom.public,
         board_reports.router,
         copilot.router,
+        outreach.router,
+        eligibility_gates.router,
     ):
         app.include_router(r, responses=COMMON_ERROR_RESPONSES)
     app.include_router(phased.build_router(), responses=COMMON_ERROR_RESPONSES)

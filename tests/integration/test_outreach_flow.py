@@ -503,6 +503,109 @@ async def test_eligibility_gates_import_links_and_approval_warning(client, make_
     assert n >= 7  # 2 imports + dry run, update ×2, link, unlink
 
 
+async def test_outreach_api_radar_and_weighted_pipeline(client, make_token):
+    from cortex.l5_strategy.pipeline_engine import weighted_pipeline
+
+    admin = {"Authorization": f"Bearer {make_token(['admin'], auth_age=5)}"}
+    analyst = {"Authorization": f"Bearer {make_token(['analyst'], username='ana', auth_age=5)}"}
+    await _ensure_workbook(client, admin)
+    async with session_scope() as s:
+        before = await weighted_pipeline(s)
+
+    # tracker list in the workbook's order: USA first, actionable routes before blocked/watch ones, then rank
+    r = await client.get("/v1/outreach?limit=500", headers=analyst)
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert r.json()["total"] == 52 and len(items) == 52
+    assert [i["geography"][0] for i in items[:1]] == ["US"] and items[-1]["geography"] == ["IN"]
+    countries = [i["country_order"] for i in items]
+    assert countries == sorted(countries)
+    us = [i for i in items if i["country_order"] == 1]
+    order = r.json()["routes"]
+    assert [order.index(i["route"]) for i in us] == sorted(order.index(i["route"]) for i in us)
+    f = await client.get("/v1/outreach?route=Eligibility%20gate%20first&country=US", headers=analyst)
+    assert f.json()["total"] >= 1 and {i["route"] for i in f.json()["items"]} == {"Eligibility gate first"}
+
+    # one prospect: research, analyst priority (labelled, separate from the Cortex score), status effects
+    cc020 = await _opp_id("CC-020")
+    d = (await client.get(f"/v1/outreach/{cc020}", headers=analyst)).json()
+    assert d["priority"]["label"] == "Analyst priority (workbook)" and d["priority"]["inconsistent"] is False
+    assert d["status_effects"]["Sent"]["stage"] == "engaged" and d["status_effects"]["Declined"]["stage"] == "lost"
+    assert d["first_contact_template"]["body"]
+    assert (await client.get(f"/v1/outreach/{cc020}", headers=analyst)).json()["analyst_priority"] != d.get("score")
+
+    # tracker PATCH: tracker fields only; a research field is a 422
+    r = await client.patch(
+        f"/v1/outreach/{cc020}", headers=analyst, json={"notes": "intro via EEP", "next_action_on": "2026-10-14"}
+    )
+    assert r.status_code == 200 and r.json()["updated"] == ["next_action_on", "notes"]
+    r = await client.patch(f"/v1/outreach/{cc020}", headers=analyst, json={"route": "Contact now"})
+    assert r.status_code == 422
+
+    # status through the API: stage forward, follow-ups; an approver may read but not write
+    r = await client.post(
+        f"/v1/outreach/{cc020}/status", headers=analyst, json={"status": "Sent", "first_sent_on": "2026-10-09"}
+    )
+    assert r.status_code == 200, r.text
+    assert (
+        r.json()["pipeline_stage"] == "engaged"
+        and len(r.json()["follow_ups_created"]) == 2
+        and "events" not in r.json()
+    )
+    approver = {"Authorization": f"Bearer {make_token(['approver'], auth_age=5)}"}
+    assert (await client.get(f"/v1/outreach/{cc020}", headers=approver)).status_code == 200
+    assert (
+        await client.post(f"/v1/outreach/{cc020}/status", headers=approver, json={"status": "Won"})
+    ).status_code == 403
+    assert (await client.post("/v1/outreach/owners/apply", headers=analyst, json={"dry_run": True})).status_code == 403
+    r = await client.post(f"/v1/outreach/{cc020}/status", headers=analyst, json={"status": "Nope"})
+    assert r.status_code == 422
+
+    # Radar: optional outreach columns, filters, facets and the workbook preset, without changing the default shape
+    r = await client.get(
+        "/v1/opportunities?source=capital_outreach&sort=outreach&outreach=true&limit=60", headers=analyst
+    )
+    body = r.json()
+    assert r.status_code == 200 and body["total"] >= 50  # declined (lost) prospects leave the default view
+    first = body["items"][0]
+    assert first["outreach_country_order"] == 1 and first["outreach_route"] == "Contact now"
+    assert {"route", "engagement", "outreach_status", "priority_band", "gate_open"} <= set(body["facets"])
+    assert body["facets"]["outreach_status"].get("Sent", 0) >= 1
+    plain = (await client.get("/v1/opportunities?limit=5", headers=analyst)).json()
+    assert "route" not in plain["facets"] and {"class", "stage", "band", "source", "geo"} <= set(plain["facets"])
+    hi = (await client.get("/v1/opportunities?source=capital_outreach&priority_band=high", headers=analyst)).json()
+    assert hi["total"] >= 1 and all(i["analyst_priority"] >= 80 for i in hi["items"])
+    assert all(i["score"] is None or i["score"] <= 1 for i in hi["items"])  # the Cortex score is a 0-1 value
+
+    # gates over HTTP, then the Radar gate facet
+    r = await client.post(
+        "/v1/eligibility-gates/import?dry_run=false",
+        headers=analyst,
+        files={"file": (WORKBOOK.name, WORKBOOK.read_bytes(), XLSX)},
+    )
+    assert r.status_code == 200, r.text
+    g = {x["gate_code"]: x for x in (await client.get("/v1/eligibility-gates", headers=analyst)).json()["items"]}
+    sug = (await client.get(f"/v1/eligibility-gates/{g['G5']['id']}/suggestions", headers=analyst)).json()
+    hub = next(x for x in sug["suggestions"] if "Hub71" in x["title"])
+    r = await client.post(f"/v1/eligibility-gates/{g['G5']['id']}/links/{hub['id']}", headers=analyst)
+    assert r.status_code == 200 and r.json()["linked"]
+    gated = (await client.get("/v1/opportunities?source=capital_outreach&gate_open=true", headers=analyst)).json()
+    assert hub["id"] in {i["id"] for i in gated["items"]} and all(i["open_gates"] >= 1 for i in gated["items"])
+    assert (
+        await client.post(
+            "/v1/eligibility-gates/import",
+            headers=analyst,
+            files={"file": (WORKBOOK.name, WORKBOOK.read_bytes(), XLSX)},
+            params={"sheet": "Nope"},
+        )
+    ).status_code == 422
+
+    # Command Center: outreach rows add nothing to the weighted pipeline, whatever their stage
+    async with session_scope() as s:
+        after = await weighted_pipeline(s)
+    assert after["total_by_currency"] == before["total_by_currency"] and after["counted"] == before["counted"]
+
+
 # last in this module: it drops and recreates the outreach tables
 def test_migration_0007_downgrades_and_upgrades(pg_url):
     import os

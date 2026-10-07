@@ -37,12 +37,46 @@ LIST_COLUMNS = (
     "o.id, o.title, o.class::text AS class, o.class_source, o.classification_confidence, o.pipeline_stage::text AS "
     "pipeline_stage, o.status, o.owner_id, o.score, o.score_band, o.completeness, o.geography, o.stage_fit, o.sectors, "
     "o.esg_tags, o.amount_min, o.amount_max, o.currency, o.deadline, o.url, o.is_demo, o.created_at, o.updated_at, "
-    "o.counterparty_id, cp.name AS counterparty_name, cp.kind AS counterparty_kind, s.adapter_key AS source_key"
+    "o.counterparty_id, cp.name AS counterparty_name, cp.kind AS counterparty_kind, s.adapter_key AS source_key, "
+    # outreach register (FR-04-OUT); all NULL for opportunities without an outreach profile. analyst_priority is the
+    # workbook's judgement, never the Capital Opportunity Score (D-080)
+    "op.route AS outreach_route, op.engagement_outlook AS outreach_engagement, op.cash_outlook AS outreach_cash_outlook, "
+    "op.outreach_status, op.next_action_on AS outreach_next_action_on, op.analyst_priority, "
+    "op.country_order AS outreach_country_order, op.country_rank AS outreach_country_rank, "
+    "CASE WHEN op.id IS NULL THEN NULL ELSE (SELECT count(*) FROM eligibility_gate_link gl JOIN eligibility_gate eg "
+    "ON eg.id = gl.gate_id WHERE gl.opportunity_id = o.id AND eg.status IN ('open','blocked')) END AS open_gates"
 )
 FROM = (
     "FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
-    "LEFT JOIN signal sg ON sg.id = o.signal_id LEFT JOIN source s ON s.id = sg.source_id"
+    "LEFT JOIN signal sg ON sg.id = o.signal_id LEFT JOIN source s ON s.id = sg.source_id "
+    "LEFT JOIN outreach_profile op ON op.opportunity_id = o.id"
 )
+_GATE_OPEN = (
+    "EXISTS (SELECT 1 FROM eligibility_gate_link gl JOIN eligibility_gate eg ON eg.id = gl.gate_id "
+    "WHERE gl.opportunity_id = o.id AND eg.status IN ('open','blocked'))"
+)
+
+
+def _priority_band_sql() -> str:
+    from cortex.l2_representation.outreach_writer import outreach_config
+
+    b = outreach_config()["priority_bands"]
+    return (
+        f"CASE WHEN op.analyst_priority IS NULL THEN 'none' WHEN op.analyst_priority >= {int(b['high'])} THEN 'high' "
+        f"WHEN op.analyst_priority >= {int(b['medium'])} THEN 'medium' ELSE 'low' END"
+    )
+
+
+def _outreach_order_sql() -> str:
+    """The workbook's sequencing: country order, actionable routes before blocked/watch ones, then country rank."""
+    from cortex.l2_representation.outreach_writer import outreach_config
+
+    routes = outreach_config()["route_order"]
+    case = " ".join(f"WHEN '{r.replace(chr(39), chr(39) * 2)}' THEN {i}" for i, r in enumerate(routes))
+    return (
+        f"op.country_order ASC NULLS LAST, CASE op.route {case} ELSE {len(routes)} END, "
+        "op.country_rank ASC NULLS LAST, o.id"
+    )
 
 
 def _filters(
@@ -59,6 +93,11 @@ def _filters(
     owner: str | None,
     source: list[str] | None,
     demo: bool | None,
+    route: list[str] | None = None,
+    engagement: list[str] | None = None,
+    outreach_status: list[str] | None = None,
+    priority_band: list[str] | None = None,
+    gate_open: bool | None = None,
 ) -> str:
     where = ["o.org_id = :org"]
     # the facets report NULLs as 'unclassified' / 'unscored' / 'none'; filtering on those values must match the
@@ -100,6 +139,20 @@ def _filters(
     if demo is not None:
         where.append("o.is_demo = :demo")
         p["demo"] = demo
+    if route:
+        where.append("op.route = ANY(:route)")
+        p["route"] = route
+    if engagement:
+        where.append("op.engagement_outlook = ANY(:engagement)")
+        p["engagement"] = engagement
+    if outreach_status:
+        where.append("op.outreach_status = ANY(:ostatus)")
+        p["ostatus"] = outreach_status
+    if priority_band:
+        where.append(f"op.id IS NOT NULL AND {_priority_band_sql()} = ANY(:pband)")
+        p["pband"] = priority_band
+    if gate_open is not None:
+        where.append(_GATE_OPEN if gate_open else f"NOT {_GATE_OPEN}")
     return " AND ".join(where)
 
 
@@ -117,7 +170,15 @@ async def list_opportunities(
     owner: str | None = None,
     source: list[str] | None = Query(None),
     demo: bool | None = None,
-    sort: Literal["score", "deadline", "amount", "recent", "completeness"] = "score",
+    route: list[str] | None = Query(None, description="Outreach route (workbook)"),
+    engagement: list[str] | None = Query(None, description="Outreach engagement outlook"),
+    outreach_status: list[str] | None = Query(None, description="Outreach tracker status"),
+    priority_band: list[Literal["high", "medium", "low", "none"]] | None = Query(
+        None, description="Analyst priority (workbook) band: high >= 80, medium 60-79, low < 60"
+    ),
+    gate_open: bool | None = Query(None, description="Has an open or blocked eligibility gate"),
+    outreach: bool = Query(False, description="Add the outreach facets (route, engagement, status, priority, gate)"),
+    sort: Literal["score", "deadline", "amount", "recent", "completeness", "outreach"] = "score",
     limit: int = Query(50, ge=1, le=500),
     cursor: str | None = None,
     facets: bool = True,
@@ -126,13 +187,15 @@ async def list_opportunities(
 ) -> dict[str, Any]:
     p: dict[str, Any] = {"org": get_settings().org_id}
     where = _filters(
-        p, cls, stage, geo, band, status, deadline_before, deadline_after, q, min_completeness, owner, source, demo
-    )
+        p, cls, stage, geo, band, status, deadline_before, deadline_after, q, min_completeness, owner, source, demo,
+        route, engagement, outreach_status, list(priority_band or []), gate_open,
+    )  # fmt: skip
     offset = decode_cursor(cursor)
+    order = _outreach_order_sql() if sort == "outreach" else SORTS[sort]
     rows = (
         (
             await session.execute(
-                text(f"SELECT {LIST_COLUMNS} {FROM} WHERE {where} ORDER BY {SORTS[sort]} LIMIT :n OFFSET :off"),
+                text(f"SELECT {LIST_COLUMNS} {FROM} WHERE {where} ORDER BY {order} LIMIT :n OFFSET :off"),
                 {**p, "n": limit + 1, "off": offset},
             )
         )
@@ -184,6 +247,26 @@ async def list_opportunities(
             ).all()
         }
         f["geo_meta"] = {c: {"name": country_name(c), "numeric": numeric_code(c)} for c in f["geo"]}
+        if outreach:  # only on request, so the default response and its cost stay as they were
+            for name, expr in (
+                ("route", "op.route"),
+                ("engagement", "op.engagement_outlook"),
+                ("outreach_status", "op.outreach_status"),
+                ("priority_band", _priority_band_sql()),
+                ("gate_open", f"CASE WHEN {_GATE_OPEN} THEN 'true' ELSE 'false' END"),
+            ):
+                f[name] = {
+                    r[0]: r[1]
+                    for r in (
+                        await session.execute(
+                            text(
+                                f"SELECT {expr}, count(*) {FROM} WHERE {where} AND op.id IS NOT NULL "
+                                "GROUP BY 1 ORDER BY 2 DESC"
+                            ),
+                            p,
+                        )
+                    ).all()
+                }
         out["facets"] = f
     return out
 

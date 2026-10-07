@@ -63,6 +63,9 @@ DB_BACKED = (
     "/v1/board-reports",
     "/v1/copilot",
     "/v1/legal-holds",
+    # Capital outreach register (exercised in tests/integration/test_outreach_flow.py)
+    "/v1/outreach",
+    "/v1/eligibility-gates",
 )  # exercised against a real database in tests/integration/test_api_flow.py
 
 

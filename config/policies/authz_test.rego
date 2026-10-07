@@ -98,3 +98,38 @@ test_pii_export_denied if {
 	not authz.allow with input as {"subject": user(["admin"], true), "action": "contact:export", "resource": {"type": "contact", "contains_pii": true, "export": true}}
 		with data.rbac as rbac
 }
+
+# FR-04-OUT outreach register: analysts work the tracker and gates, approvers read, owner mapping is admin-only
+outreach_rbac := {
+	"roles": {
+		"admin": {"mfa": "required", "clearance": "restricted", "permissions": ["*"]},
+		"analyst": {"mfa": "optional", "clearance": "confidential", "permissions": ["outreach:read", "outreach:write", "gate:read", "gate:write"]},
+		"approver": {"mfa": "required", "clearance": "confidential", "permissions": ["outreach:read", "gate:read"]},
+	},
+	"service_clients": {},
+	"classifications": ["public", "internal", "confidential", "restricted"],
+	"executive_approvable_subjects": ["board_report"],
+}
+
+test_analyst_writes_outreach_and_gates if {
+	authz.allow with input as {"subject": user(["analyst"], false), "action": "outreach:write", "resource": {"type": "outreach_profile"}}
+		with data.rbac as outreach_rbac
+	authz.allow with input as {"subject": user(["analyst"], false), "action": "gate:write", "resource": {"type": "eligibility_gate"}}
+		with data.rbac as outreach_rbac
+}
+
+test_approver_reads_outreach_only if {
+	authz.allow with input as {"subject": user(["approver"], true), "action": "outreach:read", "resource": {"type": "outreach_profile"}}
+		with data.rbac as outreach_rbac
+	not authz.allow with input as {"subject": user(["approver"], true), "action": "outreach:write", "resource": {"type": "outreach_profile"}}
+		with data.rbac as outreach_rbac
+	not authz.allow with input as {"subject": user(["approver"], true), "action": "gate:write", "resource": {"type": "eligibility_gate"}}
+		with data.rbac as outreach_rbac
+}
+
+test_apply_proposed_owners_is_admin_only if {
+	not authz.allow with input as {"subject": user(["analyst"], false), "action": "outreach:owners_apply", "resource": {"type": "outreach_profile"}}
+		with data.rbac as outreach_rbac
+	authz.allow with input as {"subject": user(["admin"], true), "action": "outreach:owners_apply", "resource": {"type": "outreach_profile"}}
+		with data.rbac as outreach_rbac
+}

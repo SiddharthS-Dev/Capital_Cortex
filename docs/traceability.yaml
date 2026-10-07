@@ -144,6 +144,61 @@ items:
     - tests/unit/test_phase2_agents.py::test_sparkline_is_oldest_first_and_monotone_with_new_touch
     - tests/integration/test_phase2_flow.py::test_phase2_definition_of_done
     - apps/web/e2e/phase2.spec.ts::analyst runs the council from the UI and sees the live deliberation
+  FR-04-OUT:
+    title: Capital outreach register (CEO outreach workbook as opportunities, tracker, eligibility gates)
+    layer: L1-L8
+    phase: 3
+    modules:
+    - cortex.l1_perception.adapters.tabular
+    - cortex.l1_perception.inspect
+    - cortex.l1_perception.normalizer
+    - cortex.l2_representation.outreach_writer
+    - cortex.l2_representation.classifier
+    - cortex.l3_memory.outreach_service
+    - cortex.l7_governance.eligibility_gates
+    - cortex.l7_governance.approval_service
+    - cortex.l8_actuation.api.routers.outreach
+    - cortex.l8_actuation.api.routers.eligibility_gates
+    endpoints:
+    - POST /v1/sources/{id}/upload
+    - POST /v1/sources/{id}/upload/inspect
+    - GET /v1/outreach
+    - GET /v1/outreach/{opportunity_id}
+    - PATCH /v1/outreach/{opportunity_id}
+    - POST /v1/outreach/{opportunity_id}/status
+    - POST /v1/outreach/contacts/import
+    - POST /v1/outreach/owners/apply
+    - POST /v1/outreach/{opportunity_id}/draft-first-contact
+    - GET /v1/eligibility-gates
+    - POST /v1/eligibility-gates
+    - PATCH /v1/eligibility-gates/{id}
+    - POST /v1/eligibility-gates/import
+    - GET /v1/eligibility-gates/{id}/suggestions
+    - POST /v1/eligibility-gates/{id}/links/{opportunity_id}
+    - DELETE /v1/eligibility-gates/{id}/links/{opportunity_id}
+    - GET /v1/opportunities
+    screens:
+    - sources
+    - radar
+    - opportunity_detail
+    - relationships
+    - approvals
+    tests:
+    - tests/unit/test_outreach.py::test_baseline_default_sheet_is_read_me_and_its_rows_are_rejected
+    - tests/unit/test_outreach.py::test_baseline_import_sheet_imports_all_52
+    - tests/unit/test_outreach.py::test_no_amount_currency_or_deadline_is_ever_imported
+    - tests/unit/test_outreach.py::test_non_cash_categories_stay_unclassified
+    - tests/unit/test_outreach.py::test_priority_is_recomputed_and_a_disagreement_is_flagged_not_fixed
+    - tests/unit/test_outreach.py::test_contact_channel_parser_on_the_workbook_strings
+    - tests/unit/test_outreach.py::test_status_moves_the_stage_forward_only
+    - tests/integration/test_outreach_flow.py::test_workbook_inspect_upload_and_reupload
+    - tests/integration/test_outreach_flow.py::test_outreach_profiles_and_human_wins_on_reimport
+    - tests/integration/test_outreach_flow.py::test_outreach_status_events_are_append_only
+    - tests/integration/test_outreach_flow.py::test_status_machine_follow_ups_and_stage
+    - tests/integration/test_outreach_flow.py::test_contacts_owners_and_first_contact_draft
+    - tests/integration/test_outreach_flow.py::test_eligibility_gates_import_links_and_approval_warning
+    - tests/integration/test_outreach_flow.py::test_outreach_api_radar_and_weighted_pipeline
+    - config/policies/authz_test.rego::test_apply_proposed_owners_is_admin_only
   FR-05:
     title: Proposal Factory (collateral generation)
     layer: L8

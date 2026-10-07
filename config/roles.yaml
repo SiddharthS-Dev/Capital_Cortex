@@ -47,6 +47,10 @@ roles:
       - copilot:ask
       - board_report:read
       - budget:read
+      - outreach:read          # FR-04-OUT outreach register
+      - outreach:write
+      - gate:read
+      - gate:write
 
   approver:
     description: Human-in-the-loop approver for governed actuation (I3).
@@ -69,6 +73,8 @@ roles:
       - outbox:send
       - copilot:ask
       - board_report:read
+      - outreach:read
+      - gate:read
 
   auditor:
     description: Read-only oversight of every decision and the audit chain.
@@ -90,6 +96,8 @@ roles:
       - retention:read
       - board_report:read
       - budget:read
+      - outreach:read
+      - gate:read
 
   executive:
     description: Board / executive — dashboards and board reports; approves only where policy allows.
@@ -103,6 +111,8 @@ roles:
       - approval:read
       - approval:decide      # narrowed by OPA: subject_type in executive_approvable_subjects
       - copilot:ask
+      - outreach:read
+      - gate:read
 
   service:
     description: Non-human workers (ingestion, scheduler, agents). Scoped further per client.

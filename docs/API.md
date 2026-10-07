@@ -77,6 +77,32 @@ with SSE, approval decisions, outbox, alerts, outcomes, proposals, data room, Co
 and admin writes) is registered with its permission and phase in
 `cortex/l8_actuation/api/routers/phased.py` and marked `x-cortex-phase` in the OpenAPI spec.
 
+## Capital outreach register (FR-04-OUT)
+
+The CEO's outreach workbook as opportunities, an outreach profile per opportunity, a tracker and a gate register
+(docs/OUTREACH.md). Nothing here sends anything: a first-contact email is an outbox draft that needs approval (I3).
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/v1/sources/{id}/upload?sheet=` | `source:run` | `sheet` picks the XLSX worksheet (overrides the source's `sheet`); a missing sheet is a 422 that lists the sheets |
+| POST | `/v1/sources/{id}/upload/inspect?sheet=` | `source:run` | dry run: sheets, chosen sheet, header → field match report (mapped, unmapped, required missing), would-import / would-fail counts and a 5-row normalisation preview; writes nothing (one audit row) |
+| GET | `/v1/outreach` | `outreach:read` | tracker rows; filters `country`, `route`, `engagement_outlook`, `cash_outlook`, `outreach_status`, `owner`, `due_before`, `stale`; `sort` = workbook (country order, actionable routes first, country rank) \| overdue; cursor pagination |
+| GET | `/v1/outreach/{opportunity_id}` | `outreach:read` | research, analyst priority (stated, recomputed, R/A/Rd parts, inconsistency flag), `status_effects` (stage each status would move to), follow-ups, status history, gates, contacts, first-contact template |
+| PATCH | `/v1/outreach/{opportunity_id}` | `outreach:write` | tracker fields only: `first_sent_on`, `next_action_on`, `reply_summary`, `eligibility_decision`, `notes`; any research field is a 422 |
+| POST | `/v1/outreach/{opportunity_id}/status` | `outreach:write` | `{status, first_sent_on?, eligibility_decision?, reason?}`; stage moves forward only (D-081); Sent creates +5/+12 follow-ups; Eligibility hold needs a linked gate or a decision |
+| POST | `/v1/outreach/contacts/import` | `outreach:write` | `{opportunity_ids?, dry_run=true}`; contacts only from published emails, `public_professional` (D-082) |
+| POST | `/v1/outreach/owners/apply` | `outreach:owners_apply` (admin) | `{dry_run=true}`; maps `proposed_owner_text` through `config/outreach.yaml#owners`, unowned only (D-084) |
+| POST | `/v1/outreach/{opportunity_id}/draft-first-contact` | `outreach:write` | `{contact_id, subject?, body?}` → outbox `draft` (needs approval with MFA to send) |
+| GET/POST | `/v1/eligibility-gates` | `gate:read` / `gate:write` | the register with links; POST adds a gate (G1, G2, …) |
+| PATCH | `/v1/eligibility-gates/{id}` | `gate:write` | status (open, in_review, cleared, blocked, not_applicable), owner, text; audited |
+| POST | `/v1/eligibility-gates/import?sheet=&dry_run=true` | `gate:write` | upsert `07_Eligibility_Gates` by gate code; status and owner stay as people set them; never links |
+| GET | `/v1/eligibility-gates/{id}/suggestions` | `gate:read` | opportunities the gate's affected-rows text seems to name; a person confirms |
+| POST/DELETE | `/v1/eligibility-gates/{id}/links/{opportunity_id}` | `gate:write` | link / unlink (audited) |
+| GET | `/v1/opportunities` | `opportunity:read` | adds `outreach_*` fields, `analyst_priority` and `open_gates` per item; filters `route`, `engagement`, `outreach_status`, `priority_band`, `gate_open`; `sort=outreach`; outreach facets with `outreach=true` (the default response is unchanged) |
+
+`GET /v1/approvals/{id}` adds `eligibility_warnings` (open or blocked gates on the subject's opportunity) next to the
+preview. They never block the decision and never change the content hash (D-083).
+
 ## Getting a token (dev)
 
 ```bash
