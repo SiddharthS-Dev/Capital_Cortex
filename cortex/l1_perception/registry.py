@@ -36,6 +36,10 @@ class SourceConfig(BaseModel):
     respect_robots: bool = True
     max_items: int = 500
     case_insensitive_keys: bool = False
+    sheet: str | None = None  # XLSX: the worksheet to read (None = the first one); ?sheet= on upload overrides it
+    # rows must carry these column values (compared case-insensitively) or fail as "not a <name> import row"
+    require_values: dict[str, str] = Field(default_factory=dict)
+    require_values_message: str = "row does not carry this source's required values"
     mapping: dict[str, Any] = Field(default_factory=dict)
     defaults: dict[str, Any] = Field(default_factory=dict)
 

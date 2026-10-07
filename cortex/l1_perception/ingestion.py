@@ -94,6 +94,7 @@ async def run_source(
     *,
     upload: bytes | None = None,
     upload_name: str | None = None,
+    sheet: str | None = None,
     entries: list[dict[str, Any]] | None = None,
     service_token: str | None = None,
 ) -> dict[str, Any]:
@@ -121,6 +122,7 @@ async def run_source(
         max_items=cfg.max_items,
         upload=upload,
         upload_name=upload_name,
+        sheet=sheet,
         entries=entries or [],
     )
     stats = {"fetched": 0, "new": 0, "duplicate": 0, "failed": 0}

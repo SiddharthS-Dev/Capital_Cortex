@@ -45,6 +45,9 @@ class Signal(BaseModel):
     investor_type: str | None = None
     class_hint: str | None = None
     eligibility: dict[str, Any] = Field(default_factory=dict)
+    # source-specific facts carried through untouched (mapped ``attr_<key>`` fields, e.g. outreach research);
+    # values keep their type (number, date, text) and each key has provenance under ``attributes.<key>``
+    attributes: dict[str, Any] = Field(default_factory=dict)
     # field → how it was obtained, e.g. {"deadline": "raw:synopsis.responseDate", "countries": "source_default"}
     field_sources: dict[str, str] = Field(default_factory=dict)
 
@@ -54,6 +57,7 @@ class Signal(BaseModel):
 
     def content_hash(self) -> str:
         """Hash of the normalised content: a revised listing is a new signal, a re-fetch of the same one isn't."""
-        body = self.model_dump(mode="json", exclude={"field_sources"})
+        # empty ``attributes`` is left out so signals from sources without attr_ fields keep their existing hashes
+        body = self.model_dump(mode="json", exclude={"field_sources", *(() if self.attributes else ("attributes",))})
         blob = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(blob.encode()).hexdigest()

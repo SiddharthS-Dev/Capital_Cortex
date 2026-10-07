@@ -39,6 +39,7 @@ class FetchContext:
     max_items: int = 500
     upload: bytes | None = None
     upload_name: str | None = None
+    sheet: str | None = None  # XLSX worksheet to read; overrides the source config's ``sheet``
     entries: list[dict[str, Any]] = field(default_factory=list)
     _client: httpx.AsyncClient | None = None
     _last: float = 0.0

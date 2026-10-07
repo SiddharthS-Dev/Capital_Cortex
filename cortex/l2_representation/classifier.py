@@ -2,7 +2,7 @@
 
 Signals scored per class:
   class hint from the source   raw field 3.0 · source default 2.0 (e.g. Grants.gov → grant)
-  keyword in title             1.5 each      · keyword in description/categories 0.75 each
+  keyword in title             1.5 each      · keyword in description/categories 0.75 each (negated ones skipped)
   investor type match          2.0           · counterparty kind match           1.5
 confidence = share of the winning class × coverage (saturates at a score of 4). Below ``llm_threshold``
 the small-tier LLM is consulted, but only if one is configured and within budget. A human-set class is
@@ -77,9 +77,9 @@ def classify_rules(sig: Signal, tax: Taxonomy | None = None) -> Classification:
     for cls, spec in tax.classes.items():
         rules = spec.get("rules", {})
         kws = rules.get("keywords", [])
-        for k in find(sig.title, kws):
+        for k in find(sig.title, kws, skip_negated=True):
             add(cls, 1.5, {"signal": "keyword", "field": "title", "keyword": k})
-        for k in find(body, kws)[:4]:
+        for k in find(body, kws, skip_negated=True)[:4]:
             add(cls, 0.75, {"signal": "keyword", "field": "description", "keyword": k})
         if sig.investor_type and sig.investor_type.lower() in rules.get("investor_types", []):
             add(cls, 2.0, {"signal": "investor_type", "value": sig.investor_type})

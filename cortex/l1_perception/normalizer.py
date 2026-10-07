@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import ValidationError
@@ -24,8 +26,13 @@ TEXT_FIELDS = {"title", "description", "counterparty_name"}
 _KEY = re.compile(r"[^a-z0-9]+")
 
 
+def norm_key(k: Any) -> str:
+    """A header as case-insensitive sources see it: "Prospect ID" → "prospect_id"."""
+    return _KEY.sub("_", str(k).strip().lower()).strip("_")
+
+
 def _norm_keys(payload: dict[str, Any]) -> dict[str, Any]:
-    return {_KEY.sub("_", str(k).strip().lower()).strip("_"): v for k, v in payload.items()}
+    return {norm_key(k): v for k, v in payload.items()}
 
 
 def _as_list(v: Any) -> list[str]:
@@ -36,8 +43,47 @@ def _as_list(v: Any) -> list[str]:
     return [s.strip() for s in re.split(r"[;,|]", str(v)) if s.strip()]
 
 
+_DATE_SUFFIXES = ("_on", "_at", "_date")
+
+
+def _attr_value(key: str, v: Any, cfg: SourceConfig) -> Any:
+    """An ``attr_`` value keeps its type: numbers stay numbers, ``*_on``/``*_at``/``*_date`` keys are dates
+    (``*_on`` a calendar date), text is cleaned. An unparseable date is kept as the text it was, never guessed."""
+    if isinstance(v, bool):
+        return v
+    if key.endswith(_DATE_SUFFIXES):
+        d = to_date(v, dayfirst=cfg.date_dayfirst, require_day=True)
+        if d is None:
+            return strip_html(str(v)) if isinstance(v, str) else v
+        return d.date() if key.endswith("_on") else d
+    if isinstance(v, int | float | Decimal):
+        n = to_number(v)
+        if n is None:
+            return None
+        return int(n) if n == n.to_integral_value() else float(n)
+    if isinstance(v, datetime):
+        return v
+    return strip_html(str(v)) if isinstance(v, str) else v
+
+
+def _check_row(cfg: SourceConfig, raw: RawItem, payload: dict[str, Any]) -> None:
+    """Row-level guards: formula cells without a cached value, and the source's ``require_values``."""
+    uncached = raw.payload.get("_uncached_formula")
+    if uncached:
+        raise NormalizationError(
+            f"formula without a cached value in {', '.join(map(str, uncached))} (not evaluated; save the workbook "
+            "in Excel so the values are stored)"
+        )
+    for col, want in cfg.require_values.items():
+        key = norm_key(col) if cfg.case_insensitive_keys else col
+        have = payload.get(key)
+        if have is None or str(have).strip().casefold() != str(want).strip().casefold():
+            raise NormalizationError(cfg.require_values_message)
+
+
 def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
     payload = _norm_keys(raw.payload) if cfg.case_insensitive_keys else raw.payload
+    _check_row(cfg, raw, payload)
     fields: dict[str, Any] = {}
     sources: dict[str, str] = {}
     for field, spec in cfg.mapping.items():
@@ -56,6 +102,16 @@ def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
         sources[f"eligibility.{f.removeprefix('eligibility_')}"] = sources.pop(f, "raw")
     if eligibility:
         fields["eligibility"] = eligibility
+
+    attributes: dict[str, Any] = {}
+    for f in [k for k in fields if k.startswith("attr_")]:
+        key, note = f.removeprefix("attr_"), sources.pop(f, "raw")
+        value = _attr_value(key, fields.pop(f), cfg)
+        if value in (None, ""):
+            continue  # a blank stays blank
+        attributes[key], sources[f"attributes.{key}"] = value, note
+    if attributes:
+        fields["attributes"] = attributes
 
     for f in list(fields):
         v = fields[f]

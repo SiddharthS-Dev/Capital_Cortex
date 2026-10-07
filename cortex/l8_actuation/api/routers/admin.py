@@ -215,12 +215,12 @@ async def put_users(body: UserRolesIn, p: Principal = Depends(authorize("admin:w
 
 
 # ----------------------------------------------------------------------------- taxonomy + extensions
-@router.get("/admin/taxonomy", summary="The 11 capital classes: labels and rule keywords (effective)")
+@router.get("/admin/taxonomy", summary="The 11 capital classes: labels, rule keywords and (read-only) aliases")
 async def taxonomy(_: Principal = Depends(authorize("admin:read", "taxonomy"))) -> dict[str, Any]:
     from cortex.l2_representation.taxonomy import get_taxonomy
 
     t = get_taxonomy()
-    return {"classes": {k: {"label": v.get("label"), "keywords": (v.get("rules") or {}).get("keywords", []), "agent": v.get("agent")}
+    return {"classes": {k: {"label": v.get("label"), "keywords": (v.get("rules") or {}).get("keywords", []), "agent": v.get("agent"), "aliases": v.get("aliases", [])}
                         for k, v in t.classes.items()}, "llm_threshold": t.llm_threshold, "overrides": settings_service.current("taxonomy")}  # fmt: skip
 
 

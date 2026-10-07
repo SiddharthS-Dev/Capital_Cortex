@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.l1_perception.adapters.tabular import SheetNotFound, sheet_names
 from cortex.l1_perception.ingestion import run_source
+from cortex.l1_perception.inspect import inspect_upload
 from cortex.l1_perception.registry import get_source, sync_sources
 from cortex.l7_governance import audit_service
 from cortex.l8_actuation.api.common import row
@@ -112,16 +114,7 @@ async def run_now(
     return {"queued": True, "stream_id": msg}
 
 
-@router.post(
-    "/sources/{id}/upload",
-    summary="Upload a CSV/XLSX (file source) or an .ics calendar (calendar source); runs immediately",
-)
-async def upload(
-    id: str,
-    file: UploadFile = File(...),
-    p: Principal = Depends(authorize("source:run", "source")),
-    session: AsyncSession = Depends(get_session, scope="function"),
-) -> dict[str, Any]:
+async def _read_upload(session: AsyncSession, id: str, file: UploadFile) -> tuple[Any, str, bytes]:
     _, cfg = await get_source(session, id)
     allowed = {"tabular": (".csv", ".xlsx", ".xlsm", ".tsv", ".txt"), "ics": (".ics",)}
     if cfg.adapter not in allowed:
@@ -134,7 +127,65 @@ async def upload(
     data = await file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
         raise Problem(413, "File too large", "limit is 20 MB", "payload-too-large")
-    return await run_source(id, p, "upload", upload=data, upload_name=name)
+    return cfg, name, data
+
+
+def _check_sheet(cfg: Any, name: str, data: bytes, sheet: str | None) -> str | None:
+    """The sheet to read: ?sheet= wins over the source config; a missing one is a 422 naming the sheets there are."""
+    chosen = sheet or cfg.sheet
+    if chosen is None or cfg.adapter != "tabular":
+        return sheet
+    try:
+        names = sheet_names(data, name)
+    except Exception as e:  # not a readable workbook
+        raise Problem(422, "Unreadable workbook", f"{type(e).__name__}: {e}", "validation") from e
+    if names and chosen not in names:
+        raise Problem(422, "Sheet not found", str(SheetNotFound(chosen, names)), "validation")
+    return chosen if names else None
+
+
+SHEET_Q = Query(None, max_length=31, description="XLSX worksheet to read (overrides the source's configured sheet)")
+
+
+@router.post(
+    "/sources/{id}/upload",
+    summary="Upload a CSV/XLSX (file source) or an .ics calendar (calendar source); runs immediately",
+)
+async def upload(
+    id: str,
+    file: UploadFile = File(...),
+    sheet: str | None = SHEET_Q,
+    p: Principal = Depends(authorize("source:run", "source")),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> dict[str, Any]:
+    cfg, name, data = await _read_upload(session, id, file)
+    return await run_source(id, p, "upload", upload=data, upload_name=name, sheet=_check_sheet(cfg, name, data, sheet))
+
+
+@router.post(
+    "/sources/{id}/upload/inspect",
+    summary="Dry run of an upload: sheets, header → field match report and a 5-row normalisation preview",
+)
+async def inspect(
+    id: str,
+    file: UploadFile = File(...),
+    sheet: str | None = SHEET_Q,
+    p: Principal = Depends(authorize("source:run", "source")),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> dict[str, Any]:
+    cfg, name, data = await _read_upload(session, id, file)
+    if cfg.adapter != "tabular":
+        raise Problem(422, "Not a tabular source", "inspect reads CSV / XLSX uploads", "validation")
+    chosen = _check_sheet(cfg, name, data, sheet)
+    try:
+        report = inspect_upload(cfg, data, name, chosen)
+    except SheetNotFound as e:
+        raise Problem(422, "Sheet not found", str(e), "validation") from e
+    await audit_service.record(
+        session, p, "source.upload.inspect", f"source:{id}",
+        {"file": name, "sheet": report["sheet"], "rows": report["rows"], "would_import": report["would_import"]},
+    )  # fmt: skip
+    return report
 
 
 class ManualEntry(BaseModel):

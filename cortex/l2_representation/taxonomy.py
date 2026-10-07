@@ -67,7 +67,20 @@ def _pattern(keyword: str) -> re.Pattern[str]:
     return re.compile(r"(?<![a-z0-9])" + re.escape(k) + suffix + r"(?![a-z0-9])")
 
 
-def find(text: str, keywords: list[str]) -> list[str]:
-    """Keywords present in ``text`` (lower-cased), matched at word boundaries."""
+# "no direct grant", "not guaranteed grant", "without equity": a cue word, then at most two words, then the keyword.
+# "non-dilutive" is not a cue (it is a kind of grant), so "non" is deliberately absent.
+_NEGATION = re.compile(r"(?<![a-z0-9])(?:no|not|without|never|nor)(?:\W+[a-z0-9-]+){0,2}\W+$")
+
+
+def find(text: str, keywords: list[str], *, skip_negated: bool = False) -> list[str]:
+    """Keywords present in ``text`` (lower-cased), matched at word boundaries. With ``skip_negated`` a keyword
+    counts only if at least one occurrence is not negated ("no direct grant" is not evidence of a grant, D-085)."""
     t = f" {text.lower()} "
-    return [k.strip().rstrip("*") for k in keywords if _pattern(k).search(t)]
+    out = []
+    for k in keywords:
+        hits = list(_pattern(k).finditer(t))
+        if skip_negated:
+            hits = [m for m in hits if not _NEGATION.search(t[max(0, m.start() - 60) : m.start()])]
+        if hits:
+            out.append(k.strip().rstrip("*"))
+    return out

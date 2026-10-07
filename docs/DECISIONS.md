@@ -301,6 +301,39 @@ should validate against the SyRS/HLD/LLD source documents, which are not in this
   after the headers are sent ends the stream with an `error` event. The API sends
   `Cross-Origin-Resource-Policy: same-origin`.
 
+## Capital outreach register decisions (FR-04-OUT, docs/OUTREACH.md)
+
+- **D-079 · Non-cash routes stay outside the 11 classes.** The `capital_class` enum (D-004) is unchanged. Config-only
+  `aliases` in `config/taxonomy.yaml` classify the workbook categories that clearly mean a class (15 of 29: VC, PE,
+  Academia, government grant and programme variants). Cloud credits, consortia, utility incentives, generic
+  accelerators and ecosystem networks are deliberately not aliased into cash classes; they stay unclassified (or are
+  classified by a person), and `outreach_profile.category` keeps the workbook category for filtering. Measured on the
+  real workbook: 32 / 52 classify by rules, 20 stay unclassified across 13 categories (list in docs/OUTREACH.md).
+- **D-080 · Radar's primary score is still the Capital Opportunity Score.** The workbook's priority
+  (relevance×10 + accessibility×6 + readiness×4) is stored as `outreach_profile.analyst_priority`, shown as "Analyst
+  priority (workbook)", optional and separate. It is never written to `opportunity.score`. It is recomputed from
+  `config/outreach.yaml` on import; a disagreement sets `priority_inconsistent` and is never corrected.
+- **D-081 · Outreach status moves the pipeline stage forward only.** Mapping in `config/outreach.yaml`. Declined →
+  `lost` (status lost) and Won → `committed` (status won) are the only moves that may go backwards. Watchlist sets the
+  opportunity status only; Eligibility hold leaves stage and status alone.
+- **D-082 · Contacts only from published emails.** `contact_channel` creates a contact only for a published email,
+  with `consent_basis = public_professional` and the counterparty organisation. A person's name is used only when one
+  named person sits next to one email; otherwise "<organisation> programme team". Role routes, forms and portals create
+  nothing; phones stay on the outreach profile (the `contact` table has no phone column and gets none).
+- **D-083 · Eligibility gates are a governed register, linked by people.** `eligibility_gate` + `eligibility_gate_link`.
+  The import never links (affected text is free text); the UI suggests, a person confirms. An open or blocked gate is a
+  warning in Radar, on the opportunity and in the approval detail (outside the hashed preview, so no approval is
+  invalidated by it). It never changes the score and never blocks approval.
+- **D-084 · Owners only through "Apply proposed owners".** An admin-only, dry-run-first action maps
+  `proposed_owner_text` through the editable `owners:` map in `config/outreach.yaml` (empty by default), filling only
+  unowned opportunities. Unmapped names are reported, never guessed.
+- **D-085 · Negated keywords are not classification evidence.** Measured on the workbook: "not guaranteed grant"
+  (CC-010, an accelerator) and "no direct grant" (CC-020, a consortium) were classified `grant` by the description
+  keyword rule. The rules classifier now skips a keyword preceded within two words by no / not / without / never / nor
+  ("non-dilutive" is not a cue). Other callers of `taxonomy.find` are unchanged (opt-in `skip_negated`).
+- **D-086 · Empty `attributes` don't change a signal's content hash.** `Signal.attributes` is part of the hash only
+  when non-empty, so every existing source keeps its hashes and a re-poll doesn't re-ingest stored signals as new.
+
 ## Open items
 
 - **D-011 · Cloud target for Terraform is open.** `infra/terraform` fixes variables and outputs only. CI

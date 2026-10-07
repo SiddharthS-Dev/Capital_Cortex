@@ -1,0 +1,46 @@
+# The CEO's Meris Capital Cortex outreach workbook (docs/OUTREACH.md, FR-04-OUT). Reads the 12_Meris_Import sheet:
+# one row per prospect, stable IDs (CC-001…), flat snake_case headers. Research facts go to `attributes` and from
+# there to outreach_profile; nothing here is an amount, a currency or a deadline (I1, cash discipline): the
+# workbook's "published benefit / terms" are text, and its target-contact windows are not deadlines.
+key: capital_outreach
+name: Capital Cortex outreach workbook
+kind: file
+adapter: tabular
+enabled: true
+sheet: 12_Meris_Import
+terms_note: CEO-supplied research workbook (official programme pages, checked on verified_on). Contactability not tested.
+respect_robots: false
+max_items: 500
+date_dayfirst: false
+case_insensitive_keys: true
+require_values: {engine: Meris, module: Capital Cortex}
+require_values_message: not a Capital Cortex import row
+mapping:
+  external_id: [prospect_id]
+  title: [organization]
+  counterparty_name: [organization]
+  countries: [country]
+  class_hint: [category]
+  instruments: [instrument]
+  sectors: [vertical_products]
+  stage_fit: [stage_fit]
+  url: [contact_url, official_source_url]
+  description: {template: "{instrument} · {programme_status}"}
+  eligibility_gate: [eligibility_gate]
+  attr_category: [category]
+  attr_route: [route]
+  attr_engagement_outlook: [engagement_outlook]
+  attr_cash_outlook: [cash_outlook]
+  attr_relevance: [relevance_1_5]
+  attr_accessibility: [accessibility_1_5]
+  attr_readiness: [readiness_1_5]
+  attr_priority_score: [priority_score]
+  attr_country_order: [country_order]
+  attr_country_rank: [country_rank]
+  attr_contact_channel: [contact_channel]
+  attr_official_source_url: [official_source_url]
+  attr_verified_on: [verified_on]
+  attr_programme_status: [programme_status]
+  attr_next_action: [next_action]
+  attr_status: [status]
+  attr_proposed_owner: [proposed_owner]

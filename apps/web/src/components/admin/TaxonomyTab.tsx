@@ -9,7 +9,7 @@ import { CLASS_COLORS } from "@/lib/format";
 import { usePermission } from "@/lib/queries";
 import { ChipEditor, ReadOnlyNote, SaveResult, useSaveSettings } from "./shared";
 
-interface ClassDef { label: string | null; keywords: string[]; agent: string | null }
+interface ClassDef { label: string | null; keywords: string[]; agent: string | null; aliases?: string[] }
 interface TaxonomyOut { classes: Record<string, ClassDef>; llm_threshold: number | null; overrides: Record<string, unknown> | null }
 
 export function TaxonomyTab() {
@@ -57,6 +57,10 @@ export function TaxonomyTab() {
                 <div className="text-xs"><span className="text-muted-foreground">Keywords</span>
                   <div className="mt-1"><ChipEditor label={`Add keyword to ${k}`} values={f.keywords} disabled={!canWrite}
                     onChange={(v) => setForm((x) => ({ ...x, [k]: { ...f, keywords: v.slice(0, 80) } }))} /></div></div>
+                {(d.classes[k].aliases ?? []).length > 0 && (
+                  <div className="text-xs"><span className="text-muted-foreground">Category aliases (config/taxonomy.yaml, read-only)</span>
+                    <div className="mt-1 flex flex-wrap gap-1">{d.classes[k].aliases!.map((a) => <Badge key={a}>{a}</Badge>)}</div></div>
+                )}
               </li>
             );
           })}
