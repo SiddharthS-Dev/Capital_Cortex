@@ -48,6 +48,17 @@ export interface OpportunityListItem {
   counterparty_name: string | null;
   counterparty_kind: string | null;
   source_key: string | null;
+  // outreach register (FR-04-OUT); null for opportunities without an outreach profile
+  outreach_route?: string | null;
+  outreach_engagement?: string | null;
+  outreach_cash_outlook?: string | null;
+  outreach_status?: string | null;
+  outreach_next_action_on?: string | null;
+  /** Workbook analyst priority (0-100): never the Capital Opportunity Score. */
+  analyst_priority?: number | null;
+  outreach_country_order?: number | null;
+  outreach_country_rank?: number | null;
+  open_gates?: number | null;
 }
 
 export interface OpportunityList {
@@ -56,7 +67,7 @@ export interface OpportunityList {
   next_cursor: string | null;
   facets?: Record<"class" | "stage" | "band" | "source" | "geo", Record<string, number>> & {
     geo_meta: Record<string, { name: string; numeric: string | null }>;
-  };
+  } & Partial<Record<"route" | "engagement" | "outreach_status" | "priority_band" | "gate_open", Record<string, number>>>;
 }
 
 export interface OpportunityDetail extends OpportunityListItem {

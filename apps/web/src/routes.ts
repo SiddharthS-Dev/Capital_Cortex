@@ -60,7 +60,7 @@ export const SCREENS: ScreenDef[] = [
     summary: "Every classified, scored capital opportunity across the 11 instrument classes.",
     capabilities: ["Synced table, Kanban-by-stage and map views", "Facets: class, geography, stage fit, band, deadline, completeness, owner",
       "Bulk assign / rescore / send to council / archive with reason"],
-    keywords: ["opportunities", "pipeline", "kanban"],
+    keywords: ["opportunities", "pipeline", "kanban", "outreach", "first actions", "analyst priority"],
   },
   {
     id: "graph", path: "/graph", title: "Knowledge Graph", icon: Network, permission: "graph:read",
@@ -76,7 +76,7 @@ export const SCREENS: ScreenDef[] = [
     summary: "Adapter registry, health and the dead-letter queue.",
     capabilities: ["Adapters with health, last run, items/run, errors", "Enable/disable and run now",
       "DLQ viewer with replay", "Terms-of-use note per source"],
-    keywords: ["adapters", "dlq", "rss", "csv"],
+    keywords: ["adapters", "dlq", "rss", "csv", "xlsx", "upload", "outreach workbook", "sheet"],
   },
   {
     id: "relationships", path: "/relationships", title: "Relationships", icon: Users, permission: "relationship:read",
@@ -84,7 +84,7 @@ export const SCREENS: ScreenDef[] = [
     summary: "Relationship intelligence: warmth, timelines, follow-ups and commitments.",
     capabilities: ["Contacts and investors with warmth sparkline", "Per-contact timeline", "Overdue-first follow-up queue",
       "Commitment tracker with expiry countdown", "Draft follow-ups go to the outbox, never sent directly"],
-    keywords: ["contacts", "investors", "warmth", "crm"],
+    keywords: ["contacts", "investors", "warmth", "crm", "outreach", "tracker", "eligibility", "gates", "workbook", "prospects"],
   },
   {
     id: "scoring", path: "/scoring", title: "Scoring Studio", icon: SlidersHorizontal, permission: "scoring:read",

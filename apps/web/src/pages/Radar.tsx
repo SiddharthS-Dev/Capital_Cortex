@@ -3,23 +3,28 @@ import {
   createColumnHelper, flexRender, getCoreRowModel, useReactTable, type ColumnDef, type VisibilityState,
 } from "@tanstack/react-table";
 import * as Popover from "@radix-ui/react-popover";
-import { Columns3, Info, Kanban, List, Map as MapIcon, RefreshCw, Search, UserCheck, Archive, MoveRight } from "lucide-react";
+import { Columns3, Info, Kanban, List, Map as MapIcon, RefreshCw, Search, UserCheck, Archive, MoveRight, Send } from "lucide-react";
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { WorldMap } from "@/components/charts/WorldMap";
 import { BandBadge, ClassBadge, ProvenanceBadge, ScorePill } from "@/components/domain";
+import { EngagementBadge, OutreachStatusBadge, PRIORITY_TOOLTIP, PriorityValue } from "@/components/outreach/shared";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Badge, Card, CardContent, Input } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
-import { BANDS, CLASS_LABELS, CLASSES, amountRange, label, pct, relativeDeadline, STAGE_LABELS, STAGES, timeAgo } from "@/lib/format";
+import { BANDS, CLASS_LABELS, CLASSES, amountRange, date, label, pct, relativeDeadline, STAGE_LABELS, STAGES, timeAgo } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import { useMe, usePermission } from "@/lib/queries";
 import type { OpportunityList, OpportunityListItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type View = "table" | "kanban" | "map";
-const FACET_KEYS = ["class", "stage", "band", "geo", "source"] as const;
+const FACET_KEYS = ["class", "stage", "band", "geo", "source", "route", "engagement", "outreach_status", "priority_band", "gate_open"] as const;
+// Outreach register columns (FR-04-OUT): hidden until asked for, or until the "Outreach: first actions" preset.
+const OUTREACH_COLUMNS = ["outreach_route", "outreach_engagement", "outreach_cash_outlook", "outreach_status", "outreach_next_action_on", "analyst_priority"];
+const HIDDEN_BY_DEFAULT: VisibilityState = Object.fromEntries(OUTREACH_COLUMNS.map((c) => [c, false]));
+const PRIORITY_BANDS: Record<string, string> = { high: "High (80+)", medium: "Medium (60–79)", low: "Low (<60)", none: "Not stated" };
 const col = createColumnHelper<OpportunityListItem>();
 
 function useFilters() {
@@ -148,7 +153,7 @@ export function Radar() {
   const [q, setQ] = useState(f.sp.get("q") ?? "");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [visibility, setVisibility] = useState<VisibilityState>(() => {
-    try { return JSON.parse(localStorage.getItem("cortex-radar-cols") || "{}"); } catch { return {}; }
+    try { return { ...HIDDEN_BY_DEFAULT, ...JSON.parse(localStorage.getItem("cortex-radar-cols") || "{}") }; } catch { return HIDDEN_BY_DEFAULT; }
   });
   useEffect(() => { try { localStorage.setItem("cortex-radar-cols", JSON.stringify(visibility)); } catch { /* private mode */ } }, [visibility]);
   useEffect(() => clearNew(), [clearNew]);
@@ -167,6 +172,7 @@ export function Radar() {
   if (origin) params.set("demo", String(origin === "demo"));
   params.set("sort", f.sp.get("sort") ?? (view === "kanban" ? "deadline" : "score"));
   params.set("limit", view === "kanban" ? "500" : "200");
+  params.set("outreach", "true"); // outreach facets (empty unless outreach rows match); the item shape is the same
   const query = useQuery({ queryKey: ["opportunities", params.toString()], queryFn: () => api<OpportunityList>(`/v1/opportunities?${params}`),
                            placeholderData: (prev) => prev });
   // Provenance counts: the API's `total` for each origin under the other filters (limit=1, no facets), so they are
@@ -225,6 +231,12 @@ export function Radar() {
     col.accessor("geography", { header: "Geography", cell: (c) => <span className="text-xs">{c.getValue().slice(0, 4).join(", ")}{c.getValue().length > 4 ? "…" : ""}</span> }),
     col.accessor("source_key", { header: "Source", cell: (c) => <span className="text-xs text-muted-foreground">{c.getValue() ?? "—"}</span> }),
     col.accessor("created_at", { header: "Discovered", cell: (c) => <span className="text-xs text-muted-foreground">{timeAgo(c.getValue())}</span> }),
+    col.accessor("outreach_route", { header: "Route", cell: (c) => <span className="whitespace-nowrap text-xs">{c.getValue() ?? "—"}</span> }),
+    col.accessor("outreach_engagement", { header: "Engagement", cell: (c) => <EngagementBadge value={c.getValue()} /> }),
+    col.accessor("outreach_cash_outlook", { header: "Cash outlook", cell: (c) => <span className="text-xs">{c.getValue() ?? "—"}</span> }),
+    col.accessor("outreach_status", { header: "Outreach status", cell: (c) => <OutreachStatusBadge status={c.getValue()} /> }),
+    col.accessor("outreach_next_action_on", { header: "Next action", cell: (c) => <span className="whitespace-nowrap text-xs">{c.getValue() ? date(c.getValue()) : "—"}</span> }),
+    col.accessor("analyst_priority", { header: "Analyst priority", cell: (c) => <PriorityValue value={c.getValue()} /> }),
   ], [selected]);
 
   const data = query.data?.items ?? [];
@@ -248,6 +260,11 @@ export function Radar() {
             <Facet title="Pipeline stage" name="stage" values={facets.stage} labels={(k) => STAGE_LABELS[k] ?? k} f={f} />
             <Facet title="Geography" name="geo" values={facets.geo} labels={(k) => facets.geo_meta?.[k]?.name ?? k} f={f} />
             <Facet title="Source" name="source" values={facets.source} f={f} />
+            {facets.route && <Facet title="Outreach route" name="route" values={facets.route} labels={(k) => k} f={f} />}
+            {facets.engagement && <Facet title="Engagement outlook" name="engagement" values={facets.engagement} labels={(k) => k} f={f} />}
+            {facets.outreach_status && <Facet title="Outreach status" name="outreach_status" values={facets.outreach_status} labels={(k) => k} f={f} />}
+            {facets.priority_band && <Facet title="Analyst priority (workbook)" name="priority_band" values={facets.priority_band} labels={(k) => PRIORITY_BANDS[k] ?? k} f={f} />}
+            {facets.gate_open && <Facet title="Eligibility gate open" name="gate_open" values={facets.gate_open} labels={(k) => (k === "true" ? "Gate open or blocked" : "No open gate")} f={f} />}
             <Button variant="ghost" size="sm" onClick={f.clear}>Clear filters</Button>
           </>
         ) : <LoadingState rows={4} />}
@@ -276,7 +293,14 @@ export function Radar() {
             className="h-9 rounded-md border border-input bg-background px-2 text-sm">
             <option value="score">Sort: score</option><option value="deadline">Sort: deadline</option>
             <option value="amount">Sort: amount</option><option value="recent">Sort: newest</option><option value="completeness">Sort: evidence</option>
+            <option value="outreach">Sort: outreach sequencing</option>
           </select>
+          <Button size="sm" variant="outline" title="Workbook sequencing: USA → UAE → Singapore → India, actionable routes first, then rank"
+            onClick={() => {
+              const next = new URLSearchParams({ view: "table", source: "capital_outreach", sort: "outreach" });
+              setVisibility((v) => ({ ...v, ...Object.fromEntries(OUTREACH_COLUMNS.map((c) => [c, true])) }));
+              navigate({ search: `?${next}` }, { replace: true });
+            }}><Send /> Outreach: first actions</Button>
           <span className="text-sm text-muted-foreground" aria-live="polite">
             {query.data ? `${query.data.total.toLocaleString()} opportunities` : ""}{query.isFetching ? " · updating…" : ""}
           </span>
@@ -371,7 +395,7 @@ export function Radar() {
             <p className="text-xs text-muted-foreground">Counts by eligible country for the current filters. Click a country to filter.</p>
           </CardContent></Card>
         )}
-        <p className="text-[11px] text-muted-foreground">Classes: {CLASSES.length} instrument classes. Scores are deterministic (no LLM); open any opportunity to see each factor's evidence.</p>
+        <p className="text-[11px] text-muted-foreground">Classes: {CLASSES.length} instrument classes. Scores are deterministic (no LLM); open any opportunity to see each factor's evidence. Analyst priority: {PRIORITY_TOOLTIP.toLowerCase()}.</p>
       </div>
     </div>
   );

@@ -1,10 +1,13 @@
-/** Screen 6 · Relationship Intelligence (FR-04): contacts + warmth, timeline, follow-up queue, commitment tracker. */
+/** Screen 6 · Relationship Intelligence (FR-04): contacts + warmth, timeline, follow-up queue, commitment tracker;
+ * outreach tracker and eligibility gates (FR-04-OUT). */
 import * as Tabs from "@radix-ui/react-tabs";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Loader2, MessageSquarePlus, Search, UserPlus, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { DemoBadge } from "@/components/domain";
+import { EligibilityGates } from "@/components/outreach/EligibilityGates";
+import { OutreachTracker } from "@/components/outreach/OutreachTracker";
 import { ContactTimeline } from "@/components/relationships/ContactTimeline";
 import { NewContactDialog } from "@/components/relationships/dialogs";
 import { LogInteractionDialog } from "@/components/relationships/LogInteractionDialog";
@@ -25,7 +28,11 @@ const TABS = [
   ["contacts", "Contacts"],
   ["follow-ups", "Follow-up queue"],
   ["commitments", "Commitment tracker"],
+  ["outreach", "Outreach tracker"],
+  ["gates", "Eligibility gates"],
 ] as const;
+// tab → permission it needs beyond relationship:read
+const TAB_PERMISSION: Record<string, string> = { outreach: "outreach:read", gates: "gate:read" };
 
 function ContactsTable({ rows, selected, onSelect }: { rows: Contact[]; selected: string | null; onSelect: (id: string) => void }) {
   return (
@@ -144,7 +151,11 @@ function ContactsTab({ selected, onSelect }: { selected: string | null; onSelect
 
 export function Relationships() {
   const [params, setParams] = useSearchParams();
-  const tab = TABS.some(([v]) => v === params.get("tab")) ? params.get("tab")! : "contacts";
+  const canOutreach = usePermission("outreach:read");
+  const canGates = usePermission("gate:read");
+  const allowed = (v: string) => !TAB_PERMISSION[v] || (v === "outreach" ? canOutreach : canGates);
+  const tabs = TABS.filter(([v]) => allowed(v));
+  const tab = tabs.some(([v]) => v === params.get("tab")) ? params.get("tab")! : "contacts";
   const selected = params.get("contact");
 
   const update = (patch: Record<string, string | null>) => {
@@ -160,7 +171,7 @@ export function Relationships() {
   return (
     <Tabs.Root value={tab} onValueChange={(v) => update({ tab: v === "contacts" ? null : v })} className="space-y-4">
       <Tabs.List className="flex flex-wrap gap-1 border-b" aria-label="Relationship intelligence">
-        {TABS.map(([v, t]) => (
+        {tabs.map(([v, t]) => (
           <Tabs.Trigger key={v} value={v}
             className="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:border-primary data-[state=active]:text-foreground">
             {t}
@@ -176,6 +187,8 @@ export function Relationships() {
       <Tabs.Content value="commitments" className="focus-visible:outline-none">
         <MilestoneList kind="commitment_expiry" onSelectContact={(id) => openContact(id)} />
       </Tabs.Content>
+      {canOutreach && <Tabs.Content value="outreach" className="focus-visible:outline-none">{tab === "outreach" && <OutreachTracker />}</Tabs.Content>}
+      {canGates && <Tabs.Content value="gates" className="focus-visible:outline-none">{tab === "gates" && <EligibilityGates />}</Tabs.Content>}
     </Tabs.Root>
   );
 }

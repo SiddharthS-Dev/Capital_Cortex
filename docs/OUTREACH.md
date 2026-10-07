@@ -86,7 +86,7 @@ Run with the repo's own `tabular.read_rows` + `normalizer.normalize` + `classifi
 - [x] **Step 3 — Tracker** (config, service, status→stage forward-only, follow-ups, contacts, draft, staleness alerts; *measured*: 31 contacts planned from 30 rows with a published email, 22 rows with role routes create none)
 - [x] **Step 4 — Gates** (register, import, links, approval preview warning; *measured*: G1–G8 imported, re-import unchanged, G2 "NSF / DOE rows" suggests CC-015 and CC-016)
 - [x] **Step 5 — API + RBAC + OpenAPI** (outreach + eligibility-gate routers, opportunity list fields / filters / facets / `sort=outreach`, roles + Rego tests, OpenAPI 131 paths, docs/API.md, FR-04-OUT traceability)
-- [ ] **Step 6 — UI**
+- [x] **Step 6 — UI** (Sources inspect-first upload dialog; Radar outreach columns hidden by default, facets, "Outreach: first actions" preset; Outreach tab; Relationships "Outreach tracker" + "Eligibility gates" tabs; approval gate warning; alert field labels; e2e spec)
 - [ ] **Step 7 — Docs and demo**
 
 ## Field map (workbook → Cortex)

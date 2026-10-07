@@ -80,6 +80,8 @@ export interface ApprovalDetailData extends ApprovalRow {
   citation_report: CitationReport | null;
   decisions: ApprovalDecisionRow[];
   recommendation_id: string | null;
+  /** Open or blocked eligibility gates on the subject's opportunity (D-083): a warning, never a blocker. */
+  eligibility_warnings?: { id: string; gate_code: string; scope: string | null; status: string; message: string; resolution_action: string | null }[];
 }
 
 export type DecisionResult =

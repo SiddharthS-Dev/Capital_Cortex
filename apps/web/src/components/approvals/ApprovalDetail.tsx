@@ -186,6 +186,16 @@ export function ApprovalDetail({ id, canDecide }: { id: string; canDecide: boole
           </div>
         )}
 
+        {(a.eligibility_warnings ?? []).length > 0 && (
+          <div role="note" className="flex items-start gap-2 rounded-md border border-warning/60 bg-warning/10 p-3 text-sm">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+            <div>
+              {a.eligibility_warnings!.map((w) => <p key={w.id} className="font-medium">{w.message}{w.resolution_action ? <span className="font-normal text-muted-foreground"> — {w.resolution_action}</span> : null}</p>)}
+              <p className="text-xs text-muted-foreground">Check eligibility before approving. This warning doesn't block the decision.</p>
+            </div>
+          </div>
+        )}
+
         <Section title="Preview (current content)" className="border-t-0 pt-0">
           <PreviewView preview={a.current_preview ?? a.preview} />
         </Section>

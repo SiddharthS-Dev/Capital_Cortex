@@ -199,6 +199,7 @@ items:
     - tests/integration/test_outreach_flow.py::test_eligibility_gates_import_links_and_approval_warning
     - tests/integration/test_outreach_flow.py::test_outreach_api_radar_and_weighted_pipeline
     - config/policies/authz_test.rego::test_apply_proposed_owners_is_admin_only
+    - apps/web/e2e/outreach.spec.ts::inspect → upload → Radar preset → status Sent → follow-ups → first-contact draft in the outbox
   FR-05:
     title: Proposal Factory (collateral generation)
     layer: L8

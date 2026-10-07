@@ -26,6 +26,10 @@ FEATURE_PHASES: dict[str, int] = {
     "screen.audit": 0,  # log search + chain verify ship in Phase 0; retention/legal hold in Phase 3
     "screen.admin": 3,
     "screen.copilot": 3,
+    # capital outreach register (FR-04-OUT, docs/OUTREACH.md)
+    "outreach.tab": 3,
+    "outreach.tracker": 3,
+    "eligibility_gates": 3,
     # cross-cutting
     "approval_badge": 0,  # reads the real approval table (empty until Phase 2 creates approvals)
     "alerts_bell": 2,

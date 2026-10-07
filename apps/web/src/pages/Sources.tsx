@@ -1,12 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, CircleCheck, CircleDashed, CirclePause, Loader2, Play, Plus, RotateCcw, Upload } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleDashed, CirclePause, Play, Plus, RotateCcw, Upload } from "lucide-react";
 import { useRef, useState } from "react";
+import { UploadDialog } from "@/components/outreach/UploadDialog";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Badge, Card, CardContent, CardHeader, CardTitle, Input } from "@/components/ui/primitives";
-import { api, ApiError } from "@/lib/api";
-import { currentUser } from "@/lib/auth";
-import { config } from "@/lib/config";
+import { api } from "@/lib/api";
 import { CLASS_LABELS, CLASSES, dateTime, timeAgo } from "@/lib/format";
 import { usePermission } from "@/lib/queries";
 import type { SourceItem, SourceRun } from "@/lib/types";
@@ -19,17 +18,6 @@ const HEALTH: Record<string, { icon: typeof CircleCheck; tone: string; text: str
   disabled: { icon: CirclePause, tone: "text-muted-foreground", text: "Disabled" },
   unknown: { icon: CircleDashed, tone: "text-muted-foreground", text: "Not run yet" },
 };
-
-async function uploadFile(sourceId: string, file: File) {
-  const user = await currentUser();
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch(`${config.apiBase}/v1/sources/${sourceId}/upload`, { method: "POST", body: fd,
-    headers: { Authorization: `Bearer ${user?.access_token ?? ""}` } });
-  const body = await res.json();
-  if (!res.ok) throw new ApiError(body);
-  return body as SourceRun & { new: number; duplicate: number; failed: number; errors: string[] };
-}
 
 function RunsDrawer({ source }: { source: SourceItem }) {
   const q = useQuery({ queryKey: ["source-runs", source.id], queryFn: () => api<{ items: SourceRun[] }>(`/v1/sources/${source.id}/runs`) });
@@ -79,13 +67,13 @@ export function Sources() {
   const canRun = usePermission("source:run");
   const [open, setOpen] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [uploadFor, setUploadFor] = useState<string | null>(null);
+  const [uploadFor, setUploadFor] = useState<SourceItem | null>(null);
+  const [pending, setPending] = useState<{ source: SourceItem; file: File } | null>(null);
   const q = useQuery({ queryKey: ["sources"], queryFn: () => api<{ items: SourceItem[] }>("/v1/sources"), refetchInterval: 15_000 });
   const dlq = useQuery({ queryKey: ["dlq"], queryFn: () => api<{ items: Record<string, string>[] }>("/v1/ingestion/dlq?stream=signals.raw") });
   const run = useMutation({ mutationFn: (id: string) => api(`/v1/sources/${id}/run`, { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
   const toggle = useMutation({ mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api(`/v1/sources/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
                                onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
-  const upload = useMutation({ mutationFn: ({ id, file }: { id: string; file: File }) => uploadFile(id, file), onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
   const replay = useMutation({ mutationFn: (id: string) => api(`/v1/ingestion/dlq/${id}/replay?stream=signals.raw`, { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["dlq"] }) });
 
   if (q.isLoading) return <LoadingState rows={6} />;
@@ -96,7 +84,7 @@ export function Sources() {
     <div className="space-y-4">
       <input ref={fileRef} type="file" accept=".csv,.xlsx,.xlsm,.tsv" className="hidden" onChange={(e) => {
         const file = e.target.files?.[0];
-        if (file && uploadFor) upload.mutate({ id: uploadFor, file });
+        if (file && uploadFor) setPending({ source: uploadFor, file });
         e.target.value = "";
       }} />
       <Card>
@@ -126,8 +114,8 @@ export function Sources() {
                       {canRun && (
                         <div className="flex gap-1">
                           {s.adapter === "tabular" ? (
-                            <Button size="sm" variant="outline" disabled={!s.enabled || upload.isPending} onClick={() => { setUploadFor(s.id); fileRef.current?.click(); }}>
-                              {upload.isPending ? <Loader2 className="animate-spin" /> : <Upload />} Upload</Button>
+                            <Button size="sm" variant="outline" disabled={!s.enabled || !!pending} onClick={() => { setUploadFor(s); fileRef.current?.click(); }}>
+                              <Upload /> Upload</Button>
                           ) : s.adapter !== "manual" ? (
                             <Button size="sm" variant="outline" disabled={!s.enabled || running || run.isPending} onClick={() => run.mutate(s.id)}><Play /> Run now</Button>
                           ) : null}
@@ -141,9 +129,8 @@ export function Sources() {
               );
             })}</tbody>
           </table>
-          {upload.data && <p className="mt-2 text-sm text-success">Upload processed: {upload.data.new} new, {upload.data.duplicate} duplicates, {upload.data.failed} rows skipped{upload.data.errors?.length ? `: ${upload.data.errors.slice(0, 3).join("; ")}` : ""}.</p>}
-          {upload.isError && <p className="mt-2 text-sm text-destructive">{(upload.error as Error).message}</p>}
-          <p className="mt-2 text-xs text-muted-foreground">CSV/XLSX headers are matched case-insensitively: title, organization, country, deadline, amount_min, amount_max, currency, class, url, stage, sectors, description.</p>
+          {pending && <UploadDialog source={pending.source} file={pending.file} onClose={() => setPending(null)} />}
+          <p className="mt-2 text-xs text-muted-foreground">CSV/XLSX headers are matched case-insensitively: title, organization, country, deadline, amount_min, amount_max, currency, class, url, stage, sectors, description. Every upload is inspected first (sheet, header match, preview); nothing is stored until you confirm. The Capital Cortex outreach workbook source reads its <code>12_Meris_Import</code> sheet.</p>
         </CardContent>
       </Card>
 

@@ -7,6 +7,7 @@ import { EChart } from "@/components/charts/EChart";
 import { CytoGraph } from "@/components/charts/CytoGraph";
 import { BandBadge, ClassBadge, CompletenessRing, DemoBadge, EvidencePopover } from "@/components/domain";
 import { OutcomeDialog, ProposalsTab, RecommendationsTab, RelationshipsTab } from "@/components/opportunity/Phase2Tabs";
+import { OutreachTab, useOutreach } from "@/components/outreach/OutreachTab";
 import { LogMeetingDialog } from "@/components/relationships/LogMeetingDialog";
 import { ErrorState, LoadingState, PermissionDenied } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -95,10 +96,15 @@ export function OpportunityDetail() {
   const canOutcome = usePermission("outcome:write");
   const canPropose = usePermission("proposal:write");
   const navigate = useNavigate();
-  const [tab, setTab] = useState("evidence");
+  // ?tab=outreach (from the outreach tracker) opens that tab directly
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get("tab") ?? "evidence");
   const [meetingOpen, setMeetingOpen] = useState(false);
   const [outcomeOpen, setOutcomeOpen] = useState(false);
   const q = useQuery({ queryKey: ["opportunity", id], queryFn: () => api<Detail>(`/v1/opportunities/${id}`) });
+  // FR-04-OUT: the Outreach tab exists only for opportunities with an outreach profile
+  const canOutreach = usePermission("outreach:read");
+  const outreach = useOutreach(id!, canOutreach && !!id);
+  const hasOutreach = !!outreach.data;
   const patch = useMutation({
     mutationFn: (body: Record<string, unknown>) => api(`/v1/opportunities/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["opportunity", id] }); void qc.invalidateQueries({ queryKey: ["opportunities"] }); },
@@ -169,8 +175,8 @@ export function OpportunityDetail() {
 
       <Tabs.Root value={tab} onValueChange={setTab}>
         <Tabs.List className="flex flex-wrap gap-1 border-b" aria-label="Opportunity details">
-          {[["evidence", "Evidence & sources"], ["graph", "Graph neighbourhood"], ["relationships", "Relationships"], ["agents", "Agent recommendations"],
-            ["proposals", "Proposals"], ["activity", "Activity / audit"]].map(([v, t]) => (
+          {[["evidence", "Evidence & sources"], ...(hasOutreach ? [["outreach", "Outreach"]] : []), ["graph", "Graph neighbourhood"], ["relationships", "Relationships"],
+            ["agents", "Agent recommendations"], ["proposals", "Proposals"], ["activity", "Activity / audit"]].map(([v, t]) => (
             <Tabs.Trigger key={v} value={v} className="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground data-[state=active]:border-primary data-[state=active]:text-foreground">{t}</Tabs.Trigger>
           ))}
         </Tabs.List>
@@ -207,6 +213,7 @@ export function OpportunityDetail() {
             </Card>
           </div>
         </Tabs.Content>
+        {hasOutreach && <Tabs.Content value="outreach" className="pt-4">{tab === "outreach" && <OutreachTab opportunityId={o.id} />}</Tabs.Content>}
         <Tabs.Content value="graph" className="pt-4">{tab === "graph" && <Neighbourhood id={o.id} />}</Tabs.Content>
         <Tabs.Content value="relationships" className="pt-4">{tab === "relationships" && <RelationshipsTab counterpartyId={o.counterparty_id} counterpartyName={o.counterparty_name} />}</Tabs.Content>
         <Tabs.Content value="agents" className="pt-4">{tab === "agents" && <RecommendationsTab opportunityId={o.id} />}</Tabs.Content>
