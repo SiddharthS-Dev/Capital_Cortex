@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.l4_reasoning.score_service import reference
+from cortex.l5_strategy.data_origin import Scope
 from cortex.l5_strategy.forecast_engine import Inflow, assumptions, month_start
 from platform_core.config import get_settings
 
@@ -33,15 +34,18 @@ _MID = (
 )
 
 
-async def weighted_pipeline(s: AsyncSession, include_demo: bool = True) -> dict[str, Any]:
-    """Aggregated in SQL (one pass, grouping sets): the 1M-node load test showed row-by-row Python taking 25 s."""
+async def weighted_pipeline(s: AsyncSession, include_demo: bool = True, scope: Scope | None = None) -> dict[str, Any]:
+    """Aggregated in SQL (one pass, grouping sets): the 1M-node load test showed row-by-row Python taking 25 s.
+    ``scope`` narrows it to data origins / sources (dashboards); it then decides demo rows instead of ``include_demo``."""
     probs = reference()["stage_probability"]
+    scope = scope or Scope(include_demo)
+    where = scope.sql("o")
     q = text(
         "WITH p AS (SELECT * FROM unnest(CAST(:stages AS text[]), CAST(:probs AS float8[])) AS t(stage, prob)), "
         f"o AS (SELECT COALESCE(o.class::text, 'unclassified') AS cls, o.pipeline_stage::text AS stage, "
         "COALESCE(o.geography[1], 'unknown') AS geo, COALESCE(to_char(o.deadline, 'YYYY-MM'), 'no_deadline') AS mon, "
         f"NULLIF(o.currency, '') AS ccy, ({_MID})::float8 AS mid FROM opportunity o "
-        f"WHERE o.org_id = :org AND {ACTIVE} AND (:demo OR NOT o.is_demo)) "
+        f"WHERE o.org_id = :org AND {ACTIVE} AND {where}) "
         "SELECT GROUPING(cls, stage, geo, mon) AS g, cls, stage, geo, mon, ccy, "
         "sum(o.mid * COALESCE(p.prob, 0)) AS w, count(*) AS n FROM o LEFT JOIN p USING (stage) "
         "WHERE o.mid IS NOT NULL AND o.ccy IS NOT NULL "
@@ -49,7 +53,7 @@ async def weighted_pipeline(s: AsyncSession, include_demo: bool = True) -> dict[
     )
     params = {
         "org": get_settings().org_id,
-        "demo": include_demo,
+        **scope.params(),
         "stages": list(probs),
         "probs": [float(v) for v in probs.values()],
     }
@@ -70,7 +74,7 @@ async def weighted_pipeline(s: AsyncSession, include_demo: bool = True) -> dict[
     missing = (
         await s.execute(
             text(
-                f"SELECT count(*) FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND (:demo OR NOT o.is_demo) "
+                f"SELECT count(*) FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND {where} "
                 f"AND (({_MID}) IS NULL OR NULLIF(o.currency, '') IS NULL)"
             ),
             params,

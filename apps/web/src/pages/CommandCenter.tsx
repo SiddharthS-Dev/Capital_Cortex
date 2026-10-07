@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowRight, CalendarClock, Info, Radio } from "lucide-react";
 import { useMemo } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { OriginBreakdownCard, OriginFilter, type OriginSelection } from "@/components/dashboard/DataOrigin";
 import { DataTable, EChart } from "@/components/charts/EChart";
 import { WorldMap } from "@/components/charts/WorldMap";
 import { BandBadge, ClassBadge, DemoBadge, ScorePill } from "@/components/domain";
@@ -10,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/primit
 import { api } from "@/lib/api";
 import { BANDS, CLASS_COLORS, CLASS_LABELS, date, money, relativeDeadline, STAGE_LABELS, STAGES } from "@/lib/format";
 import { useLive } from "@/lib/live";
-import type { ExecutiveDashboard, Kpi } from "@/lib/types";
+import type { DataOrigin, ExecutiveDashboard, Kpi } from "@/lib/types";
 import { usePermission } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -60,9 +61,21 @@ function OpenAlerts() {
 export function CommandCenter() {
   const navigate = useNavigate();
   const live = useLive();
-  const q = useQuery({ queryKey: ["dashboard", "executive"], queryFn: () => api<ExecutiveDashboard>("/v1/dashboards/executive"),
-                       refetchInterval: 60_000 });
+  // data-origin segregation lives in the URL so a filtered view can be bookmarked or shared
+  const [sp, setSp] = useSearchParams();
+  const sel: OriginSelection = { origin: (sp.get("origin") as DataOrigin | null) ?? null, source: sp.get("source") };
+  const setSel = (v: OriginSelection) => {
+    const next = new URLSearchParams();
+    if (v.source) next.set("source", v.source);
+    else if (v.origin) next.set("origin", v.origin);
+    setSp(next, { replace: true });
+  };
+  const qs = sel.source ? `?source=${encodeURIComponent(sel.source)}` : sel.origin ? `?origin=${sel.origin}` : "";
+  const q = useQuery({ queryKey: ["dashboard", "executive", qs], queryFn: () => api<ExecutiveDashboard>(`/v1/dashboards/executive${qs}`),
+                       refetchInterval: 60_000, placeholderData: (prev) => prev });
   const d = q.data;
+  // Radar links keep the selected origin, so a click opens the same records the figure counts
+  const rq = d?.scope?.radar_query ? `&${d.scope.radar_query}` : "";
 
   const runwayOption = useMemo(() => {
     if (!d) return {};
@@ -115,6 +128,8 @@ export function CommandCenter() {
   if (q.isLoading) return <LoadingState rows={8} />;
   if (q.isError || !d) return <ErrorState error={q.error} />;
   const k = d.kpis;
+  const scoped = !!d.scope?.filtered;
+  const companyWide = scoped ? "company-wide" : undefined;
   const rw = k.runway;
   const wpBy = (k.weighted_pipeline.by_currency as Record<string, number> | undefined) ?? {};
   const wpCcys = Object.keys(wpBy);
@@ -132,24 +147,34 @@ export function CommandCenter() {
         <span>Refreshed {new Date(d.generated_at).toLocaleTimeString()}</span>
       </div>
 
+      {d.by_origin && <OriginFilter data={d.by_origin} value={sel} onChange={setSel} />}
+      {scoped && (
+        <p className="-mt-3 text-xs text-muted-foreground">
+          Opportunity figures below cover only the selected origin. Cash, burn, runway, expected inflows and approvals are
+          company-wide and don&apos;t change with this filter.
+        </p>
+      )}
+
       <section aria-label="Key figures" className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-        <KpiTile label="Cash" kpi={k.cash} value={money(k.cash.value as number, k.cash.currency)} sub={`as of ${date(k.cash.as_of as string)}`} />
+        <KpiTile label="Cash" kpi={k.cash} value={money(k.cash.value as number, k.cash.currency)} sub={`as of ${date(k.cash.as_of as string)}${scoped ? " · company-wide" : ""}`} />
         <KpiTile label="Monthly net burn" kpi={k.net_burn} value={money(k.net_burn.value as number, k.net_burn.currency)}
-          sub={`trailing ${k.net_burn.months ?? "—"}-month average`} />
+          sub={`trailing ${k.net_burn.months ?? "—"}-month average${scoped ? " · company-wide" : ""}`} />
         <KpiTile label="Runway" kpi={rw}
           value={rw.months == null ? "—" : `${(rw.months as number).toFixed(1)} mo${rw.beyond_horizon ? "+" : ""}`}
-          sub={rw.beyond_horizon ? "beyond forecast horizon" : rw.zero_cash_date ? `zero cash ${date(rw.zero_cash_date as string)}` : undefined} />
+          sub={companyWide ?? (rw.beyond_horizon ? "beyond forecast horizon" : rw.zero_cash_date ? `zero cash ${date(rw.zero_cash_date as string)}` : undefined)} />
         <KpiTile label="Weighted pipeline" kpi={k.weighted_pipeline}
           value={money(wpCombined?.value ?? (k.weighted_pipeline.value as number), wpCombined?.currency ?? k.weighted_pipeline.currency)}
           sub={wpCombined ? `${wpCcys.join(" + ")} at ECB rates of ${date(wpCombined.rate_date)}${wpCombined.missing.length ? ` (no rate: ${wpCombined.missing.join(", ")})` : ""}`
             : `${wpCcys.length > 1 ? "multi-currency · " : ""}stage-probability weighted`}
           title={`Stage-probability weighted, per currency: ${Object.entries(wpBy).map(([c, v]) => money(v, c)).join(" · ")}${wpCombined ? `. Combined at ${wpCombined.source} of ${wpCombined.rate_date}; stored amounts are not converted.` : ""}`} />
         <KpiTile label="Expected inflows (90 d)" kpi={k.inflows_90d} value={money(k.inflows_90d.value as number, k.inflows_90d.currency)}
-          sub="qualified+ pipeline × p" />
+          sub={companyWide ?? "qualified+ pipeline × p"} />
         <KpiTile label="Active opportunities" kpi={k.active_opportunities} value={String(k.active_opportunities.value ?? 0)}
-          sub={live.newSinceView ? `${live.newSinceView} new this session` : "all sources"} />
-        <KpiTile label="Pending approvals" kpi={k.pending_approvals} value={String(k.pending_approvals.value ?? 0)} sub="human-in-the-loop" />
+          sub={scoped ? "selected origin" : live.newSinceView ? `${live.newSinceView} new this session` : "all sources"} />
+        <KpiTile label="Pending approvals" kpi={k.pending_approvals} value={String(k.pending_approvals.value ?? 0)} sub={companyWide ?? "human-in-the-loop"} />
       </section>
+
+      {d.by_origin && <OriginBreakdownCard data={d.by_origin} selected={sel} onSelect={setSel} />}
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
@@ -192,7 +217,7 @@ export function CommandCenter() {
           <CardHeader><CardTitle>Pipeline funnel</CardTitle></CardHeader>
           <CardContent>
             <EChart option={funnelOption} height={260} ariaLabel="Opportunities per pipeline stage"
-              onClick={(p) => { const s = STAGES.find((x) => STAGE_LABELS[x] === p.name); if (s) navigate(`/radar?stage=${s}`); }}
+              onClick={(p) => { const s = STAGES.find((x) => STAGE_LABELS[x] === p.name); if (s) navigate(`/radar?stage=${s}${rq}`); }}
               table={<DataTable head={["Stage", "Count"]} rows={STAGES.map((s) => [STAGE_LABELS[s], d.funnel[s] ?? 0])} />} />
           </CardContent>
         </Card>
@@ -204,7 +229,7 @@ export function CommandCenter() {
                 <div className="flex items-center gap-4">
                   <div className="relative w-36 shrink-0">
                     <EChart option={mixOption} height={144} ariaLabel="Active opportunities by capital class"
-                      onClick={(p) => { const r = mix.rows.find((x) => x.name === p.name); if (r) navigate(`/radar?class=${r.key}`); }} />
+                      onClick={(p) => { const r = mix.rows.find((x) => x.name === p.name); if (r) navigate(`/radar?class=${r.key}${rq}`); }} />
                     <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                       <span className="text-xl font-semibold tabular-nums leading-none">{mix.total.toLocaleString()}</span>
                       <span className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground">active</span>
@@ -213,7 +238,7 @@ export function CommandCenter() {
                   <ul className="min-w-0 flex-1 text-xs">
                     {mix.rows.map((r) => (
                       <li key={r.key}>
-                        <Link to={`/radar?class=${r.key}`} className="flex items-center gap-2 rounded px-1.5 py-[3px] hover:bg-accent" title={`${r.name}: ${r.n}`}>
+                        <Link to={`/radar?class=${r.key}${rq}`} className="flex items-center gap-2 rounded px-1.5 py-[3px] hover:bg-accent" title={`${r.name}: ${r.n}`}>
                           <span aria-hidden className="size-2.5 shrink-0 rounded-sm" style={{ background: r.color }} />
                           <span className="min-w-0 flex-1 truncate">{r.name}</span>
                           <span className="shrink-0 tabular-nums text-muted-foreground">{r.n}</span>
@@ -239,7 +264,7 @@ export function CommandCenter() {
             {Object.entries(d.band_mix).map(([b, n]) => {
               const total = Object.values(d.band_mix).reduce((a, x) => a + x, 0) || 1;
               return (
-                <Link key={b} to={`/radar?band=${b}`} className="block rounded p-1 hover:bg-accent">
+                <Link key={b} to={`/radar?band=${b}${rq}`} className="block rounded p-1 hover:bg-accent">
                   <div className="mb-1 flex justify-between text-sm"><BandBadge band={b} /><span className="tabular-nums">{n}</span></div>
                   <div className="h-2 rounded bg-muted"><div className="h-2 rounded" style={{ width: `${(n / total) * 100}%`, background: (BANDS[b] ?? BANDS.unscored).color }} /></div>
                 </Link>
@@ -252,7 +277,7 @@ export function CommandCenter() {
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
           <CardHeader><CardTitle>Geographic distribution (eligible countries)</CardTitle></CardHeader>
-          <CardContent><WorldMap data={d.geo} onSelect={(iso) => navigate(`/radar?geo=${iso}`)} /></CardContent>
+          <CardContent><WorldMap data={d.geo} onSelect={(iso) => navigate(`/radar?geo=${iso}${rq}`)} /></CardContent>
         </Card>
         <Card>
           <CardHeader className="flex-row items-center justify-between">
@@ -280,7 +305,7 @@ export function CommandCenter() {
       <Card>
         <CardHeader className="flex-row items-center justify-between">
           <CardTitle>Top-ranked opportunities</CardTitle>
-          <Link to="/radar" className="inline-flex items-center gap-1 text-xs text-primary">Open Radar <ArrowRight className="size-3" /></Link>
+          <Link to={rq ? `/radar?${rq.slice(1)}` : "/radar"} className="inline-flex items-center gap-1 text-xs text-primary">Open Radar <ArrowRight className="size-3" /></Link>
         </CardHeader>
         <CardContent>
           {d.top.length === 0 ? (

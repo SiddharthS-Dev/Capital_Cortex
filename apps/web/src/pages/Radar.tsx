@@ -20,12 +20,14 @@ import type { OpportunityList, OpportunityListItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type View = "table" | "kanban" | "map";
-const FACET_KEYS = ["class", "stage", "band", "geo", "source", "route", "engagement", "outreach_status", "priority_band", "gate_open"] as const;
+const FACET_KEYS = ["class", "stage", "band", "geo", "source", "route", "engagement", "outreach_status", "proposed_owner", "priority_band", "gate_open"] as const;
 // Outreach register columns (FR-04-OUT): hidden until asked for, or until the "Outreach: first actions" preset.
-const OUTREACH_COLUMNS = ["outreach_route", "outreach_engagement", "outreach_cash_outlook", "outreach_status", "outreach_next_action_on", "analyst_priority"];
+const OUTREACH_COLUMNS = ["outreach_route", "outreach_engagement", "outreach_cash_outlook", "outreach_status", "outreach_proposed_owner", "outreach_next_action_on", "analyst_priority"];
 const HIDDEN_BY_DEFAULT: VisibilityState = Object.fromEntries(OUTREACH_COLUMNS.map((c) => [c, false]));
 const PRIORITY_BANDS: Record<string, string> = { high: "High (80+)", medium: "Medium (60–79)", low: "Low (<60)", none: "Not stated" };
 const col = createColumnHelper<OpportunityListItem>();
+const FACET_PREVIEW = 5; // values a facet shows before "Show N more"
+const FACET_SEARCH_FROM = 10; // an expanded facet with more values than this gets a search box
 
 function useFilters() {
   const [sp, setSp] = useSearchParams();
@@ -50,21 +52,46 @@ function useFilters() {
 
 function Facet({ title, name, values, labels, f }: { title: string; name: string; values: Record<string, number>;
   labels?: (k: string) => string; f: ReturnType<typeof useFilters> }) {
+  const [expanded, setExpanded] = useState(false);
+  const [find, setFind] = useState("");
   const selected = new Set(f.get(name));
   const entries = Object.entries(values);
   if (!entries.length) return null;
+  const text = (k: string) => (labels ? labels(k) : label(k));
+  // collapsed: the top values plus anything selected further down, so a chosen filter never hides
+  const collapsed = entries.filter(([k], i) => i < FACET_PREVIEW || selected.has(k));
+  const needle = find.trim().toLowerCase();
+  const shown = !expanded ? collapsed : needle ? entries.filter(([k]) => text(k).toLowerCase().includes(needle)) : entries;
+  const hidden = entries.length - collapsed.length;
   return (
-    <fieldset className="space-y-1">
-      <legend className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</legend>
-      <div className="max-h-44 space-y-0.5 overflow-y-auto pr-1">
-        {entries.map(([k, n]) => (
+    <fieldset className="space-y-1 border-b pb-3 last-of-type:border-b-0">
+      <legend className="mb-1 flex w-full items-center text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+        {selected.size > 0 && <span className="ml-auto rounded-full bg-primary/10 px-1.5 text-[10px] font-medium normal-case text-primary">{selected.size} selected</span>}
+      </legend>
+      {expanded && entries.length > FACET_SEARCH_FROM && (
+        <div className="relative mb-1">
+          <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+          <input type="search" value={find} onChange={(e) => setFind(e.target.value)} placeholder={`Find ${title.toLowerCase()}…`}
+            aria-label={`Find ${title}`} className="h-7 w-full rounded-md border border-input bg-background pl-7 pr-2 text-xs" />
+        </div>
+      )}
+      <div className={cn("space-y-0.5", expanded && "scrollbar-thin max-h-64 overflow-y-auto pr-1")}>
+        {shown.map(([k, n]) => (
           <label key={k} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-accent">
             <input type="checkbox" checked={selected.has(k)} onChange={() => f.toggle(name, k)} className="accent-[hsl(var(--primary))]" />
-            <span className="flex-1 truncate">{labels ? labels(k) : label(k)}</span>
-            <span className="text-xs tabular-nums text-muted-foreground">{n}</span>
+            <span className="flex-1 truncate" title={text(k)}>{text(k)}</span>
+            <span className="text-xs tabular-nums text-muted-foreground">{n.toLocaleString()}</span>
           </label>
         ))}
+        {expanded && needle && shown.length === 0 && <p className="px-1 py-0.5 text-xs text-muted-foreground">No match.</p>}
       </div>
+      {hidden > 0 && (
+        <button type="button" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); setFind(""); }}
+          className="px-1 text-xs font-medium text-primary hover:underline">
+          {expanded ? "Show less" : `Show ${hidden} more`}
+        </button>
+      )}
     </fieldset>
   );
 }
@@ -235,6 +262,7 @@ export function Radar() {
     col.accessor("outreach_engagement", { header: "Engagement", cell: (c) => <EngagementBadge value={c.getValue()} /> }),
     col.accessor("outreach_cash_outlook", { header: "Cash outlook", cell: (c) => <span className="text-xs">{c.getValue() ?? "—"}</span> }),
     col.accessor("outreach_status", { header: "Outreach status", cell: (c) => <OutreachStatusBadge status={c.getValue()} /> }),
+    col.accessor("outreach_proposed_owner", { header: "Proposed owner", cell: (c) => <span className="whitespace-nowrap text-xs">{c.getValue() ?? "—"}</span> }),
     col.accessor("outreach_next_action_on", { header: "Next action", cell: (c) => <span className="whitespace-nowrap text-xs">{c.getValue() ? date(c.getValue()) : "—"}</span> }),
     col.accessor("analyst_priority", { header: "Analyst priority", cell: (c) => <PriorityValue value={c.getValue()} /> }),
   ], [selected]);
@@ -263,6 +291,7 @@ export function Radar() {
             {facets.route && <Facet title="Outreach route" name="route" values={facets.route} labels={(k) => k} f={f} />}
             {facets.engagement && <Facet title="Engagement outlook" name="engagement" values={facets.engagement} labels={(k) => k} f={f} />}
             {facets.outreach_status && <Facet title="Outreach status" name="outreach_status" values={facets.outreach_status} labels={(k) => k} f={f} />}
+            {facets.proposed_owner && <Facet title="Proposed owner (workbook)" name="proposed_owner" values={facets.proposed_owner} labels={(k) => (k === "none" ? "Not stated" : k)} f={f} />}
             {facets.priority_band && <Facet title="Analyst priority (workbook)" name="priority_band" values={facets.priority_band} labels={(k) => PRIORITY_BANDS[k] ?? k} f={f} />}
             {facets.gate_open && <Facet title="Eligibility gate open" name="gate_open" values={facets.gate_open} labels={(k) => (k === "true" ? "Gate open or blocked" : "No open gate")} f={f} />}
             <Button variant="ghost" size="sm" onClick={f.clear}>Clear filters</Button>
