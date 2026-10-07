@@ -1,0 +1,46 @@
+# Capital outreach register (FR-04-OUT, docs/OUTREACH.md). Every outreach business rule lives here, not in code.
+# Read by cortex/l2_representation/outreach_writer.py and cortex/l3_memory/outreach_service.py.
+version: 1
+
+# Which signal attributes make a signal an outreach row (the capital_outreach source sets them; other sources don't).
+signal_keys: [route, engagement_outlook, cash_outlook, verified_on]
+
+# The workbook's own allowed values (00_Read_Me, 10_Outreach_Tracker data validation).
+routes: [Contact now, Conditional screen, Eligibility gate first, Watch next intake, Later / portfolio route]
+engagement_outlooks: [High, Medium, Low, Very low]
+
+# Workbook analyst priority: relevance×10 + accessibility×6 + readiness×4 (out of 100). Recomputed on import; a row whose
+# stated priority disagrees is flagged priority_inconsistent, never corrected. Never the Capital Opportunity Score (D-080).
+priority_formula: {relevance: 10, accessibility: 6, readiness: 4}
+
+# Tracker statuses (10_Outreach_Tracker). pipeline_stage moves forward only (D-081); `stage: null` leaves it alone.
+# `opportunity_status` sets opportunity.status when given.
+statuses:
+  Not contacted: {stage: discovered}
+  Prepared: {stage: qualified}
+  Sent: {stage: engaged}
+  Reply received: {stage: engaged}
+  Meeting booked: {stage: engaged}
+  Eligibility hold: {stage: null}
+  Applied: {stage: submitted}
+  Declined: {stage: lost, opportunity_status: lost, override_forward_only: true}
+  Won: {stage: committed, opportunity_status: won, override_forward_only: true}
+  Watchlist: {stage: null, opportunity_status: watchlist}
+forward_only: true
+
+# Follow-up milestones created when a first contact is marked Sent, owned by the opportunity owner (unowned if none).
+follow_ups:
+  - {label: Follow-up 1, offset_days: 5}
+  - {label: Follow-up 2, offset_days: 12}
+cancel_follow_ups_on: [Reply received, Meeting booked, Applied, Declined, Won]
+
+# Research freshness (00_Read_Me "Refresh"): review priority rows every 30 days and sources after 90 days.
+refresh: {priority_rows_days: 30, sources_days: 90, priority_row_min_score: 80}
+
+# Default sort of the tracker (01_First_Actions sequencing): country_order, then actionable routes before blocked/watch
+# routes in this order, then country_rank. Country order is the user's preference, not a funding probability.
+route_order: [Contact now, Conditional screen, Eligibility gate first, Watch next intake, Later / portfolio route]
+
+# Explicit admin action "Apply proposed owners" (D-084) maps proposed_owner text → owner_id. Empty by default: no
+# owner is ever assigned automatically. Example:  "Senthil + Dr. Vijendran (proposed)": senthil
+owners: {}

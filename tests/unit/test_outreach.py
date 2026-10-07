@@ -258,3 +258,70 @@ def test_negated_keywords_are_not_evidence():
     assert find("no direct grant", ["grant"]) == ["grant"]  # default unchanged for other callers
     sig = Signal(source_key="x", title="Cleantech Open", description="Mentoring / competition; not guaranteed grant")
     assert classify_rules(sig).capital_class is None
+
+
+# ----------------------------------------------------------------------------------------- outreach profile (step 2)
+def test_real_rows_give_clean_research_values(signals):
+    from cortex.l2_representation.outreach_writer import is_outreach, research_values
+
+    for s in signals:
+        assert is_outreach(s)
+        v = research_values(s)
+        assert v["research_warnings"] == [] and v["priority_inconsistent"] is False, s.external_id
+        assert v["prospect_id"] == s.external_id and v["verified_on"] == date(2026, 10, 6)
+        assert v["analyst_priority"] == s.attributes["priority_score"]
+    assert not is_outreach(Signal(source_key="grants_gov", title="A grant"))
+
+
+def test_priority_is_recomputed_and_a_disagreement_is_flagged_not_fixed():
+    from cortex.l2_representation.outreach_writer import priority, research_values
+
+    assert priority({"relevance": 5, "accessibility": 4, "readiness": 4, "priority_score": 90}) == (90, 90, False)
+    assert priority({"relevance": 5, "accessibility": 4, "readiness": 4, "priority_score": 95}) == (95, 90, True)
+    assert priority({"relevance": 5, "priority_score": 95}) == (95, None, False)  # can't recompute: not flagged
+    sig = Signal(
+        source_key="capital_outreach",
+        external_id="CC-999",
+        title="X",
+        attributes={"route": "Contact now", "relevance": 5, "accessibility": 4, "readiness": 4, "priority_score": 95},
+    )
+    v = research_values(sig)
+    assert v["analyst_priority"] == 95 and v["priority_inconsistent"] is True  # the stated value is kept
+
+
+def test_values_outside_the_workbook_vocabulary_become_warnings_not_guesses():
+    from cortex.l2_representation.outreach_writer import research_values
+
+    sig = Signal(
+        source_key="capital_outreach",
+        external_id="CC-998",
+        title="X",
+        attributes={"route": "Call them", "engagement_outlook": "Huge", "relevance": 7, "verified_on": "soon"},
+    )
+    v = research_values(sig)
+    assert v["route"] is None and v["engagement_outlook"] is None and v["relevance"] is None
+    assert v["verified_on"] is None
+    assert {w["field"] for w in v["research_warnings"]} == {"route", "engagement_outlook", "relevance", "verified_on"}
+
+
+@pytest.mark.parametrize(
+    ("channel", "emails", "phones", "person"),
+    [
+        ("info@colab.is | +1 423-281-0811", ["info@colab.is"], ["+1 423-281-0811"], None),
+        ("Darrel Hugh | dhugh@ahla.com", ["dhugh@ahla.com"], [], "Darrel Hugh"),
+        ("AWS Activate application team", [], [], None),
+        ("Business inquiry via official contact page", [], [], None),
+        ("ors@ku.ac.ae (research) | ip@ku.ac.ae (licensing)", ["ors@ku.ac.ae", "ip@ku.ac.ae"], [], None),
+        ("Sunil Kumar Verma | sk.verma@beeindia.gov.in | 011-26766700", ["sk.verma@beeindia.gov.in"], ["011-26766700"],
+         "Sunil Kumar Verma"),
+        ("Mumbai office +91 22 4043 6000", [], ["+91 22 4043 6000"], None),
+        ("Pitch team via official contact form; warm intro preferred", [], [], None),
+        (None, [], [], None),
+    ],
+)  # fmt: skip
+def test_contact_channel_parser_on_the_workbook_strings(channel, emails, phones, person):
+    from cortex.l2_representation.outreach_writer import parse_contact_channel
+
+    out = parse_contact_channel(channel)
+    assert [e["email"] for e in out["emails"]] == emails
+    assert out["phones"] == phones and out["person"] == person

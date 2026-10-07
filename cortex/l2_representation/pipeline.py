@@ -16,6 +16,7 @@ from cortex.l1_perception.models import Signal
 from cortex.l2_representation.classifier import classify
 from cortex.l2_representation.entity_resolver import resolve_organization
 from cortex.l2_representation.graph_writer import write_opportunity
+from cortex.l2_representation.outreach_writer import is_outreach, write_outreach_profile
 from cortex.l2_representation.typer import type_signal
 from cortex.l4_reasoning.score_service import score_opportunity
 from platform_core import embeddings
@@ -94,6 +95,16 @@ async def process_signal(signal_id: str) -> dict[str, Any]:
             counterparty_name=sig.counterparty_name,
             is_demo=row["is_demo"],
         )
+        if is_outreach(sig):  # outreach research (FR-04-OUT), same transaction as the opportunity
+            await write_outreach_profile(
+                s,
+                opportunity_id=opp_id,
+                sig=sig,
+                signal_id=signal_id,
+                signal_ref=row["source_ref"],
+                raw=row["raw"],
+                is_demo=row["is_demo"],
+            )
         # retrievable text only (§5.3): title + description
         body = f"{sig.title}\n{sig.description or ''}"
         await s.execute(

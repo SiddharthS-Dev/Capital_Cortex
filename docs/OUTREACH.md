@@ -82,7 +82,7 @@ Run with the repo's own `tabular.read_rows` + `normalizer.normalize` + `classifi
   - [x] taxonomy aliases (D-079); negated keywords skipped (D-085); unclassified list below; admin editor shows
         aliases read-only and its save (labels / keywords) leaves them intact
   - [x] gate (*measured*): 52/52 import, re-upload = 0 new / 52 duplicate, `csv_upload` still reads the first sheet
-- [ ] **Step 2 — Data model** (migration 0007 with downgrade, writer, re-import ownership rule)
+- [x] **Step 2 — Data model** (migration 0007 with downgrade, writer, re-import ownership rule; *measured*: 52 profiles, 0 research warnings, 0 priority inconsistencies, human-set tracker fields survive a re-import)
 - [ ] **Step 3 — Tracker** (config, service, status→stage forward-only, follow-ups, contacts, draft, staleness alerts)
 - [ ] **Step 4 — Gates** (register, import, links, approval preview warning)
 - [ ] **Step 5 — API + RBAC + OpenAPI**
