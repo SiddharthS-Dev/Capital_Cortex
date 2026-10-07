@@ -1,0 +1,35 @@
+00:00  Introduction
+01:15  Vision
+03:23  OCIF Architecture
+04:24  Technology Stack
+06:20  Identity & Security
+07:21  Operator Cockpit
+08:18  L1 Perception
+11:26  Data Model
+12:43  L2 Representation
+15:49  Opportunity Radar
+16:43  L4 Reasoning
+21:18  Opportunity Detail
+22:30  Scoring Studio
+23:16  L3 Memory
+25:04  L5 Strategy
+26:19  Command Center
+26:59  Runway & Forecast
+27:37  Capital Copilot
+28:15  Grant Calendar
+28:37  L6 Agency
+30:33  Agent Council
+31:28  L7 Governance
+33:28  Approval Inbox
+34:05  Compliance & Audit
+35:58  L8 Actuation
+36:53  Proposal Factory
+37:33  Data Room
+38:19  Board Reports
+38:49  Alerts Center
+39:27  Administration
+40:12  Platform Core
+41:15  End-to-End Journey
+42:17  Quality & Proof
+43:30  Delivery & Roadmap
+44:32  Recap

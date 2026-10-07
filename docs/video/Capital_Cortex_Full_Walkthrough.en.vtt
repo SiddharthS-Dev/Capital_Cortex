@@ -1,0 +1,1307 @@
+WEBVTT
+
+00:00:00.900 --> 00:00:09.258
+Welcome to the complete platform walkthrough of Inspironics Capital Cortex, the autonomous capital intelligence and fundraising engine.
+
+00:00:09.828 --> 00:00:14.842
+Over the next forty-five minutes, we will open every module, look inside each one,
+
+00:00:14.862 --> 00:00:21.288
+and follow exactly how a funding opportunity travels from first discovery to a human-approved submission.
+
+00:00:21.858 --> 00:00:27.460
+Everything you will see comes straight from the platform's code, its configuration and its live screens.
+
+00:00:29.580 --> 00:00:30.662
+Here is our route.
+
+00:00:30.682 --> 00:00:40.275
+We start with the vision and the seven invariants that govern every design decision, then the OCIF architecture, the technology stack and the security model.
+
+00:00:40.845 --> 00:00:49.520
+Next, we tour the operator cockpit, and then go layer by layer: perception, representation and the knowledge graph, reasoning and scoring,
+
+00:00:49.540 --> 00:00:52.986
+memory and relationships, and strategy and forecasting.
+
+00:00:53.556 --> 00:01:02.030
+Then the thirteen-agent council, governance and trust, and the actuation layer with proposals, the data room, board reports and alerts.
+
+00:01:02.601 --> 00:01:10.210
+We finish with administration, the platform core, one complete end-to-end journey, and the evidence of quality behind it all.
+
+00:01:10.230 --> 00:01:13.995
+Use the chapter markers in your player to jump to any section.
+
+00:01:16.100 --> 00:01:20.656
+Raising capital is a full-time job hidden inside every growing company.
+
+00:01:20.676 --> 00:01:29.035
+Opportunities are scattered across grant portals, investor networks, inboxes and spreadsheets, and the best ones are easy to miss.
+
+00:01:29.605 --> 00:01:40.016
+Capital Cortex continuously discovers these opportunities, classifies them, scores them against your organisation's profile, and helps your team pursue the strongest fits.
+
+00:01:40.585 --> 00:01:50.751
+It covers eleven capital instrument classes: venture equity, private equity, strategic corporate venture, grants, government programs, university programs,
+
+00:01:50.771 --> 00:01:52.788
+and foundation and ESG funding.
+
+00:01:53.358 --> 00:01:58.270
+Plus debt facilities, convertibles, equipment finance and revenue-based financing.
+
+00:01:58.840 --> 00:02:04.655
+And one rule sits above everything else: nothing leaves the system without explicit human approval.
+
+00:02:06.780 --> 00:02:09.925
+The whole platform is anchored on seven invariants.
+
+00:02:09.945 --> 00:02:16.688
+They are not guidelines in a prompt; wherever possible, they are enforced in code and in the database itself.
+
+00:02:17.258 --> 00:02:18.476
+I1, no fabrication.
+
+00:02:18.496 --> 00:02:21.538
+Nothing is asserted without a traceable source.
+
+00:02:21.558 --> 00:02:28.510
+Every knowledge table has a database check that requires either a source reference or a declared inference.
+
+00:02:28.530 --> 00:02:31.507
+Missing data is shown as a gap, never guessed.
+
+00:02:32.077 --> 00:02:34.140
+I2, explainability everywhere.
+
+00:02:34.160 --> 00:02:41.153
+Every recommendation stores its evidence, confidence and reasoning trail at the moment it is created.
+
+00:02:41.173 --> 00:02:42.751
+I3, governed actuation.
+
+00:02:42.771 --> 00:02:49.139
+Anything outbound goes through an outbox, with a signed approval bound to the exact content.
+
+00:02:49.709 --> 00:02:50.750
+I4, zero trust.
+
+00:02:50.770 --> 00:02:56.197
+Every service re-checks authentication and authorisation at its own boundary.
+
+00:02:56.217 --> 00:02:58.036
+I5, provenance continuity.
+
+00:02:58.056 --> 00:03:03.482
+Provenance captured at intake survives unbroken all the way to the dashboard.
+
+00:03:04.052 --> 00:03:09.735
+I6, the system learns only from realised outcomes, never from its own predictions.
+
+00:03:09.755 --> 00:03:13.352
+And I7, large language models never compute numbers.
+
+00:03:13.372 --> 00:03:21.907
+Scores, forecasts, runway and pipeline come from deterministic code; language models may only narrate them, with citations.
+
+00:03:24.020 --> 00:03:29.375
+The architecture is called OCIF, the Octagonal Cognitive Intelligence Framework.
+
+00:03:29.395 --> 00:03:34.011
+Eight cognitive layers sit around one shared Capital Knowledge Graph.
+
+00:03:34.581 --> 00:03:36.933
+L1 Perception brings signals in.
+
+00:03:36.953 --> 00:03:41.750
+L2 Representation classifies them and writes them into the graph.
+
+00:03:41.770 --> 00:03:45.604
+L3 Memory keeps relationships and context over time.
+
+00:03:46.174 --> 00:03:49.505
+L4 Reasoning computes the explainable score.
+
+00:03:49.525 --> 00:03:55.827
+L5 Strategic Intelligence handles the pipeline, runway forecasting and the Copilot.
+
+00:03:55.847 --> 00:03:59.026
+L6 Agency runs the thirteen-agent council.
+
+00:03:59.596 --> 00:04:05.766
+L7 Governance and Trust is the gatekeeper: citations, policies, approvals and audit.
+
+00:04:05.786 --> 00:04:14.018
+And L8 Actuation and Experience delivers the API, the cockpit, proposals, the data room, board packs and alerts.
+
+00:04:14.588 --> 00:04:22.764
+Crucially, realised outcomes flow back along the L8 to L1 edge, so every won or lost deal makes the next ranking smarter.
+
+00:04:24.900 --> 00:04:28.255
+Technically, Capital Cortex is a modular monolith.
+
+00:04:28.275 --> 00:04:36.692
+One Python codebase runs both the FastAPI server and the background workers, with module boundaries enforced by import rules,
+
+00:04:36.712 --> 00:04:40.404
+so any module can be split out later without a rewrite.
+
+00:04:40.974 --> 00:04:48.800
+Storage is a single Postgres 16 database, extended with Apache AGE for the graph and pgvector for embeddings.
+
+00:04:48.820 --> 00:04:54.991
+Redis Streams carries events between layers, and MinIO stores documents and cold data.
+
+00:04:55.561 --> 00:05:04.987
+Keycloak provides login with multi-factor authentication, Open Policy Agent decides every authorisation request, and Vault holds the secrets.
+
+00:05:05.557 --> 00:05:11.775
+OpenTelemetry sends traces, logs and metrics to Tempo, Loki, Prometheus and Grafana.
+
+00:05:11.795 --> 00:05:19.795
+The cockpit itself is React 18 with TypeScript, Vite and Tailwind, plus ECharts, Cytoscape and FullCalendar.
+
+00:05:20.365 --> 00:05:25.194
+The whole stack starts with a single make up command, in about two minutes on a warm machine.
+
+00:05:27.300 --> 00:05:29.993
+The repository mirrors the architecture.
+
+00:05:30.013 --> 00:05:40.504
+Platform core holds the shared, domain-free plumbing: authentication, policy, audit, the event bus, the LLM router, the database helpers and observability.
+
+00:05:41.074 --> 00:05:50.635
+The cortex package holds one sub-package per OCIF layer, from L1 perception to L8 actuation, plus the worker and the phase registry.
+
+00:05:51.205 --> 00:05:53.553
+Apps web is the operator cockpit.
+
+00:05:53.573 --> 00:06:04.028
+Config holds the business rules as data: roles, Rego policies, the taxonomy, retention, adapters, agents, scoring profiles and document templates.
+
+00:06:04.598 --> 00:06:13.270
+Alongside sit the Alembic migrations, the infrastructure definitions, four test suites, the evaluation gates and the documentation set,
+
+00:06:13.290 --> 00:06:18.935
+including a traceability matrix that links every requirement to code, screens and tests.
+
+00:06:21.060 --> 00:06:23.117
+Security starts with identity.
+
+00:06:23.137 --> 00:06:33.434
+Keycloak issues short-lived OpenID Connect tokens, and multi-factor authentication with time-based one-time passwords is required for administrators,
+
+00:06:33.454 --> 00:06:35.027
+approvers and auditors.
+
+00:06:35.597 --> 00:06:36.856
+There are six roles.
+
+00:06:36.876 --> 00:06:38.327
+Admin, for the founder.
+
+00:06:38.347 --> 00:06:42.612
+Analyst, who works the pipeline, drafts collateral and runs agents.
+
+00:06:42.632 --> 00:06:46.065
+Approver, the human in the loop for anything outbound.
+
+00:06:46.635 --> 00:06:51.154
+Auditor, with read-only oversight of every decision and the audit chain.
+
+00:06:51.174 --> 00:06:53.927
+Executive, for dashboards and board reports.
+
+00:06:53.947 --> 00:06:56.701
+And Service, for the platform's own workers.
+
+00:06:57.271 --> 00:07:04.981
+On top of role-based access, attribute-based rules check ownership, document classification and capital class.
+
+00:07:05.001 --> 00:07:12.150
+Open Policy Agent decides on every request and fails closed, and approvals demand a fresh step-up MFA.
+
+00:07:12.720 --> 00:07:20.100
+External content is always treated as data, never as instructions, which defends the agents against prompt injection.
+
+00:07:22.220 --> 00:07:24.025
+Let's open the operator cockpit.
+
+00:07:24.045 --> 00:07:26.705
+This is the app shell that frames every screen.
+
+00:07:27.275 --> 00:07:35.337
+On the left, navigation is grouped by the cognitive loop: overview, perceive and represent, remember and reason, act, and govern.
+
+00:07:35.907 --> 00:07:43.826
+Across the top: global search, with a Control K command palette to jump to any opportunity, investor, contact or action.
+
+00:07:44.396 --> 00:07:54.488
+Then the LLM budget meter, showing today's spend against the daily cap, the approval inbox badge, the alerts bell, the Copilot button and the user and role menu.
+
+00:07:55.058 --> 00:07:58.072
+The amber ribbon across the top marks demo data.
+
+00:07:58.092 --> 00:08:04.014
+Every synthetic record is flagged, so it can never be mistaken for real investors or programs.
+
+00:08:04.584 --> 00:08:16.991
+Every page also carries a badge naming its OCIF layer and requirement, like L5 slash L8, FR-07 here, so you always know which part of the architecture you are looking at.
+
+00:08:19.100 --> 00:08:22.249
+Now layer by layer, starting with L1, perception.
+
+00:08:22.269 --> 00:08:27.812
+Its job is to bring capital signals in, continuously, safely and with full provenance.
+
+00:08:28.382 --> 00:08:31.695
+Each source is an adapter declared in a YAML file.
+
+00:08:31.715 --> 00:08:40.027
+Adding a source is configuration, not code: a key, a kind, a schedule, a rate limit, a field mapping and a terms-of-use note.
+
+00:08:40.597 --> 00:08:46.298
+The ingestion worker fetches raw items and normalises each one into a standard Signal.
+
+00:08:46.318 --> 00:08:54.215
+Provenance is recorded for every item: the source, the URL, the fetch time, the adapter version and the raw object key.
+
+00:08:54.785 --> 00:09:00.982
+Each signal is de-duplicated by a content hash, so fetching the same content twice inserts nothing.
+
+00:09:01.002 --> 00:09:05.127
+It is then published to the signals.raw stream for the next layer.
+
+00:09:05.697 --> 00:09:07.236
+The worker is idempotent.
+
+00:09:07.256 --> 00:09:15.468
+It retries with exponential backoff and jitter, and poison messages go to a dead-letter queue that operators can inspect and replay.
+
+00:09:16.038 --> 00:09:23.382
+Adapters honour robots.txt and rate limits, and the platform never scrapes networks whose terms forbid it.
+
+00:09:23.402 --> 00:09:27.551
+Only official APIs, user-authorised exports or manual entry.
+
+00:09:29.660 --> 00:09:33.459
+Twelve adapter configurations ship with the platform.
+
+00:09:33.479 --> 00:09:43.116
+The Grants.gov public API is enabled out of the box, and templates exist for the EU Funding and Tenders portal and UKRI opportunities.
+
+00:09:43.686 --> 00:09:53.568
+Files and people are covered too: CSV and Excel upload for investor lists, CRM exports and financials, plus manual entry.
+
+00:09:53.588 --> 00:09:58.560
+Generic RSS and HTML adapters handle feeds and listing pages.
+
+00:09:59.130 --> 00:10:08.498
+For relationship data, there are read-only, opt-in adapters for an IMAP mailbox, Microsoft Graph mail and calendar, and ICS calendar feeds.
+
+00:10:09.068 --> 00:10:19.092
+And a data-room folder watcher registers new documents from object storage as unapproved, because approving a document for packages is always a human decision.
+
+00:10:21.220 --> 00:10:25.625
+This is the Sources and Ingestion screen: the adapter registry and its health.
+
+00:10:26.195 --> 00:10:33.546
+Each row shows the source, its kind, and the terms-of-use note that explains what the platform is allowed to do with that source.
+
+00:10:34.116 --> 00:10:37.830
+Health, schedule, last run and items per run come next.
+
+00:10:37.850 --> 00:10:47.606
+Grants.gov is healthy, runs every six hours, and its last run fetched one hundred twenty-four items: thirty-three new and ninety-one duplicates.
+
+00:10:48.176 --> 00:10:52.922
+Operators can run any adapter now, enable or disable it, or upload a file.
+
+00:10:52.942 --> 00:11:00.392
+Errors are counted on the run without stopping it, and a dead-letter queue viewer lets a failed message be replayed.
+
+00:11:02.500 --> 00:11:03.194
+Quick check.
+
+00:11:03.214 --> 00:11:06.347
+Grants.gov returns the same program twice in one day.
+
+00:11:06.367 --> 00:11:08.369
+What does the ingestion worker do?
+
+00:11:08.389 --> 00:11:11.225
+Pause the video if you'd like to think about it.
+
+00:11:15.795 --> 00:11:17.654
+The answer: it inserts nothing.
+
+00:11:17.674 --> 00:11:24.989
+The content hash already exists, so the duplicate is counted and skipped, and the first signal's provenance stays intact.
+
+00:11:27.100 --> 00:11:29.639
+What does the platform actually store?
+
+00:11:29.659 --> 00:11:36.577
+Every table carries an organisation ID, so the platform is ready for multi-tenancy or federation later.
+
+00:11:36.597 --> 00:11:45.804
+Core knowledge tables include sources, signals, organisations, investors, funds, grant programs, financial instruments and opportunities.
+
+00:11:46.374 --> 00:11:54.222
+Each opportunity holds its class, counterparty, amount band, deadline, pipeline stage, score, factors and completeness.
+
+00:11:54.242 --> 00:12:04.866
+Relationship tables hold contacts, meetings, relationships and milestones; execution tables hold documents, proposals, approvals, the outbox, alerts, financials,
+
+00:12:04.886 --> 00:12:06.386
+forecasts and outcomes.
+
+00:12:06.956 --> 00:12:15.471
+The same knowledge lives in the graph, with seventeen node types and edges such as INVESTS IN, KNOWS, INTRODUCED and SUPPORTS.
+
+00:12:15.491 --> 00:12:20.821
+One edge is mandatory on every derived node: DERIVED FROM, the provenance link.
+
+00:12:20.841 --> 00:12:23.328
+Embeddings sit beside it in pgvector.
+
+00:12:23.898 --> 00:12:31.394
+For demonstrations, a synthetic seed creates about three hundred fictional investors, one hundred twenty grant programs,
+
+00:12:31.414 --> 00:12:38.597
+six hundred opportunities across twenty-five countries, eighteen months of financials and eighty realised outcomes.
+
+00:12:38.617 --> 00:12:42.355
+Every row is flagged as demo, and one command purges it all.
+
+00:12:44.460 --> 00:12:48.827
+Layer two, representation, turns signals into structured knowledge.
+
+00:12:48.847 --> 00:12:55.047
+It starts with the capital-class classifier, which is rules first, driven by the taxonomy file.
+
+00:12:55.617 --> 00:12:58.261
+Each of the eleven classes collects points.
+
+00:12:58.281 --> 00:13:03.899
+A class hint from the source gives three points, or two if it is only the source's default.
+
+00:13:03.919 --> 00:13:09.537
+A keyword in the title gives one and a half, and in the description, zero point seven five.
+
+00:13:10.107 --> 00:13:15.775
+A matching investor type adds two points, and a matching counterparty kind adds one and a half.
+
+00:13:16.345 --> 00:13:17.436
+Then two ratios.
+
+00:13:17.456 --> 00:13:21.676
+Share is the top score divided by the top plus the runner-up.
+
+00:13:21.696 --> 00:13:25.637
+Coverage is the top score divided by four, capped at one.
+
+00:13:25.657 --> 00:13:31.405
+Confidence equals share times, zero point five plus zero point five times coverage.
+
+00:13:31.975 --> 00:13:39.362
+Below zero point seven, a small language model may be consulted, but only if one is configured and within budget.
+
+00:13:39.382 --> 00:13:48.015
+On the labelled set, the rules alone reach ninety-seven point six percent accuracy, and a class set by a human is never overwritten.
+
+00:13:50.140 --> 00:13:57.266
+Next, the entity resolver decides whether a counterparty is an organisation we already know.
+
+00:13:57.286 --> 00:14:02.936
+Names are normalised by removing legal suffixes such as Inc, LLC or GmbH.
+
+00:14:03.506 --> 00:14:12.013
+Candidates are blocked by trigram name similarity, exact domain and compatible country, then scored with Jaro-Winkler similarity.
+
+00:14:12.033 --> 00:14:16.904
+An exact domain match scores one, and conflicting countries are penalised.
+
+00:14:17.474 --> 00:14:21.579
+At zero point nine two or above, records merge automatically.
+
+00:14:21.599 --> 00:14:29.286
+Between zero point eight and zero point nine two, a new record is created and the pair is queued for human review.
+
+00:14:29.306 --> 00:14:31.787
+Below that, it is a new organisation.
+
+00:14:31.807 --> 00:14:34.356
+Every merge is reversible and audited.
+
+00:14:34.927 --> 00:14:44.906
+The typer then applies sector, ESG, SDG and geography tags, and the graph writer creates vertices, edges and relational mirrors in one transaction,
+
+00:14:44.926 --> 00:14:49.464
+with a DERIVED FROM edge from every node back to its source signal.
+
+00:14:50.034 --> 00:14:59.194
+Each opportunity is also embedded with a local, deterministic hashing model, so technology similarity works without any external AI service.
+
+00:15:01.300 --> 00:15:03.919
+Here is the Capital Knowledge Graph explorer.
+
+00:15:03.939 --> 00:15:10.489
+This demo graph holds two thousand four hundred twenty-two nodes and two thousand five hundred thirty-one edges.
+
+00:15:11.059 --> 00:15:17.742
+You choose a starting node type and a layout, and filter by node type: organisations, opportunities and signals.
+
+00:15:18.312 --> 00:15:22.028
+Click a node to inspect its attributes and its provenance chain.
+
+00:15:22.048 --> 00:15:28.098
+Double-click expands its neighbours, and dashed edges are provenance links back to the original signals.
+
+00:15:28.668 --> 00:15:36.513
+On the right, the path finder searches for warm-introduction paths of up to four hops, through people we know and people who introduced us.
+
+00:15:37.083 --> 00:15:43.264
+Below sits the entity merge review queue, with side-by-side comparison and merge or unmerge.
+
+00:15:43.284 --> 00:15:48.386
+Administrators also get a read-only Cypher console for direct graph queries.
+
+00:15:50.500 --> 00:15:58.045
+Classified opportunities land in the Opportunity Radar: every scored opportunity across the eleven instrument classes.
+
+00:15:58.065 --> 00:16:00.546
+Seven hundred twenty-four in this demo.
+
+00:16:01.116 --> 00:16:08.731
+Faceted filters on the left narrow by capital class, score band, pipeline stage and geography, each with live counts.
+
+00:16:09.301 --> 00:16:15.810
+The table shows score, opportunity and counterparty, class, band, evidence completeness and amount.
+
+00:16:15.830 --> 00:16:20.888
+Bands carry both colour and a text label, so colour is never the only signal.
+
+00:16:21.457 --> 00:16:26.171
+Switch to Kanban, and the same opportunities are arranged by pipeline stage.
+
+00:16:26.191 --> 00:16:29.970
+Dragging a card changes its stage, and the change is audited.
+
+00:16:30.540 --> 00:16:39.352
+There is also a map view, saved views and a column picker, plus bulk actions to assign, rescore, send to the council, or archive with a reason.
+
+00:16:39.922 --> 00:16:42.479
+And every screen supports light and dark themes.
+
+00:16:44.580 --> 00:16:48.659
+Layer four, reasoning, computes the Capital Opportunity Score.
+
+00:16:48.679 --> 00:16:50.841
+It uses no language model at all.
+
+00:16:50.861 --> 00:16:59.370
+Every factor is a deterministic or machine-learned plugin that returns a value between zero and one, its evidence and its method.
+
+00:16:59.940 --> 00:17:09.080
+The score is the sum of each factor's weight times its value, divided by the sum of the weights, but only over factors that actually have evidence.
+
+00:17:09.100 --> 00:17:11.199
+Missing factors are never imputed.
+
+00:17:11.769 --> 00:17:16.605
+Completeness is the weight of the available factors divided by the total weight.
+
+00:17:16.625 --> 00:17:20.916
+It tells you how much of the picture is actually supported by evidence.
+
+00:17:21.486 --> 00:17:30.147
+The default weights: strategic fit zero point one five, probability of success zero point one three, technology alignment,
+
+00:17:30.167 --> 00:17:40.964
+stage and relationship strength zero point one two each, funding size and timing zero point one zero, geography and ESG relevance zero point zero eight.
+
+00:17:41.534 --> 00:17:47.385
+Bands: zero point seven or above is high fit, sent to the council and human review.
+
+00:17:47.405 --> 00:17:51.204
+Zero point four five to zero point seven is watchlist.
+
+00:17:51.224 --> 00:17:53.680
+Below that, archive, with a reason.
+
+00:17:54.250 --> 00:18:02.636
+If completeness is under sixty percent, the band is insufficient evidence, and the opportunity cannot be routed above watchlist.
+
+00:18:02.656 --> 00:18:07.430
+A hard gate, such as an ineligible geography for a grant, forces archive.
+
+00:18:09.540 --> 00:18:11.238
+Now the individual factors.
+
+00:18:11.258 --> 00:18:20.594
+Strategic fit counts how many of your strategic priorities appear in the opportunity, divided by the smaller of three and the number of priorities.
+
+00:18:21.164 --> 00:18:32.068
+Technology alignment uses a local, deterministic embedding called hash TF ten twenty-four: word unigrams and bigrams, hashed into ten twenty-four dimensions,
+
+00:18:32.088 --> 00:18:34.016
+log weighted and normalised.
+
+00:18:34.036 --> 00:18:39.304
+The cosine similarity is divided by zero point three five and capped at one.
+
+00:18:39.874 --> 00:18:46.870
+Geography scores one for an eligible country, zero point six for the same region, and zero otherwise.
+
+00:18:46.890 --> 00:18:51.385
+For grants and government programs, ineligibility is a hard gate.
+
+00:18:51.955 --> 00:19:01.254
+Stage uses a distance matrix: the same stage scores one, one step apart zero point six, two steps zero point two, and three or more zero.
+
+00:19:03.380 --> 00:19:09.430
+Funding size compares your raise target with the opportunity's amount band on a log ten scale.
+
+00:19:09.450 --> 00:19:17.051
+If the bands overlap, the value is zero point five plus half the overlap divided by the narrower width, capped at one.
+
+00:19:17.071 --> 00:19:21.507
+Touching bands give zero point five, and one decade apart gives zero.
+
+00:19:22.077 --> 00:19:28.005
+ESG relevance is the Jaccard similarity of tags: the intersection divided by the union.
+
+00:19:28.025 --> 00:19:33.474
+Relationship strength is the maximum warmth across contacts at the counterparty.
+
+00:19:34.044 --> 00:19:37.143
+Timing is a piecewise curve on days to deadline.
+
+00:19:37.163 --> 00:19:48.384
+A passed deadline scores zero, within a week zero point two, two weeks zero point five, a month zero point eight, the sweet spot of up to one hundred twenty days scores one,
+
+00:19:48.404 --> 00:19:52.477
+up to a year zero point seven, and beyond that zero point five.
+
+00:19:53.047 --> 00:20:00.048
+Probability of success comes from a calibrated machine-learning model when one exists, otherwise from a class prior,
+
+00:20:00.068 --> 00:20:06.222
+such as eight percent for venture equity or thirty-five percent for debt, clearly labelled as a prior.
+
+00:20:08.340 --> 00:20:12.335
+The machine-learning scorer trains only on realised outcomes.
+
+00:20:12.355 --> 00:20:14.178
+Won is one and lost is zero.
+
+00:20:14.198 --> 00:20:19.510
+Withdrawn is excluded, because it says nothing about the counterparty's decision.
+
+00:20:20.080 --> 00:20:27.349
+Features are the other factor values with explicit missing indicators, the capital class and the log of the amount.
+
+00:20:27.369 --> 00:20:36.096
+Two candidates, logistic regression and histogram gradient boosting, are calibrated and compared by five-fold cross-validated Brier score.
+
+00:20:36.666 --> 00:20:46.398
+The winner is tested on a temporal holdout of the newest twenty percent of outcomes, and it is promoted only if it beats the current model on AUC or Brier score.
+
+00:20:46.967 --> 00:20:50.355
+It needs at least thirty outcomes and retrains weekly.
+
+00:20:50.375 --> 00:20:54.456
+And a model trained on demo data never scores real opportunities.
+
+00:20:56.580 --> 00:20:57.230
+Quick check.
+
+00:20:57.250 --> 00:21:01.080
+An opportunity has evidence for only half of its total factor weight.
+
+00:21:01.100 --> 00:21:02.363
+Which band does it get?
+
+00:21:06.933 --> 00:21:08.273
+Insufficient evidence.
+
+00:21:08.293 --> 00:21:17.546
+With completeness below sixty percent, the platform refuses to rank it as if the missing half did not matter, and it cannot be routed above watchlist.
+
+00:21:19.660 --> 00:21:23.658
+This is how the score looks to a user, on the opportunity detail screen.
+
+00:21:24.228 --> 00:21:32.967
+The header shows class, band, demo flag and stage, then the counterparty, amount band and a live deadline countdown: one hundred days here.
+
+00:21:33.537 --> 00:21:38.300
+On the right, the rank gauge, and the evidence completeness ring at seventy-eight percent.
+
+00:21:38.870 --> 00:21:48.211
+The action bar lets you change stage, override the class manually, rescore, run the council, log a meeting, record an outcome, or generate a package.
+
+00:21:48.781 --> 00:21:58.058
+The factor breakdown shows a bar for every factor, with its weight and method: rule, matrix, hash embedding, log band, piecewise, or machine learning.
+
+00:21:58.628 --> 00:22:00.902
+Click a factor to open its evidence.
+
+00:22:00.922 --> 00:22:07.018
+Here, probability of success comes from a calibrated gradient-boosting model, with its model ID.
+
+00:22:07.588 --> 00:22:13.351
+Factors without evidence appear as dashed bars labelled no evidence, rather than a guessed value.
+
+00:22:13.371 --> 00:22:16.868
+And the radar chart gives the shape of the fit at a glance.
+
+00:22:17.438 --> 00:22:27.584
+Further down, tabs cover evidence and sources, the graph neighbourhood, relationships and warm-intro paths, agent recommendations with their reasoning trail, proposals,
+
+00:22:27.604 --> 00:22:28.855
+and the activity log.
+
+00:22:30.980 --> 00:22:34.263
+Scoring is configurable in the Scoring Studio.
+
+00:22:34.283 --> 00:22:44.532
+The organisation profile sets sectors, ESG and SDG tags, target geographies, the raise target, and a description used for technology alignment.
+
+00:22:45.102 --> 00:22:48.133
+Weight sliders for every factor sit on the left.
+
+00:22:48.153 --> 00:22:56.842
+The three optional factors from the reference design, thesis match, cost and dilution, and strategic value, are available at weight zero.
+
+00:22:57.412 --> 00:23:04.793
+Move a slider, and the live re-rank preview on the right shows the new order with rank-change arrows, without saving anything.
+
+00:23:05.363 --> 00:23:06.744
+Profiles are versioned.
+
+00:23:06.764 --> 00:23:15.700
+An administrator can diff and activate a profile, which triggers a batch rescore, and a backtest panel compares score bands with realised outcomes.
+
+00:23:17.820 --> 00:23:20.427
+Layer three is memory and relationships.
+
+00:23:20.447 --> 00:23:27.059
+Its signature metric is warmth: how strong our relationship with a counterparty really is, right now.
+
+00:23:27.629 --> 00:23:34.062
+Each interaction contributes its weight times e to the power of minus days elapsed over ninety.
+
+00:23:34.082 --> 00:23:45.338
+A meeting weighs one, an introduction zero point eight, a call zero point seven, an email reply zero point four, a sent email zero point one, and internal notes zero.
+
+00:23:45.908 --> 00:23:51.999
+The total is normalised with one minus e to the minus S, giving a value between zero and one.
+
+00:23:52.019 --> 00:23:57.781
+A single meeting today gives about zero point six three, and it fades as the weeks pass.
+
+00:23:58.351 --> 00:24:06.751
+When warmth changes, that counterparty's opportunities are rescored automatically, because relationship strength is one of the scoring factors.
+
+00:24:07.321 --> 00:24:14.037
+Memory itself is tiered: hot in Redis for hours, warm in Postgres for months, cold in object storage.
+
+00:24:14.057 --> 00:24:23.174
+A nightly consolidation job writes a sourced reflection for every counterparty, and commitments become milestones that expire on a timer.
+
+00:24:25.300 --> 00:24:31.899
+The Relationships screen brings this to life, with tabs for contacts, the follow-up queue and the commitment tracker.
+
+00:24:32.469 --> 00:24:42.676
+Each contact shows role, organisation, warmth from zero to one hundred, a twelve-week trend sparkline, last touch, interaction count and open milestones.
+
+00:24:43.246 --> 00:24:51.133
+Here, Lio Umber at Lumara Beacon Foundation has warmth ninety-two after five interactions, with the last touch one day ago.
+
+00:24:51.703 --> 00:24:56.011
+Log an interaction, log a meeting or add a contact in one click.
+
+00:24:56.031 --> 00:25:03.247
+Contact emails are masked, and a follow-up email draft goes to the outbox, never directly to the recipient.
+
+00:25:05.380 --> 00:25:07.795
+Layer five is strategic intelligence.
+
+00:25:07.815 --> 00:25:16.810
+First, the weighted pipeline: the sum of each opportunity's mid amount times its probability, split by class, stage, geography and month,
+
+00:25:16.830 --> 00:25:20.100
+and summed per currency without silent conversion.
+
+00:25:20.670 --> 00:25:30.830
+The probability comes from the calibrated model when available, otherwise from the stage: discovered five percent, qualified ten, engaged twenty, submitted thirty,
+
+00:25:30.850 --> 00:25:34.765
+diligence forty-five, term sheet seventy, and committed ninety.
+
+00:25:35.335 --> 00:25:38.260
+The runway forecast is fully deterministic.
+
+00:25:38.280 --> 00:25:41.683
+Burn is the trailing three-month average net burn.
+
+00:25:41.703 --> 00:25:50.105
+Each month, cash equals the previous cash, minus burn adjusted by the scenario, minus planned hires, plus expected inflows:
+
+00:25:50.125 --> 00:25:53.871
+amount times probability times the scenario multiplier.
+
+00:25:54.441 --> 00:26:04.306
+Runway is the number of months until cash falls below the minimum buffer, and inflows land after a class-specific decision lag, for example six months for grants.
+
+00:26:04.876 --> 00:26:13.014
+Three presets ship: base, a downside with twenty percent more burn, half the probability and a two-month delay, and an upside.
+
+00:26:13.034 --> 00:26:18.777
+With no financial data, the engine returns insufficient data, never a placeholder number.
+
+00:26:20.900 --> 00:26:24.260
+All of this surfaces in the Executive Command Center.
+
+00:26:24.280 --> 00:26:28.597
+A live indicator shows updates streaming in as sources are ingested.
+
+00:26:29.167 --> 00:26:39.476
+Seven KPI tiles: cash, monthly net burn as a trailing three-month average, runway, the probability-weighted pipeline, expected inflows over ninety days,
+
+00:26:39.496 --> 00:26:42.399
+active opportunities and pending approvals.
+
+00:26:42.969 --> 00:26:50.588
+Below, the runway chart plots base, downside and upside scenarios, each with a data-table fallback for accessibility.
+
+00:26:51.158 --> 00:26:55.922
+And the risk rail lists open alerts, such as deadlines two and seven days out.
+
+00:26:55.942 --> 00:26:58.682
+Every tile drills down to its source records.
+
+00:27:00.820 --> 00:27:09.592
+In Runway and Forecast, the financial snapshots table shows each month's cash, revenue, opex and net burn, with the source of every row.
+
+00:27:10.162 --> 00:27:15.525
+Scenario cards compare runway for base, downside, upside and a custom scenario.
+
+00:27:16.095 --> 00:27:25.784
+The scenario builder adjusts burn change, the inflow probability multiplier, inflow delay, a raise with amount, month and probability, and a hiring plan.
+
+00:27:26.354 --> 00:27:33.125
+You can even override the probability of individual expected inflows, and the cash curve redraws instantly.
+
+00:27:33.145 --> 00:27:36.425
+Nothing is saved to the server unless you choose to.
+
+00:27:38.540 --> 00:27:42.008
+The Capital Copilot is a drawer available on every page.
+
+00:27:42.028 --> 00:27:45.434
+Here we ask: what is our probability-weighted pipeline?
+
+00:27:46.004 --> 00:27:53.015
+It retrieves with full-text and vector search, routes the question to deterministic tools, and answers with facts.
+
+00:27:53.035 --> 00:27:58.442
+Each fact carries citation chips pointing to the tool run and the configuration it used.
+
+00:27:59.012 --> 00:28:04.761
+Suggested prompts adapt to context, like: what happens to runway if the top grant slips three months?
+
+00:28:05.331 --> 00:28:07.793
+Every claim passes the citation checker.
+
+00:28:07.813 --> 00:28:14.431
+If nothing survives, the Copilot says it does not have sourced evidence, and lists exactly what is missing.
+
+00:28:16.540 --> 00:28:22.536
+The Grant Calendar puts every deadline, submission milestone, follow-up and commitment on one calendar.
+
+00:28:23.106 --> 00:28:29.908
+Colour shows the capital class; icons and labels show the event type, and overdue items are flagged in red.
+
+00:28:30.478 --> 00:28:36.757
+Month, week and agenda views are available, and the whole calendar exports to iCal for internal users.
+
+00:28:38.860 --> 00:28:50.784
+Layer six is agency: a council of thirteen specialist agents, each declared in a YAML file with its role, goal, tools, model tier, triggers, token budget and output schema.
+
+00:28:51.354 --> 00:28:53.415
+Discovery triages new signals.
+
+00:28:53.435 --> 00:28:56.189
+Grant handles eligibility and packaging.
+
+00:28:56.209 --> 00:28:58.686
+Venture Capital matches fund theses.
+
+00:28:58.706 --> 00:29:01.183
+Private Equity covers growth rounds.
+
+00:29:01.203 --> 00:29:06.038
+Debt covers facilities, equipment finance and revenue-based financing.
+
+00:29:06.058 --> 00:29:08.465
+Convertible models SAFEs and notes.
+
+00:29:09.035 --> 00:29:14.772
+Government Programs and University Programs cover public schemes and research partnerships.
+
+00:29:14.792 --> 00:29:18.251
+Relationship tracks warmth, intro paths and follow-ups.
+
+00:29:18.821 --> 00:29:20.586
+Proposal drafts collateral.
+
+00:29:20.606 --> 00:29:24.221
+Due Diligence maps the data room against the checklist.
+
+00:29:24.241 --> 00:29:28.386
+Forecasting narrates runway using only forecast engine results.
+
+00:29:28.406 --> 00:29:32.220
+And Board Intelligence produces the board-ready synthesis.
+
+00:29:34.340 --> 00:29:37.090
+A LangGraph orchestrator runs each council.
+
+00:29:37.110 --> 00:29:42.757
+It plans which agents match the opportunity's class, stage and band, then fans them out.
+
+00:29:43.327 --> 00:29:50.935
+The concurrency governor allows at most four agents in parallel, with a per-task token ceiling and a daily dollar budget.
+
+00:29:50.955 --> 00:29:57.113
+When a limit is hit, it degrades gracefully and returns partial results clearly marked incomplete.
+
+00:29:57.683 --> 00:30:02.067
+Positions are collected and converged with a confidence-weighted tally.
+
+00:30:02.087 --> 00:30:09.262
+Then every claim goes through the citation checker and policy evaluation before anything reaches the approval queue.
+
+00:30:09.832 --> 00:30:14.540
+Agent tools are deterministic and read-only, or internal-write at most.
+
+00:30:14.560 --> 00:30:22.599
+Confidence is computed, never generated: the share of claims that passed the citation check, times evidence completeness.
+
+00:30:22.619 --> 00:30:26.196
+External actions can only ever create an outbox draft.
+
+00:30:26.766 --> 00:30:32.348
+And every call writes an agent run record, with tokens, cost, model tier and trace ID.
+
+00:30:34.460 --> 00:30:43.714
+In the Agent Council screen, the roster shows all thirteen agents, with status, tier, runs today, cost, success rate, budget and their declared tools.
+
+00:30:44.284 --> 00:30:54.586
+This environment has no language model key configured, so the banner states clearly that agents run in deterministic mode: every claim comes straight from a tool result.
+
+00:30:55.156 --> 00:30:59.539
+Switch to Deliberation, choose an opportunity, and run the council.
+
+00:30:59.559 --> 00:31:07.817
+Here, five agents responded for an equipment finance opportunity: Debt, Due Diligence, Forecasting, Proposal and Relationship.
+
+00:31:08.387 --> 00:31:17.593
+Each agent column streams its position live: the tools it called, the facts and gaps it found, a computed confidence, and the citation-check result.
+
+00:31:18.163 --> 00:31:21.095
+Where evidence is missing, the agent says so.
+
+00:31:21.115 --> 00:31:27.391
+The Due Diligence agent flags that the data room is empty, as an explicit evidence-required gap.
+
+00:31:29.500 --> 00:31:34.459
+Layer seven, governance and trust, is where the platform earns its credibility.
+
+00:31:34.479 --> 00:31:41.013
+Its first gate is the citation checker, applied to every claim from an agent, the Copilot or a proposal.
+
+00:31:41.583 --> 00:31:46.929
+Rule one: every claim must cite something, and inferences must declare their basis.
+
+00:31:46.949 --> 00:31:53.329
+Rule two: every reference must resolve to a real record that the requesting user is allowed to see.
+
+00:31:53.899 --> 00:32:02.056
+Rule three: every number in the text must match a number in the cited records within half a percent, and dates must match exactly.
+
+00:32:02.076 --> 00:32:11.553
+Rule four: any organisation-like name, such as something Fund or something Capital, must appear in a cited record, so no investor can ever be invented.
+
+00:32:12.123 --> 00:32:14.724
+Failures go back for at most two revisions.
+
+00:32:14.744 --> 00:32:22.341
+Anything still failing is stripped and surfaced as a gap, and rejections are metered, so a spike raises a data-quality alert.
+
+00:32:24.460 --> 00:32:26.107
+Now governed actuation.
+
+00:32:26.127 --> 00:32:34.225
+When something needs to leave the system, an approval request is bound to the SHA-256 hash of its exact content.
+
+00:32:34.795 --> 00:32:42.486
+Every decision requires step-up multi-factor authentication, and by default the requester cannot approve their own request.
+
+00:32:43.056 --> 00:32:46.531
+Rego policies decide when approvals are sufficient.
+
+00:32:46.551 --> 00:32:49.067
+Outbound items need a human approval.
+
+00:32:49.087 --> 00:32:51.602
+Grant submissions need two approvers.
+
+00:32:51.622 --> 00:32:58.044
+Anything with financial terms, like a valuation, a cap or covenants, needs an admin and legal.
+
+00:32:58.064 --> 00:33:00.648
+And exporting personal data is denied.
+
+00:33:01.218 --> 00:33:04.291
+Only then is a signed, single-use token issued.
+
+00:33:04.311 --> 00:33:11.267
+If anyone edits the content afterwards, the hash changes, and a database trigger invalidates the approval.
+
+00:33:11.837 --> 00:33:15.553
+The outbox sender is the only path to the outside world.
+
+00:33:15.573 --> 00:33:26.896
+It verifies the token's signature, expiry and single use, re-hashes the payload, re-evaluates policy, and only then delivers, auditing everything in the same transaction.
+
+00:33:29.020 --> 00:33:39.024
+In the Approval Inbox, pending items are sorted by soonest deadline, with content flags like financial terms or personal data, and the citation result.
+
+00:33:39.594 --> 00:33:45.116
+The detail pane shows a rendered preview of the exact content: here, an outbound email.
+
+00:33:45.686 --> 00:33:54.151
+Below it, the changes since the last approved version, and the policy evaluation, which states exactly which requirement is still outstanding.
+
+00:33:54.721 --> 00:34:00.348
+The Outbox tab shows the outbound pipeline: draft, pending, approved, sent and blocked.
+
+00:34:00.368 --> 00:34:04.308
+An approved item can be sent; editing it starts a new review.
+
+00:34:06.420 --> 00:34:07.135
+Quick check.
+
+00:34:07.155 --> 00:34:11.480
+An approver signs off an email, and then an analyst fixes a typo in it.
+
+00:34:11.500 --> 00:34:12.276
+What happens?
+
+00:34:16.846 --> 00:34:18.604
+The approval is invalidated.
+
+00:34:18.624 --> 00:34:27.936
+The content hash no longer matches, so the database trigger clears the approval, and the outbox will refuse to send until a new review is complete.
+
+00:34:30.060 --> 00:34:33.868
+Before any collateral leaves, a compliance check scans it.
+
+00:34:33.888 --> 00:34:36.773
+Guarantees or risk-free claims are blockers.
+
+00:34:36.793 --> 00:34:40.073
+Forward-looking statements require the disclaimer.
+
+00:34:40.093 --> 00:34:47.928
+Superlatives need cited support, return projections need legal review, and personal contact data needs a consent basis.
+
+00:34:48.498 --> 00:34:52.807
+Every important action is written to a hash-chained audit log.
+
+00:34:52.827 --> 00:35:03.560
+Each entry's hash is the SHA-256 of the previous hash plus the canonical JSON of the entry, and a database trigger blocks updates, deletes and truncation.
+
+00:35:04.130 --> 00:35:15.365
+Retention is configuration: the audit log is kept seven years and is immutable; signals move to cold storage after two years; hot memory lasts twenty-four hours;
+
+00:35:15.385 --> 00:35:17.252
+drafts expire after a year.
+
+00:35:17.272 --> 00:35:20.188
+And legal hold always wins over retention.
+
+00:35:22.300 --> 00:35:26.201
+The Audit and Compliance screen puts all of this in the auditor's hands.
+
+00:35:26.771 --> 00:35:32.064
+Press verify chain, and the platform recomputes every hash across the whole log.
+
+00:35:32.084 --> 00:35:35.783
+Result: chain intact, four hundred seventy-five records.
+
+00:35:36.353 --> 00:35:46.889
+A compliance report for any period exports to Excel, covering chain status, approvals, external releases, legal holds, retention runs and admin changes.
+
+00:35:46.909 --> 00:35:48.903
+The export itself is audited.
+
+00:35:49.473 --> 00:35:57.687
+And retention policies can be dry-run or run now, with each policy's retention period, tier, action and immutability on display.
+
+00:35:59.820 --> 00:36:04.728
+Layer eight, actuation and experience, is where the work turns into deliverables.
+
+00:36:04.748 --> 00:36:09.596
+The Proposal Factory builds evidence-backed collateral from the knowledge graph.
+
+00:36:10.166 --> 00:36:17.137
+There are four package types: a VC pitch, a grant application, a debt facility and an ESG impact memo.
+
+00:36:17.157 --> 00:36:20.700
+Each package defines its sections and its artefacts.
+
+00:36:21.270 --> 00:36:31.016
+Eight artefacts in all: pitch deck, executive summary, investment memo, grant narrative, budget, a financial model with live Excel formulas,
+
+00:36:31.036 --> 00:36:36.596
+technical annex and due-diligence checklist, in Word, PowerPoint, Excel and PDF.
+
+00:36:37.166 --> 00:36:43.010
+Every claim carries a numbered citation, and every artefact ends with an evidence appendix.
+
+00:36:43.030 --> 00:36:52.162
+Anything unsupported is rendered as evidence required, which blocks approval until it is resolved, or waived by an admin with an audit record.
+
+00:36:54.300 --> 00:37:02.040
+The proposal list shows each package with its type, status, version, open gaps, compliance result and generation mode.
+
+00:37:02.060 --> 00:37:05.788
+The drafts with twelve open gaps cannot be submitted yet.
+
+00:37:06.358 --> 00:37:13.644
+Open a package, and the editor shows status, version, compliance and the content hash, with submit for approval and send.
+
+00:37:14.214 --> 00:37:17.180
+The section outline on the left tracks completion.
+
+00:37:17.200 --> 00:37:21.242
+The centre shows each claim marked as fact, with its citation chips.
+
+00:37:21.812 --> 00:37:27.824
+And the evidence panel lists every reference cited in the section, alongside any compliance findings.
+
+00:37:27.844 --> 00:37:32.065
+Versions and exports have their own tabs, with a diff between versions.
+
+00:37:34.180 --> 00:37:42.338
+The Data Room stores versioned documents in object storage, with folders, drag-and-drop upload, DD tags and classification.
+
+00:37:42.908 --> 00:37:54.637
+The due-diligence checklist maps documents to ten standard items by their tags: incorporation, cap table, financials, financial model, pitch deck, IP, contracts, team,
+
+00:37:54.657 --> 00:37:55.973
+ESG and compliance.
+
+00:37:56.543 --> 00:38:01.897
+An item counts as covered only when a mapped document is in the approved repository.
+
+00:38:01.917 --> 00:38:06.760
+Here, two of ten are covered, and the rest are flagged as evidence required.
+
+00:38:07.330 --> 00:38:14.084
+Assemble package builds a package from approved documents only, with a checksum manifest and an access log.
+
+00:38:14.104 --> 00:38:18.009
+Share links expire, and creating one itself requires approval.
+
+00:38:20.140 --> 00:38:28.950
+Board Reports generates a one-click board pack for any period, with runway, pipeline, weighted funding, key opportunities, risks and asks.
+
+00:38:29.520 --> 00:38:32.894
+It is built deterministically from the period's records.
+
+00:38:32.914 --> 00:38:38.832
+Every statement is cited, and anything without evidence is listed as a gap, rather than filled in.
+
+00:38:39.402 --> 00:38:43.127
+Each pack shows its compliance result and distribution status.
+
+00:38:43.147 --> 00:38:47.898
+Distribution waits for approval, like everything else that leaves the platform.
+
+00:38:50.020 --> 00:38:53.982
+The Alerts Center is driven by a deterministic rule engine.
+
+00:38:54.002 --> 00:38:59.989
+Here, sixty-seven open alerts: six critical, fifty-seven warnings and four informational.
+
+00:39:00.559 --> 00:39:10.462
+Five default rules: a new high-score opportunity within twenty-four hours, deadline countdowns at thirty, fourteen, seven and two days, overdue follow-ups,
+
+00:39:10.482 --> 00:39:15.072
+runway below nine months, and commitments expiring within fourteen days.
+
+00:39:15.642 --> 00:39:19.797
+Each alert can be acknowledged, snoozed, assigned or resolved.
+
+00:39:19.817 --> 00:39:26.193
+Alerts go in-app, to internal email or to a webhook, and never directly to external recipients.
+
+00:39:28.300 --> 00:39:30.598
+Administration lives in one place.
+
+00:39:30.618 --> 00:39:35.507
+Users and roles are synced from Keycloak, with MFA status for each user.
+
+00:39:36.077 --> 00:39:47.748
+Tabs cover OPA policies, which can be viewed and tested with sample input, the LLM router tiers and providers, budgets and cost, the taxonomy editor and extension flags.
+
+00:39:48.318 --> 00:39:58.101
+Budgets and cost shows today's spend against the daily cap, here twenty-five dollars, with per-feature caps for classification, compliance, the Copilot,
+
+00:39:58.121 --> 00:40:02.873
+council deliberation and convergence, extraction, narration and proposals.
+
+00:40:03.443 --> 00:40:08.886
+When a cap is reached, agents fall back to deterministic mode instead of spending more.
+
+00:40:08.906 --> 00:40:11.021
+And every admin change is audited.
+
+00:40:13.140 --> 00:40:18.617
+Underneath every layer sits platform core: shared foundations, free of domain logic.
+
+00:40:19.187 --> 00:40:27.620
+The LLM router is vendor neutral, with small, mid and large tiers mapped to Anthropic, Azure OpenAI or self-hosted vLLM.
+
+00:40:27.640 --> 00:40:35.439
+Every call checks a content-hash cache, pre-checks the budget, calls the provider and records the actual spend.
+
+00:40:36.009 --> 00:40:48.455
+Cost discipline is built in: scoring uses no LLM at all; extraction and classification use the small tier; deliberation small to mid; and only convergence uses the large tier.
+
+00:40:49.025 --> 00:40:59.911
+The event bus uses Redis Streams with consumer groups, retries with backoff and jitter, a dead-letter queue, idempotency markers, and a signed actor token on every envelope.
+
+00:41:00.481 --> 00:41:10.231
+Observability ties it together: OpenTelemetry traces across the API, bus, workers and agents, with SLO alerts for latency, queue depth,
+
+00:41:10.251 --> 00:41:14.357
+budget breaches and spikes in unsourced-claim rejections.
+
+00:41:16.460 --> 00:41:20.479
+Let's put it all together, and follow one opportunity from start to finish.
+
+00:41:21.049 --> 00:41:23.582
+A Grants.gov run fetches a new program.
+
+00:41:23.602 --> 00:41:29.995
+It is normalised into a signal, tagged with provenance, de-duplicated and published to the stream.
+
+00:41:30.565 --> 00:41:36.608
+The worker classifies it as a grant, resolves the agency, writes it into the graph and scores it.
+
+00:41:36.628 --> 00:41:41.233
+It lands in the high band, the Radar updates live, and an alert is raised.
+
+00:41:41.803 --> 00:41:43.132
+The council convenes.
+
+00:41:43.152 --> 00:41:52.829
+The Grant, Relationship and Forecasting agents respond, every claim is checked against its citations, and a recommendation lands in the approval queue.
+
+00:41:53.399 --> 00:41:55.991
+An analyst generates the grant package.
+
+00:41:56.011 --> 00:42:04.296
+Evidence gaps are resolved, compliance is clean, and two approvers sign off with step-up MFA, as policy requires for grants.
+
+00:42:04.866 --> 00:42:09.537
+The outbox verifies the token and the hash, and releases the submission.
+
+00:42:09.557 --> 00:42:15.465
+Months later, the outcome is recorded as won, and that realised outcome retrains the model.
+
+00:42:15.485 --> 00:42:16.703
+The loop is closed.
+
+00:42:18.820 --> 00:42:20.352
+How do we know it works?
+
+00:42:20.372 --> 00:42:23.133
+Quality is enforced by a pipeline of gates.
+
+00:42:23.153 --> 00:42:33.220
+The closing run passed one hundred eighty-nine unit tests, twenty-one integration tests on the real database image, twenty-four of twenty-four policy tests,
+
+00:42:33.240 --> 00:42:35.484
+and seven end-to-end browser tests.
+
+00:42:36.054 --> 00:42:46.638
+Contract testing generated over two thousand one hundred API cases from the OpenAPI spec, and six evaluation gates guard no fabrication, grounding,
+
+00:42:46.658 --> 00:42:49.740
+classification accuracy and scoring sanity.
+
+00:42:50.310 --> 00:42:55.865
+A load test on a one-million-node knowledge graph passed at team traffic with zero errors:
+
+00:42:55.885 --> 00:43:04.290
+dashboard ninety-fifth percentile one point eight seven seconds against a three-second target, the list at one point zero eight seconds,
+
+00:43:04.310 --> 00:43:12.963
+graph neighbourhood one hundred forty-three milliseconds, paths ninety-one milliseconds, and rescoring one hundred forty-eight milliseconds.
+
+00:43:13.533 --> 00:43:22.811
+Security scans with Trivy and OWASP ZAP closed every critical and high finding, an authorisation matrix tests every role against every endpoint,
+
+00:43:22.831 --> 00:43:29.268
+and the backup drill achieved a recovery point under fifteen minutes and a recovery time of seconds.
+
+00:43:31.380 --> 00:43:37.292
+The platform was delivered in four phases, each ending in a working demo and a green pipeline.
+
+00:43:37.862 --> 00:43:46.864
+Phase zero, platform core: the full stack, authentication with MFA, the audit chain, the bus, the LLM router, the schema and the React shell.
+
+00:43:47.434 --> 00:43:55.265
+Phase one: discovery, the knowledge graph and explainable scoring, with live Grants.gov data and real-time updates.
+
+00:43:55.285 --> 00:44:00.385
+Phase two: memory, relationships, the agent council and governed actuation.
+
+00:44:00.955 --> 00:44:12.000
+Phase three: the Proposal Factory, data room, board reports, Copilot, compliance, retention and administration, plus the hardening work on load, security and recovery.
+
+00:44:12.570 --> 00:44:24.208
+Six extension points are already defined as interfaces behind feature flags: a negotiation assistant, a portfolio optimiser, a scenario planner, a finance digital twin,
+
+00:44:24.228 --> 00:44:30.940
+an ecosystem mapper, and Cortex federation for exchanging events with other Inspironics cortexes.
+
+00:44:33.060 --> 00:44:33.614
+To recap.
+
+00:44:33.634 --> 00:44:43.364
+Capital Cortex discovers opportunities from many sources, classifies and resolves them into a knowledge graph, and scores them with transparent formulas.
+
+00:44:43.934 --> 00:44:53.329
+A council of agents deliberates with cited evidence, every outbound action goes through signed human approval, and realised outcomes retrain the model.
+
+00:44:53.899 --> 00:44:55.470
+Every number is computed.
+
+00:44:55.490 --> 00:44:56.807
+Every claim is cited.
+
+00:44:56.827 --> 00:44:59.098
+And nothing leaves without approval.
+
+00:44:59.118 --> 00:45:02.280
+Thank you for watching Inspironics Capital Cortex.
+
