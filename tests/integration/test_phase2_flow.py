@@ -179,8 +179,7 @@ async def test_phase2_definition_of_done(env, make_token, verifier):
     assert r.status_code == 200 and r.json()["status"] == "approved" and r.json()["release"] == "queued", r.text
     rel = [e for e in await streams.get_bus().r.xrange("system.jobs") if b"outbox.release" in e[1][b"type"]]
     assert rel, "auto-release job queued under the approver's token"
-    async with session_scope() as s:
-        out = await outbox_mod.release(s, verifier.verify_sync(approver_tok), result["outbox_id"])
+    out = await outbox_mod.release(verifier.verify_sync(approver_tok), result["outbox_id"])
     assert out["status"] == "sent", out
     assert sent and sent[0]["to"] == "ines@quorvane.example" and result["outbox_id"] in sent[0]["id"]
     async with session_scope() as s:
@@ -259,6 +258,10 @@ async def test_alerts_and_outcomes_feedback_edge(env, make_token):
     assert (
         await client.post("/v1/outcomes", headers=h, json={"opportunity_id": ids["opp"], "result": "won"})
     ).status_code == 422
+    # one realised outcome per opportunity: a contradicting second label is refused, not stored
+    r = await client.post("/v1/outcomes", headers=h, json={"opportunity_id": ids["opp"], "result": "lost"})
+    assert r.status_code == 409, r.text
+    assert len((await client.get(f"/v1/outcomes?opportunity_id={ids['opp']}", headers=h)).json()["items"]) == 1
     assert await streams.get_bus().r.get("ml:retrain_needed")
     r = await client.post("/v1/ml/models/train", headers=h, json={"demo": False})
     assert r.status_code == 422 and "realised" in r.json()["detail"], (
