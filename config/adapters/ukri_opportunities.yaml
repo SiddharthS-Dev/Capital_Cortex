@@ -24,6 +24,7 @@ urls:
   - "https://www.ukri.org/opportunity/page/9/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
   - "https://www.ukri.org/opportunity/page/10/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
 rate_limit: {min_interval_seconds: 3.0}
+date_timezone: Europe/London          # UK time (dates without a zone)
 timeout_seconds: 60
 respect_robots: true
 max_items: 100
