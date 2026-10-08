@@ -26,8 +26,8 @@ webhook_allowlist: []
 # Content flags that select policies. Deterministic patterns, case-insensitive.
 financial_terms_patterns:
   - '\bvaluation\b'
-  - '\b(pre|post)-money\b'
-  - '\bterm sheet\b'
+  - '\b(pre|post)[- ]?money\b'
+  - '\bterm ?sheets?\b'
   - '\binterest rate\b'
   - '\bcoupon\b'
   - '\bdiscount rate\b'
