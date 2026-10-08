@@ -92,6 +92,51 @@ def recommendation_content(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Audit actions that put a person's words into a subject (system-composed content has no human author).
+_AUTHORING_ACTIONS = {
+    "outbox": ("outbox.draft_created", "outbox.edited"),
+    "recommendation": ("recommendation.edited",),
+    "proposal": ("proposal.edited", "proposal.gap_resolved"),
+    "board_report": ("board_report.recipients_set",),
+}
+
+
+async def content_authors(s: AsyncSession, subject_type: str, subject_id: str) -> set[str]:
+    """Users who wrote or edited the subject's content: they may not approve it (segregation of duties), just like
+    the requester. Read from the hash-chained audit log, plus the author columns the subject keeps itself."""
+    authors: set[str] = set()
+    actions = _AUTHORING_ACTIONS.get(subject_type, ())
+    if actions:
+        for actor in (
+            await s.execute(
+                text(
+                    "SELECT DISTINCT actor FROM audit_log WHERE target = :t AND action = ANY(:a) AND actor LIKE 'user:%'"
+                ),
+                {"t": f"{subject_type}:{subject_id}", "a": list(actions)},
+            )
+        ).scalars():
+            authors.add(str(actor).split(":", 1)[1])
+    col = {"outbox": "created_by", "recommendation": "edited_by", "board_report": "created_by"}.get(subject_type)
+    if col:
+        v = (
+            await s.execute(text(f"SELECT {col} FROM {subject_type} WHERE id = CAST(:id AS uuid)"), {"id": subject_id})
+        ).scalar()
+        if v:
+            authors.add(str(v))
+    if subject_type == "proposal":
+        authors |= {
+            str(x)
+            for x in (
+                await s.execute(
+                    text("SELECT DISTINCT created_by FROM proposal_version WHERE proposal_id = CAST(:id AS uuid) "
+                         "AND reason IN ('edited', 'gap_resolved') AND created_by IS NOT NULL"),
+                    {"id": subject_id},
+                )
+            ).scalars()
+        }  # fmt: skip
+    return authors
+
+
 @dataclass
 class SubjectView:
     type: str
@@ -401,15 +446,17 @@ async def decide(
         raise Problem(
             409, "Content changed", "the content changed after the request; request approval again", "conflict"
         )
-    if (
-        decision == "approved"
-        and a["requested_by"] == principal.sub
-        and not governance_config().get("allow_self_approval")
-    ):
-        raise Forbidden(
-            "Segregation of duties: you requested this approval, so someone else must approve it",
-            reasons=["self_approval_denied"],
-        )
+    if decision == "approved" and not governance_config().get("allow_self_approval"):
+        if a["requested_by"] == principal.sub:
+            raise Forbidden(
+                "Segregation of duties: you requested this approval, so someone else must approve it",
+                reasons=["self_approval_denied"],
+            )
+        if principal.sub in await content_authors(s, a["subject_type"], str(a["subject_id"])):
+            raise Forbidden(
+                "Segregation of duties: you wrote or edited this content, so someone else must approve it",
+                reasons=["author_approval_denied"],
+            )
     await s.execute(
         text(
             "INSERT INTO approval_decision (org_id, approval_id, approver_id, approver_username, roles, grants, mfa, "
