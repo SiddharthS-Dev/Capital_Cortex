@@ -9,7 +9,8 @@ rbac := {
 		"admin": {"mfa": "required", "clearance": "restricted", "permissions": ["*"]},
 		"analyst": {"mfa": "optional", "clearance": "confidential", "permissions": ["opportunity:read", "graph:read"]},
 		"auditor": {"mfa": "required", "clearance": "restricted", "permissions": ["audit:read", "audit:verify"]},
-		"executive": {"mfa": "required", "clearance": "confidential", "permissions": ["approval:decide"]},
+		"executive": {"mfa": "required", "clearance": "confidential", "permissions": ["approval:decide", "outbox:send"]},
+		"approver": {"mfa": "required", "clearance": "confidential", "permissions": ["approval:decide", "outbox:send"]},
 		"service": {"mfa": "none", "clearance": "internal", "permissions": ["signal:write", "system:ping", "graph:write"]},
 	},
 	"service_clients": {"cortex-ingestion": ["signal:write", "system:ping"]},
@@ -86,6 +87,26 @@ test_executive_plus_other_role_still_board_report_only if {
 
 test_executive_plus_admin_decides_anything if {
 	authz.allow with input as {"subject": user(["admin", "executive"], true), "action": "approval:decide", "resource": {"type": "approval", "subject_type": "outbox"}}
+		with data.rbac as rbac
+}
+
+# Executives release board-pack distribution e-mails (flagged server-side) and nothing else from the outbox.
+test_executive_sends_board_distribution_only if {
+	authz.allow with input as {"subject": user(["executive"], true), "action": "outbox:send", "resource": {"type": "outbox", "board_report_distribution": true}}
+		with data.rbac as rbac
+	not authz.allow with input as {"subject": user(["executive"], true), "action": "outbox:send", "resource": {"type": "outbox", "board_report_distribution": false}}
+		with data.rbac as rbac
+	not authz.allow with input as {"subject": user(["executive"], true), "action": "outbox:send", "resource": {"type": "outbox"}}
+		with data.rbac as rbac
+}
+
+test_executive_plus_analyst_still_board_distribution_only if {
+	not authz.allow with input as {"subject": user(["analyst", "executive"], true), "action": "outbox:send", "resource": {"type": "outbox"}}
+		with data.rbac as rbac
+}
+
+test_approver_sends_any_outbox_item if {
+	authz.allow with input as {"subject": user(["approver", "executive"], true), "action": "outbox:send", "resource": {"type": "outbox"}}
 		with data.rbac as rbac
 }
 
