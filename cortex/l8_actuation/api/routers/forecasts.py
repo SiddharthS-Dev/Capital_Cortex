@@ -209,12 +209,21 @@ async def list_forecasts(
     return {"items": [row(r) for r in rows]}
 
 
+class CreateForecastIn(BaseModel):
+    include_demo: bool = Field(
+        False, description="mix synthetic demo snapshots and pipeline in (the saved rows are then demo)"
+    )
+
+
 @router.post("", status_code=201, summary="Compute and persist base/downside/upside forecasts")
 async def create(
+    body: CreateForecastIn | None = None,
     p: Principal = Depends(authorize("forecast:write", "forecast")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    out = await run_scenarios(session, [preset(n) for n in ("base", "downside", "upside")])
+    # Real data only by default: a saved forecast built on demo snapshots/pipeline must never pass for a real one.
+    include_demo = bool(body and body.include_demo)
+    out = await run_scenarios(session, [preset(n) for n in ("base", "downside", "upside")], include_demo)
     ids = []
     for r in out["results"]:
         inputs_ref = {
@@ -227,8 +236,8 @@ async def create(
             await session.execute(
                 text(
                     "INSERT INTO forecast (org_id, scenario, horizon_months, status, series, runway_months, zero_cash_date, "
-                    "assumptions, inputs_ref, source_ref) VALUES (:org, :sc, :h, :st, CAST(:series AS jsonb), :rw, :zc, "
-                    "CAST(:as AS jsonb), CAST(:ir AS jsonb), CAST(:src AS jsonb)) RETURNING id"
+                    "assumptions, inputs_ref, source_ref, is_demo) VALUES (:org, :sc, :h, :st, CAST(:series AS jsonb), :rw, :zc, "
+                    "CAST(:as AS jsonb), CAST(:ir AS jsonb), CAST(:src AS jsonb), :demo) RETURNING id"
                 ),
                 {
                     "org": get_settings().org_id,
@@ -241,9 +250,10 @@ async def create(
                     "as": json.dumps(r.get("inputs", {}), default=str),
                     "ir": json.dumps(inputs_ref, default=str),
                     "src": json.dumps(src, default=str),
+                    "demo": include_demo,
                 },
             )
         ).scalar_one()
         ids.append(str(fid))
-    await audit_service.record(session, p, "forecast.create", "forecast:*", {"ids": ids})
+    await audit_service.record(session, p, "forecast.create", "forecast:*", {"ids": ids, "include_demo": include_demo})
     return {"ids": ids, **out}
