@@ -95,7 +95,7 @@ async def edit_draft(s: AsyncSession, actor: Principal, outbox_id: str, payload:
         (
             await s.execute(
                 text(
-                    "SELECT id, channel, kind, status, approval_id, payload FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"
+                    "SELECT id, channel, kind, status, approval_id, payload, delivery FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"
                 ),
                 {"id": outbox_id, "org": get_settings().org_id},
             )
@@ -107,6 +107,8 @@ async def edit_draft(s: AsyncSession, actor: Principal, outbox_id: str, payload:
         raise NotFound("outbox item not found")
     if row["status"] == "sent":
         raise Problem(409, "Already sent", "a sent item is immutable", "conflict")
+    if (row["delivery"] or {}).get("state") == "sending":
+        raise Problem(409, "Being sent", "this item is being delivered right now; it can't be edited", "conflict")
     if (payload.get("attachments") or []) != ((row["payload"] or {}).get("attachments") or []):
         raise Problem(422, "Attachments can't be edited", "attachments are added by the system (proposal exports)",
                       "validation")  # fmt: skip
