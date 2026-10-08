@@ -14,6 +14,7 @@ terms_note: >-
   information, reusable with attribution under the Commission reuse policy (Decision 2011/833/EU).
   Polite use: one request every 2 seconds and at most 100 opportunities per run.
 rate_limit: {min_interval_seconds: 2.0}
+date_timezone: Europe/Brussels          # Brussels time (dates without a zone)
 timeout_seconds: 60            # 20-result pages are about 550 KB; cold queries take several seconds
 respect_robots: false            # an API endpoint, not a crawled page; its usage terms govern (R11)
 max_items: 100
