@@ -96,12 +96,12 @@ async def training_rows(s: AsyncSession, demo: bool) -> list[dict[str, Any]]:
         (
             await s.execute(
                 text(
-                    "SELECT oc.id AS outcome_id, oc.result, oc.label_source, oc.closed_at, o.id AS opportunity_id, o.class::text AS class, "
+                    "SELECT DISTINCT ON (o.id) oc.id AS outcome_id, oc.result, oc.label_source, oc.closed_at, o.id AS opportunity_id, o.class::text AS class, "
                     "COALESCE(fh.factors, o.factors) AS factors, (fh.factors IS NOT NULL) AS decision_time, o.completeness, "
                     "COALESCE(o.amount_max, o.amount_min) AS amount FROM outcome oc JOIN opportunity o ON o.id = oc.opportunity_id "
                     "LEFT JOIN LATERAL (SELECT h.factors FROM factor_history h WHERE h.opportunity_id = o.id AND h.scored_at <= oc.closed_at "
                     "ORDER BY h.scored_at DESC LIMIT 1) fh ON true WHERE oc.org_id = :org AND oc.is_demo = :demo "
-                    "AND oc.result = ANY(:res) AND o.factors IS NOT NULL ORDER BY oc.closed_at"
+                    "AND oc.result = ANY(:res) AND o.factors IS NOT NULL ORDER BY o.id, oc.closed_at DESC"
                 ),
                 {
                     "org": get_settings().org_id,
@@ -116,7 +116,8 @@ async def training_rows(s: AsyncSession, demo: bool) -> list[dict[str, Any]]:
     for r in rows:  # I6: training uses realised outcomes only
         if r["label_source"] != "realised":
             raise AssertionError(f"outcome {r['outcome_id']} is not a realised label")
-    return [dict(r) for r in rows]
+    # oldest first: the temporal holdout takes the newest outcomes (DISTINCT ON above orders by opportunity)
+    return sorted((dict(r) for r in rows), key=lambda r: r["closed_at"])
 
 
 def matrix(rows: list[dict[str, Any]]) -> tuple[list[list[float]], list[int]]:
