@@ -50,27 +50,37 @@ deny contains "outbound_requires_approval" if {
 	count(approved) == 0
 }
 
-# financial_terms_require_admin_and_legal
+# financial_terms_require_admin_and_legal: an Admin and Legal, as two different people. One person holding both
+# the admin role and a legal role/grant can't satisfy both halves alone.
 deny contains "financial_terms_require_admin_and_legal" if {
 	input.content.contains_financial_terms
-	not "admin" in approver_roles
+	not admin_and_legal_approved
 }
 
-deny contains "financial_terms_require_admin_and_legal" if {
-	input.content.contains_financial_terms
-	not legal_approved
+admin_and_legal_approved if {
+	some x in admin_approvers
+	some y in legal_approvers
+	x != y
 }
 
-legal_approved if {
+admin_approvers contains a.approver if {
 	some a in approved
+	"admin" in a.roles
+}
+
+legal_approvers contains a.approver if {
+	some a in approved
+	legal(a)
+}
+
+legal(a) if {
 	"auditor" in a.roles
 	"approver" in a.roles
 }
 
-legal_approved if {
-	some a in approved
-	"compliance:review" in object.get(a, "grants", [])
-}
+legal(a) if "compliance:review" in object.get(a, "grants", [])
+
+legal_approved if count(legal_approvers) > 0
 
 # grant_submission_requires_two_approvers
 deny contains "grant_submission_requires_two_approvers" if {
