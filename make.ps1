@@ -35,6 +35,7 @@ switch ($Target) {
     Run $Py @("-m", "pip", "install", "-e", ".[dev]"); Push-Location apps/web; Run "npm" @("ci"); Pop-Location
   }
   "up" {
+    Run $Py @("scripts/check_env.py")
     Run "docker" ($Compose + @("up", "-d", "--build", "--wait", "postgres", "redis", "minio", "keycloak", "opa", "vault",
         "otel-collector", "tempo", "loki", "prometheus", "grafana"))
     Run "docker" ($Compose + @("up", "-d", "--build", "mailpit", "minio-init", "migrate", "api", "worker", "web"))
