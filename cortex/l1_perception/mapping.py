@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dateutil import parser as dateparser
 from dateutil import tz
@@ -89,11 +90,20 @@ def strip_html(s: str) -> str:
     return _WS.sub(" ", _TAGS.sub(" ", s).replace(" ", " ")).strip()
 
 
-def to_date(v: Any, *, dayfirst: bool = False, require_day: bool = False) -> datetime | None:
+_NOON = datetime(2000, 1, 1, 12, 34, 56)
+
+
+def to_date(
+    v: Any, *, dayfirst: bool = False, require_day: bool = False, tz: str | None = None, end_of_day: bool = False
+) -> datetime | None:
     """Parse a date. ``dayfirst`` reads 03/10/2026 as 3 October (the source's convention; ISO dates are unaffected).
-    ``require_day`` rejects values without a day ("March 2027") instead of inventing one from today's date."""
+    ``require_day`` rejects values without a day ("March 2027") instead of inventing one from today's date.
+    ``tz`` (an IANA zone) is the source's local time for values that carry no zone (default UTC). ``end_of_day``
+    makes a date with no time of day mean 23:59:59 that day: a deadline of "10/15/2026" closes at the end of the
+    15th in the source's zone, not at midnight UTC (which is the evening of the 14th in the Americas)."""
     if _empty(v):
         return None
+    zone = ZoneInfo(tz) if tz else UTC
     if isinstance(v, datetime):
         d = v
     else:
@@ -104,9 +114,17 @@ def to_date(v: Any, *, dayfirst: bool = False, require_day: bool = False) -> dat
             d = dateparser.parse(text, tzinfos=_TZINFOS, dayfirst=dayfirst, default=_D1)
             if require_day and dateparser.parse(text, tzinfos=_TZINFOS, dayfirst=dayfirst, default=_D2).day != d.day:
                 return None  # the day came from the default, not from the value
+            # no time of day in the value: both probe defaults (00:00:00 and 12:34:56) come back unchanged
+            no_time = (
+                end_of_day
+                and d.time() == _D1.time()
+                and dateparser.parse(text, tzinfos=_TZINFOS, dayfirst=dayfirst, default=_NOON).time() == _NOON.time()
+            )
+            if no_time:
+                d = d.replace(hour=23, minute=59, second=59)
         except (ValueError, OverflowError):
             return None
-    return d if d.tzinfo else d.replace(tzinfo=UTC)
+    return d if d.tzinfo else d.replace(tzinfo=zone)
 
 
 _MULTIPLIERS = {
