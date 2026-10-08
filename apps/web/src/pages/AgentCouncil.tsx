@@ -82,7 +82,7 @@ export function AgentCouncil() {
         </Tabs.List>
 
         <Tabs.Content value="council" className="space-y-4 pt-4">
-          <div className="grid gap-4 xl:grid-cols-[22rem_1fr]">
+          <div className="grid items-start gap-4 lg:grid-cols-[24rem_minmax(0,1fr)] [&>*]:min-w-0">
             {canRun ? (
               <Composer agents={data.agents} opportunityId={opportunityId}
                 onOpportunity={(id) => setParam("opportunity", id)} onStarted={(id) => setParam("run", id)} />
