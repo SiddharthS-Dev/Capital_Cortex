@@ -104,8 +104,29 @@ class Bus:
             if "BUSYGROUP" not in str(e):
                 raise
 
+    async def _heartbeat(self, stream: str, group: str, consumer: str, msg_id: str, lock_key: str, every_s: float,
+                         lock_ttl_s: int) -> None:  # fmt: skip
+        """While a handler runs: keep the message's idle time near zero (XCLAIM JUSTID to ourselves, which doesn't
+        count as a delivery) so no other consumer reclaims and re-runs it, and keep the processing lock alive. When
+        the worker dies the heartbeat stops, and the message is reclaimed after ``min_idle_ms`` as before."""
+        while True:
+            await asyncio.sleep(every_s)
+            try:
+                await self.r.xclaim(stream, group, consumer, min_idle_time=0, message_ids=[msg_id], justid=True)
+                await self.r.expire(lock_key, lock_ttl_s)
+            except aioredis.RedisError as e:  # a missed beat only risks a reclaim, which the lock still stops
+                log.warning("bus heartbeat failed: %s", e)
+
     async def _handle_one(
-        self, stream: str, group: str, msg_id: str, fields: dict[str, str], handler: Handler, delivery_count: int
+        self,
+        stream: str,
+        group: str,
+        msg_id: str,
+        fields: dict[str, str],
+        handler: Handler,
+        delivery_count: int,
+        consumer: str = "",
+        min_idle_ms: int = 30_000,
     ) -> str:
         try:
             env = Envelope.from_fields(fields)
@@ -118,6 +139,27 @@ class Bus:
             await self.r.xack(stream, group, msg_id)
             BUS_PROCESSED.labels(stream=stream, outcome="duplicate").inc()
             return "duplicate"
+        # One runner at a time per message: two consumers could both pass the check above (e.g. a reclaim racing a
+        # slow first delivery). The lock lives as long as its heartbeat; a dead holder's lock expires.
+        every_s = max(0.05, min_idle_ms / 3000)
+        lock_ttl_s = max(30, int(every_s * 3) + 1)
+        lock_key = f"{idem_key}:running"
+        if not await self.r.set(lock_key, consumer or "1", nx=True, ex=lock_ttl_s):
+            BUS_PROCESSED.labels(stream=stream, outcome="busy").inc()
+            return "busy"  # left pending: reclaimed later if its runner dies, acked by it when it finishes
+        beat = asyncio.create_task(
+            self._heartbeat(stream, group, consumer, msg_id, lock_key, every_s, lock_ttl_s)
+        ) if consumer else None  # fmt: skip
+        try:
+            return await self._run_handler(stream, group, msg_id, env, handler, delivery_count, idem_key)
+        finally:
+            if beat is not None:
+                beat.cancel()
+            await self.r.delete(lock_key)
+
+    async def _run_handler(
+        self, stream: str, group: str, msg_id: str, env: Envelope, handler: Handler, delivery_count: int, idem_key: str
+    ) -> str:
         env.attempt = delivery_count
         ctx = propagate.extract({"traceparent": env.trace}) if env.trace else None
         try:
@@ -184,13 +226,13 @@ class Bus:
             if fields is None:
                 continue
             dc = await self._delivery_count(stream, group, msg_id)
-            await self._handle_one(stream, group, _s(msg_id), _decode(fields), handler, dc)
+            await self._handle_one(stream, group, _s(msg_id), _decode(fields), handler, dc, consumer, min_idle_ms)
             handled += 1
         # 2) new messages
         resp: Any = await self.r.xreadgroup(group, consumer, {stream: ">"}, count=count, block=block_ms)
         for _stream, messages in resp or []:
             for msg_id, fields in messages:
-                await self._handle_one(stream, group, _s(msg_id), _decode(fields), handler, 1)
+                await self._handle_one(stream, group, _s(msg_id), _decode(fields), handler, 1, consumer, min_idle_ms)
                 handled += 1
         return handled
 
@@ -231,6 +273,9 @@ class Bus:
         env.attempt = 0
         if actor_token is not None:
             env.actor_token = actor_token
+            # Re-published under the replayer's fresh token: its publish time is now. Keeping the original ts made
+            # the worker reject every replay (a token issued after the job's publish time, or a job over 6 h old).
+            env.ts = time.time()
         new_id = await self.publish(f.get("source_stream", stream), env)
         await self.r.xdel(f"{stream}.dlq", dlq_id)
         return new_id
