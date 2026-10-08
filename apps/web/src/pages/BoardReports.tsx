@@ -1,5 +1,6 @@
 /** Screen 14: Board Reports. Generate a cited pack for a period → list → detail, approval and distribution log. */
 import { useQuery } from "@tanstack/react-query";
+import { ChevronRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { GenerateForm } from "@/components/board/GenerateForm";
 import { ReportDetail } from "@/components/board/ReportDetail";
@@ -7,6 +8,7 @@ import type { BoardReportRow } from "@/components/board/types";
 import { DemoBadge } from "@/components/domain";
 import { ComplianceBadge, DocStatusBadge } from "@/components/proposals/shared";
 import { EmptyState, ErrorState, LoadingState, PermissionDenied } from "@/components/states";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { date, timeAgo } from "@/lib/format";
@@ -28,13 +30,13 @@ function ReportList({ onOpen, canWrite }: { onOpen: (id: string) => void; canWri
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-sm" aria-label="Board packs">
               <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
-                <tr><th scope="col" className="px-3 py-2">Pack</th><th scope="col">Period</th><th scope="col">Status</th><th scope="col">Compliance</th><th scope="col">Recipients</th><th scope="col">Distributed</th><th scope="col">Created</th></tr>
+                <tr><th scope="col" className="px-3 py-2">Pack</th><th scope="col">Period</th><th scope="col">Status</th><th scope="col">Compliance</th><th scope="col">Recipients</th><th scope="col">Distributed</th><th scope="col">Created</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
               </thead>
               <tbody>
                 {q.data!.items.map((r) => (
-                  <tr key={r.id} className="border-t hover:bg-muted/30">
+                  <tr key={r.id} onClick={() => onOpen(r.id)} className="cursor-pointer border-t hover:bg-muted/30">
                     <td className="max-w-72 px-3 py-2">
-                      <button type="button" onClick={() => onOpen(r.id)} className={cn("block max-w-full truncate text-left font-medium hover:underline", focusRing)}>{r.title}</button>
+                      <button type="button" onClick={(e) => { e.stopPropagation(); onOpen(r.id); }} className={cn("block max-w-full truncate text-left font-medium hover:underline", focusRing)}>{r.title}</button>
                       {r.is_demo && <DemoBadge />}
                     </td>
                     <td className="whitespace-nowrap text-xs">{date(r.period_start)} – {date(r.period_end)}</td>
@@ -43,6 +45,11 @@ function ReportList({ onOpen, canWrite }: { onOpen: (id: string) => void; canWri
                     <td className="tabular-nums" title={r.recipients.join(", ")}>{r.recipients.length}</td>
                     <td className="tabular-nums">{r.distributed ?? 0}</td>
                     <td className="whitespace-nowrap text-xs text-muted-foreground" title={r.created_at}>{timeAgo(r.created_at)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); onOpen(r.id); }} aria-label={`Details for ${r.title}`}>
+                        Details <ChevronRight />
+                      </Button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
