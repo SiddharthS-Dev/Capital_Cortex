@@ -21,15 +21,26 @@ from sqlalchemy import text
 
 from cortex.l7_governance import outbox as outbox_mod
 from cortex.l8_actuation.api.app import create_app
+from cortex.worker import dispatch
 from platform_core import objectstore
 from platform_core.auth import oidc
-from platform_core.bus import streams
+from platform_core.auth.abac import Resource
+from platform_core.auth.deps import check_access
+from platform_core.bus import Envelope, streams
 from platform_core.db import session_scope
+from platform_core.errors import Forbidden
 from platform_core.policy import opa
 from tests.integration.test_phase2_flow import _seed_high_opportunity
 
 pytestmark = pytest.mark.integration
 KEY = "integration-approval-signing-key-0123456789"
+
+
+def sent_attachment(board: dict) -> dict:
+    """The attachment descriptor the board-pack distribution e-mail carries (bucket, key, sha256)."""
+    d = board["distribution"][0]
+    return {"filename": "board-pack.pdf", "bucket": outbox_mod.EXPORT_BUCKET,
+            "key": f"board/{board['id']}/board-pack-{board['period_end']}.pdf", "sha256": d["sha256"]}  # fmt: skip
 
 
 @pytest.fixture
@@ -204,10 +215,24 @@ async def test_phase3_definition_of_done(env, make_token):
         f"/v1/approvals/{share['approval_id']}/decision", headers=admin, json={"decision": "approved"}
     )
     assert r.json()["status"] == "approved"
+    admin_p = oidc.get_verifier().verify_sync(admin["Authorization"][7:])
+    # a refused send changes nothing: the link stays pending (no live token nobody received) and it can be retried
+    smtp_ok = outbox_mod._smtp_send
+
+    def refused(msg):
+        raise outbox_mod.DeliveryFailed("SMTP delivery refused: 550")
+
+    outbox_mod._smtp_send = refused
+    try:
+        out = await outbox_mod.release(admin_p, share["outbox_id"])
+    finally:
+        outbox_mod._smtp_send = smtp_ok
+    assert out["status"] == "approved" and out["retryable"], out
     async with session_scope() as s:
-        out = await outbox_mod.release(
-            s, oidc.get_verifier().verify_sync(admin["Authorization"][7:]), share["outbox_id"]
-        )
+        st = (await s.execute(text("SELECT status FROM share_link WHERE id = CAST(:id AS uuid)"),
+                              {"id": share["share_link_id"]})).scalar()  # fmt: skip
+    assert st == "pending_approval", st
+    out = await outbox_mod.release(admin_p, share["outbox_id"])
     assert out["status"] == "sent", out
     link = re.search(r"/v1/share/(\S+)", sent[-1].get_body().get_content()).group(1)
     z = await client.get(f"/v1/share/{link}")
@@ -249,13 +274,28 @@ async def test_phase3_definition_of_done(env, make_token):
     assert r.status_code == 200 and r.json()["status"] == "approved", r.text
     dist = r.json()["follow_up"]["distribution"]
     assert len(dist) == 1 and dist[0]["approval"] == "approved"
+    # the release job runs exactly as the worker runs it: the executive's token, RBAC + OPA, then the sender
+    exec_p = oidc.get_verifier().verify_sync(executive["Authorization"][7:])
     async with session_scope() as s:
-        out = await outbox_mod.release(
-            s, oidc.get_verifier().verify_sync(executive["Authorization"][7:]), dist[0]["outbox_id"]
-        )
-    assert out["status"] == "sent" and out["delivery"]["attachments"]
+        res = await outbox_mod.release_resource(s, dist[0]["outbox_id"])
+    assert res.attrs["board_report_distribution"] is True
+    with pytest.raises(Forbidden):  # executives may send board-pack e-mails only
+        await check_access(exec_p, "outbox:send", Resource(type="outbox", attrs={"board_report_distribution": False}))
+    n_sent = len(sent)
+    await dispatch(Envelope(type="outbox.release", payload={"outbox_id": dist[0]["outbox_id"]},
+                            actor_token=executive["Authorization"][7:]))  # fmt: skip
+    assert len(sent) == n_sent + 1 and sent[-1].get_all("To") == ["board@inspironics.net"]
+    assert any(p.get_filename().startswith("board-pack-") for p in sent[-1].iter_attachments())
     b = (await client.get(f"/v1/board-reports/{bid}", headers=executive)).json()
     assert b["status"] == "distributed" and b["distribution"][0]["outbox_status"] == "sent"
+    # a board-pack attachment that the distribution log doesn't record (other checksum) is never sent
+    async with session_scope() as s:
+        with pytest.raises(outbox_mod.ReleaseBlocked):
+            await outbox_mod._check_attachment_provenance(
+                s,
+                {"board_report_id": bid, "attachments": [{**sent_attachment(b), "sha256": "0" * 64}]},
+                dist[0]["outbox_id"],
+            )
 
     # ---------------------------------------------------------------- Copilot: grounded answer and honest refusal
     async def ask(q: str, opp: str | None = None) -> dict:
