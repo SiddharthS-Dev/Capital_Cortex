@@ -228,62 +228,142 @@ EVALUATORS = {
 
 
 # ----------------------------------------------------------------------------- delivery
+def _one_line(t: str) -> str:
+    """Header-safe text: a title with CR/LF must not break (or inject into) the e-mail headers."""
+    return " ".join(str(t).split())
+
+
 def _email(to: list[str], subject: str, body: str) -> None:
     s = get_settings()
     u = urlparse(s.smtp_url or "")
     msg = EmailMessage()
-    msg["From"], msg["To"], msg["Subject"] = s.smtp_from, ", ".join(to), subject
+    msg["From"], msg["To"], msg["Subject"] = s.smtp_from, ", ".join(to), _one_line(subject)[:200]
     msg.set_content(body)
     cls = smtplib.SMTP_SSL if u.scheme == "smtps" else smtplib.SMTP
-    with cls(u.hostname or "localhost", u.port or 25, timeout=15) as c:
+    with cls(u.hostname or "localhost", u.port or (465 if u.scheme == "smtps" else 25), timeout=15) as c:
+        if u.scheme == "smtp+starttls":
+            c.starttls()  # never send the password in clear text
         pw = secrets.resolve(s.smtp_password_ref)
         if u.username and pw:
             c.login(u.username, pw)
         c.send_message(msg)
 
 
-async def _deliver(s: AsyncSession, alert_id: str, channels: list[str], message: str, severity: str) -> None:
+async def _send(item: dict[str, Any]) -> list[tuple[str, str | None, str, str | None]]:
+    """External channels for one committed alert. Returns (channel, target, status, detail) rows to log."""
     st = get_settings()
-
-    async def log_delivery(ch: str, target: str | None, status: str, detail: str | None = None) -> None:
-        await s.execute(
-            text(
-                "INSERT INTO alert_delivery (org_id, alert_id, channel, target, status, detail) VALUES (:org, :a, :c, :t, :s, :d)"
-            ),
-            {"org": st.org_id, "a": alert_id, "c": ch, "t": target, "s": status, "d": detail},
-        )
-
-    await log_delivery("in_app", None, "sent")
+    rows: list[tuple[str, str | None, str, str | None]] = []
+    channels, message, severity = item["channels"], item["message"], item["severity"]
     if "internal_email" in channels:
         domains = {d.lower() for d in st.internal_email_domains}
         to = [a for a in alerts_config().get("internal_recipients") or [] if a.rsplit("@", 1)[-1].lower() in domains]
         if not st.smtp_url or not to:
-            await log_delivery(
-                "internal_email", None, "skipped", "no SMTP_URL or no internal recipients in an internal domain"
+            rows.append(
+                ("internal_email", None, "skipped", "no SMTP_URL or no internal recipients in an internal domain")
             )
         else:
             try:
                 await asyncio.to_thread(_email, to, f"[Capital Cortex · {severity}] {message[:120]}", message)
-                await log_delivery("internal_email", ", ".join(to), "sent")
-            except (OSError, smtplib.SMTPException) as e:
-                await log_delivery("internal_email", ", ".join(to), "failed", str(e)[:500])
+                rows.append(("internal_email", ", ".join(to), "sent", None))
+            except (OSError, smtplib.SMTPException, ValueError) as e:
+                rows.append(("internal_email", ", ".join(to), "failed", str(e)[:500]))
     if "webhook" in channels:
         if not st.alert_webhook_url:
-            await log_delivery("webhook", None, "skipped", "ALERT_WEBHOOK_URL not configured")
+            rows.append(("webhook", None, "skipped", "ALERT_WEBHOOK_URL not configured"))
         else:
             try:
                 async with httpx.AsyncClient(timeout=10) as c:
                     r = await c.post(
-                        st.alert_webhook_url, json={"alert_id": alert_id, "severity": severity, "message": message}
+                        st.alert_webhook_url,
+                        json={"alert_id": item["alert_id"], "severity": severity, "message": message},
                     )
                     r.raise_for_status()
-                await log_delivery("webhook", st.alert_webhook_url, "sent")
+                rows.append(("webhook", st.alert_webhook_url, "sent", None))
             except httpx.HTTPError as e:
-                await log_delivery("webhook", st.alert_webhook_url, "failed", str(e)[:500])
+                rows.append(("webhook", st.alert_webhook_url, "failed", str(e)[:500]))
+    return rows
+
+
+async def deliver_pending(pending: list[dict[str, Any]], created: list[str] | None = None) -> int:
+    """Send e-mails and webhooks for alerts that are already committed, then announce them. Call it only after the
+    evaluation's transaction has committed: an alert is unique by its dedup key, so a committed alert is never
+    created (or delivered) twice, and a rolled-back evaluation sends nothing. Each alert's log is its own
+    transaction."""
+    from platform_core.db import session_scope
+
+    n = 0
+    for item in pending:
+        rows = await _send(item)
+        if not rows:
+            continue
+        try:
+            async with session_scope() as s:
+                for ch, target, status, detail in rows:
+                    await s.execute(
+                        text("INSERT INTO alert_delivery (org_id, alert_id, channel, target, status, detail) "
+                             "VALUES (:org, :a, :c, :t, :s, :d)"),
+                        {"org": get_settings().org_id, "a": item["alert_id"], "c": ch, "t": target, "s": status, "d": detail},
+                    )  # fmt: skip
+            n += sum(1 for r in rows if r[2] == "sent")
+        except Exception as e:  # the send already happened: never retry it because its log failed
+            log.warning("alert %s delivered but its delivery log failed: %s", item["alert_id"], e)
+    ids = list(created or [p["alert_id"] for p in pending])
+    if ids:
+        try:
+            from cortex.l2_representation.pipeline import publish_event
+
+            await publish_event({"type": "alert.created", "count": len(ids), "ids": ids[:50]})
+        except Exception as e:  # a missing notification never undoes committed alerts
+            log.warning("alert.created event not published: %s", e)
+    return n
 
 
 # ----------------------------------------------------------------------------- evaluation
-async def evaluate(s: AsyncSession, now: datetime | None = None) -> dict[str, Any]:
+async def _evaluate_rule(
+    s: AsyncSession, rule: Any, now: datetime, org: str, created: list[str], pending: list[dict[str, Any]]
+) -> None:
+    cands = await EVALUATORS[rule["kind"]](s, dict(rule["rule_expr"] or {}), now)
+    for c in cands:
+        sev = c.get("severity") or rule["severity"]
+        subj_type, subj_id = c["subject"]
+        aid = (
+            await s.execute(
+                text(
+                    "INSERT INTO alert (org_id, rule_id, kind, severity, subject_type, subject_id, message, status, dedup_key, drill, "
+                    "due_at, source_ref, is_demo) VALUES (:org, :r, :k, :sev, :st, :sid, :m, 'open', :key, :drill, :due, "
+                    "CAST(:src AS jsonb), :demo) ON CONFLICT (org_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING RETURNING id"
+                ),
+                {
+                    "org": org, "r": rule["id"], "k": rule["kind"], "sev": sev, "st": subj_type, "sid": subj_id, "m": c["message"],
+                    "key": c["key"], "drill": c.get("drill"), "due": c.get("due_at"), "demo": bool(c.get("demo")),
+                    "src": json.dumps({"kind": "alert_rule", "rule_id": str(rule["id"]), "rule": rule["name"],
+                                       "subject": f"{subj_type}:{subj_id}" if subj_id else subj_type, "evaluated_at": now.isoformat()}),
+                },
+            )
+        ).scalar()  # fmt: skip
+        if aid:
+            created.append(str(aid))
+            await s.execute(
+                text(
+                    "INSERT INTO alert_delivery (org_id, alert_id, channel, status) VALUES (:org, :a, 'in_app', 'sent')"
+                ),
+                {"org": org, "a": aid},
+            )
+            if {"internal_email", "webhook"} & set(rule["channels"] or []):
+                pending.append({"alert_id": str(aid), "channels": list(rule["channels"]), "message": c["message"],
+                                "severity": sev})  # fmt: skip
+    await s.execute(
+        text("UPDATE alert_rule SET last_evaluated_at = :now WHERE id = :id"), {"now": now, "id": rule["id"]}
+    )
+
+
+async def evaluate(
+    s: AsyncSession, now: datetime | None = None, pending: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Evaluate every enabled rule inside the caller's transaction. New alerts that need e-mail or webhook delivery
+    are appended to ``pending``; pass it to ``deliver_pending`` after the transaction commits (nothing external is
+    ever sent from inside it). The result's ``ids`` are the new alerts."""
+    pending = pending if pending is not None else []
     now = now or datetime.now(UTC)
     org = get_settings().org_id
     await s.execute(
@@ -299,35 +379,18 @@ async def evaluate(s: AsyncSession, now: datetime | None = None) -> dict[str, An
     )
     created: list[str] = []
     for rule in rules:
+        rule_created: list[str] = []
+        rule_pending: list[dict[str, Any]] = []
         try:
-            cands = await EVALUATORS[rule["kind"]](s, dict(rule["rule_expr"] or {}), now)
+            # a savepoint per rule: a failing rule (bad expression, SQL error) rolls back only its own work, so it
+            # can't abort the transaction and take every other rule's alerts with it
+            async with s.begin_nested():
+                await _evaluate_rule(s, rule, now, org, rule_created, rule_pending)
         except Exception as e:  # one bad rule never stops the others
             log.warning("alert rule %s failed: %s", rule["name"], e)
             continue
-        for c in cands:
-            sev = c.get("severity") or rule["severity"]
-            subj_type, subj_id = c["subject"]
-            aid = (
-                await s.execute(
-                    text(
-                        "INSERT INTO alert (org_id, rule_id, kind, severity, subject_type, subject_id, message, status, dedup_key, drill, "
-                        "due_at, source_ref, is_demo) VALUES (:org, :r, :k, :sev, :st, :sid, :m, 'open', :key, :drill, :due, "
-                        "CAST(:src AS jsonb), :demo) ON CONFLICT (org_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING RETURNING id"
-                    ),
-                    {
-                        "org": org, "r": rule["id"], "k": rule["kind"], "sev": sev, "st": subj_type, "sid": subj_id, "m": c["message"],
-                        "key": c["key"], "drill": c.get("drill"), "due": c.get("due_at"), "demo": bool(c.get("demo")),
-                        "src": json.dumps({"kind": "alert_rule", "rule_id": str(rule["id"]), "rule": rule["name"],
-                                           "subject": f"{subj_type}:{subj_id}" if subj_id else subj_type, "evaluated_at": now.isoformat()}),
-                    },
-                )
-            ).scalar()  # fmt: skip
-            if aid:
-                created.append(str(aid))
-                await _deliver(s, str(aid), list(rule["channels"]), c["message"], sev)
-        await s.execute(
-            text("UPDATE alert_rule SET last_evaluated_at = :now WHERE id = :id"), {"now": now, "id": rule["id"]}
-        )
+        created += rule_created
+        pending += rule_pending
     # resolve alerts whose cause is gone: milestones done/cancelled, deadlines passed, opportunities closed
     resolved_res = await s.execute(
         text(
@@ -340,8 +403,4 @@ async def evaluate(s: AsyncSession, now: datetime | None = None) -> dict[str, An
         {"org": org, "now": now},
     )
     resolved = getattr(resolved_res, "rowcount", 0)
-    if created:
-        from cortex.l2_representation.pipeline import publish_event
-
-        await publish_event({"type": "alert.created", "count": len(created), "ids": created[:50]})
-    return {"rules": len(rules), "created": len(created), "resolved": int(resolved or 0)}
+    return {"rules": len(rules), "created": len(created), "resolved": int(resolved or 0), "ids": created}
