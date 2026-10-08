@@ -65,6 +65,17 @@ async def record_outcome(
         raise Problem(
             422, "Future outcome", "an outcome can't close in the future (only realised outcomes)", "validation"
         )
+    # one realised outcome per opportunity (the row lock above serialises concurrent submissions): a second one,
+    # e.g. a double submit or "won" then "lost", would hand the ML scorer the same features with both labels
+    prior = (
+        await session.execute(
+            text("SELECT id, result FROM outcome WHERE opportunity_id = :id ORDER BY closed_at DESC LIMIT 1"),
+            {"id": o["id"]},
+        )
+    ).first()
+    if prior is not None:
+        raise Problem(409, "Outcome already recorded",
+                      f"this opportunity already has a realised outcome ({prior.result}, id {prior.id})", "conflict")  # fmt: skip
     oid = (
         await session.execute(
             text(
