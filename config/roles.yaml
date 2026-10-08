@@ -102,6 +102,7 @@ roles:
       - board_report:read
       - approval:read
       - approval:decide      # narrowed by OPA: subject_type in executive_approvable_subjects
+      - outbox:send          # narrowed by OPA: only the board-pack distribution e-mails of an approved board report
       - copilot:ask
 
   service:
