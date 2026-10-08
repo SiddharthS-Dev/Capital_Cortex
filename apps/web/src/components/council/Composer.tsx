@@ -71,13 +71,13 @@ function OpportunityPicker({ value, onChange }: { value: string | null; onChange
 
   const items = search.data?.items ?? [];
   return (
-    <div className="space-y-1">
+    <div className="min-w-0 space-y-1">
       <div className="relative">
         <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" aria-hidden />
         <Input className="pl-8" value={text} onChange={(e) => setText(e.target.value)} placeholder="Search opportunities by title or counterparty"
           aria-label="Search opportunities" aria-controls={listId} />
       </div>
-      <div id={listId} className="max-h-56 overflow-y-auto rounded-md border" aria-live="polite">
+      <div id={listId} className="max-h-72 overflow-y-auto overflow-x-hidden rounded-md border" aria-live="polite">
         {search.isLoading ? (
           <div className="space-y-1 p-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-8" />)}</div>
         ) : search.isError ? (
@@ -91,14 +91,17 @@ function OpportunityPicker({ value, onChange }: { value: string | null; onChange
             {items.map((o) => (
               <li key={o.id} className="border-t first:border-t-0">
                 <button type="button" onClick={() => onChange(o.id)}
-                  className="w-full px-2 py-1.5 text-left hover:bg-muted/50 focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-                  <div className="truncate text-sm">{o.title}</div>
-                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                    <ClassBadge cls={o.class} /><BandBadge band={o.score_band} />
-                    {o.counterparty_name && <span className="truncate">{o.counterparty_name}</span>}
-                    <span>{relativeDeadline(o.deadline)}</span>
-                    {o.is_demo && <DemoBadge />}
+                  className="w-full min-w-0 space-y-1 px-3 py-2 text-left hover:bg-muted/50 focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium" title={o.title}>{o.title}</span>
+                    {o.is_demo && <span className="shrink-0"><DemoBadge /></span>}
                   </div>
+                  <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] text-muted-foreground">
+                    <span className="shrink-0"><ClassBadge cls={o.class} /></span>
+                    <span className="shrink-0"><BandBadge band={o.score_band} /></span>
+                    {o.deadline && <span className="shrink-0">{relativeDeadline(o.deadline)}</span>}
+                  </div>
+                  {o.counterparty_name && <div className="truncate text-[11px] text-muted-foreground" title={o.counterparty_name}>{o.counterparty_name}</div>}
                 </button>
               </li>
             ))}
@@ -154,7 +157,7 @@ export function Composer({ agents, opportunityId, onOpportunity, onStarted }: {
       </CardHeader>
       <CardContent>
         <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (canSubmit) run.mutate(); }} aria-label="Run agent task">
-          <fieldset className="space-y-1">
+          <fieldset className="min-w-0 space-y-1">
             <legend className="text-xs font-medium">Opportunity</legend>
             <OpportunityPicker value={opportunityId} onChange={onOpportunity} />
           </fieldset>
@@ -165,7 +168,7 @@ export function Composer({ agents, opportunityId, onOpportunity, onStarted }: {
               {TASKS.map((t) => <option key={t} value={t}>{label(t)}</option>)}
             </select>
           </div>
-          <fieldset className="space-y-1">
+          <fieldset className="min-w-0 space-y-1">
             <legend className="text-xs font-medium">Agents</legend>
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
