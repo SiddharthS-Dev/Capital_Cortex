@@ -46,14 +46,27 @@ def _compiled(key: str) -> list[re.Pattern[str]]:
     return [re.compile(p, re.I) for p in governance_config().get(key, [])]
 
 
+# Fields that only address the delivery (never scanned). Everything else, the body included, always is.
+_ADDRESS_FIELDS = ("to", "recipient", "portal", "url")
+# Hyphens, dashes, underscores and unusual spaces that would split a phrase like "term sheet" past a pattern.
+_SEPARATORS = re.compile(r"[\s  -​  　_\-‐-―−]+")
+_EMAIL_ADDRESS = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
 def content_flags(payload: dict[str, Any], kind: str, recipient: str | None = None) -> dict[str, bool]:
-    """Deterministic flags that select policies (financial terms, PII, grant submission)."""
-    body = canonical_json({k: v for k, v in payload.items() if k not in ("to", "recipient")})
-    if recipient:
-        body = body.replace(recipient, " ")
+    """Deterministic flags that select policies (financial terms, PII, grant submission).
+
+    Address fields are dropped by key, never by deleting the recipient's text from the body: a portal name the
+    author picks (e.g. "term sheet") must not erase the same words from the content. Only the recipient's own
+    e-mail address is ignored, and only for the PII check (greeting the recipient isn't a PII disclosure)."""
+    body = canonical_json({k: v for k, v in payload.items() if k not in _ADDRESS_FIELDS})
+    variants = (body, _SEPARATORS.sub(" ", body))
+    pii_body = body
+    if recipient and _EMAIL_ADDRESS.match(recipient):
+        pii_body = re.sub(re.escape(recipient), " ", body, flags=re.I)
     return {
-        "contains_financial_terms": any(p.search(body) for p in _compiled("financial_terms_patterns")),
-        "contains_pii": any(p.search(body) for p in _compiled("pii_patterns")),
+        "contains_financial_terms": any(p.search(v) for p in _compiled("financial_terms_patterns") for v in variants),
+        "contains_pii": any(p.search(pii_body) for p in _compiled("pii_patterns")),
         "is_grant_submission": kind == "submission",
     }
 
