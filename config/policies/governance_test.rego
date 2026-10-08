@@ -41,6 +41,15 @@ test_financial_terms_need_admin_and_legal if {
 	]})
 }
 
+# One person holding admin and a legal role/grant can't be both halves of "Admin + Legal".
+test_financial_terms_admin_and_legal_must_be_two_people if {
+	fin := object.union(base, {"content": object.union(base.content, {"contains_financial_terms": true})})
+	solo := object.union(approval("f", ["admin", "auditor", "approver"], "h1"), {"grants": ["compliance:review"]})
+	not governance.allow with input as object.union(fin, {"approvals": [solo]})
+	"financial_terms_require_admin_and_legal" in governance.deny with input as object.union(fin, {"approvals": [solo]})
+	governance.allow with input as object.union(fin, {"approvals": [solo, approval("l", ["auditor", "approver"], "h1")]})
+}
+
 test_grant_submission_two_approvers if {
 	g := object.union(base, {"content": object.union(base.content, {"is_grant_submission": true})})
 	not governance.allow with input as object.union(g, {"approvals": [approval("a", ["approver"], "h1")]})
