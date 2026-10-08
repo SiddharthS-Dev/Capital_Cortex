@@ -27,6 +27,21 @@ Endpoints (default ports, override in `.env`):
 | MinIO console | http://localhost:9301 |
 | OPA | http://localhost:8381/v1/data/cortex/authz |
 
+### 1.1 Profiles and the production guard
+
+`make up` first runs `scripts/check_env.py`. The default (dev) profile needs nothing: the compose defaults are
+development-only values for a laptop. With `CORTEX_PROFILE=prod` it refuses to start when any of
+`POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`,
+`WORKER_CLIENT_SECRET` or `VAULT_DEV_ROOT_TOKEN` is unset or still its dev default, or when
+`APPROVAL_SIGNING_KEY` is shorter than 32 bytes. It also refuses this compose file's identity stack: Keycloak
+runs `start-dev --import-realm` (the dev realm has `dev-admin` with a public password and a seeded TOTP) and
+Vault runs in dev mode. Production identity and secrets are provisioned by Terraform (D-011) from the
+production Vault, so this compose file stays a dev/staging stack.
+
+Host ports of services without their own authentication (Postgres, Redis, MinIO, OPA, Vault, Prometheus,
+Mailpit) bind to `INTERNAL_BIND_ADDR` (default `127.0.0.1`), so they aren't reachable from the network. Set it
+to `0.0.0.0` only on an isolated host.
+
 Startup order: data, identity and observability services must be healthy before `migrate` runs. `api` and
 `worker` start after `migrate` completes. Postgres's healthcheck uses TCP because the first-boot init server
 is socket-only (a socket check would pass too early).
