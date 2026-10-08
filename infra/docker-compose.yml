@@ -41,6 +41,9 @@ x-app-env: &app-env
   INTERNAL_EMAIL_DOMAINS: '${INTERNAL_EMAIL_DOMAINS:-["inspironics.net"]}'
   ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
 
+# Host ports: Postgres, Redis, MinIO, OPA, Vault, Prometheus and Mailpit have no authentication of their own (or a
+# dev root token), so they listen on loopback only (INTERNAL_BIND_ADDR, default 127.0.0.1). Containers reach each
+# other over the compose network regardless. UI, API, Keycloak and Grafana require a login.
 services:
   # ---------------- data ----------------
   postgres:
@@ -56,7 +59,7 @@ services:
     command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=512MB", "-c", "wal_level=replica",
               "-c", "archive_mode=on", "-c", "archive_timeout=840",
               "-c", "archive_command=/usr/local/bin/archive-wal.sh %p %f"]
-    ports: ["${PG_PORT:-55432}:5432"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${PG_PORT:-55432}:5432"]
     volumes: [pgdata:/var/lib/postgresql/data, pgwal:/var/lib/postgresql/wal-archive]
     shm_size: 1gb  # Docker's 64 MB /dev/shm is too small for parallel query / VACUUM on large tables
     healthcheck:
@@ -93,7 +96,7 @@ services:
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
-    ports: ["${REDIS_PORT:-56379}:6379"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-56379}:6379"]
     volumes: [redisdata:/data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -107,7 +110,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cortex}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cortex-dev-minio}
-    ports: ["${MINIO_PORT:-9300}:9000", "${MINIO_CONSOLE_PORT:-9301}:9001"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${MINIO_PORT:-9300}:9000", "${INTERNAL_BIND_ADDR:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9301}:9001"]
     volumes: [miniodata:/data]
 
   minio-init:
@@ -151,7 +154,7 @@ services:
               "/policies"]
     environment:
       CORTEX_MFA_REQUIRED: ${CORTEX_MFA_REQUIRED:-true}
-    ports: ["${OPA_PORT:-8381}:8181"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${OPA_PORT:-8381}:8181"]
     volumes:
       - ../config/policies:/policies/cortex:ro
       - ../config/roles.yaml:/policies/rbac/data.yaml:ro
@@ -166,7 +169,7 @@ services:
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN:-dev-root-token}
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    ports: ["${VAULT_PORT:-8382}:8200"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${VAULT_PORT:-8382}:8200"]
 
   # ---------------- observability ----------------
   otel-collector:
@@ -191,7 +194,7 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
-    ports: ["${PROMETHEUS_PORT:-9390}:9090"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9390}:9090"]
 
   grafana:
     image: grafana/grafana:11.3.1
@@ -208,7 +211,7 @@ services:
 
   mailpit:  # dev SMTP catcher: the outbox sender's e-mail channel delivers here, nothing leaves the machine
     image: axllent/mailpit:v1.21
-    ports: ["${MAILPIT_PORT:-8383}:8025"]
+    ports: ["${INTERNAL_BIND_ADDR:-127.0.0.1}:${MAILPIT_PORT:-8383}:8025"]
 
   # ---------------- application ----------------
   migrate:
