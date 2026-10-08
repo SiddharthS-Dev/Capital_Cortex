@@ -88,16 +88,27 @@ deny contains "executive_cannot_approve_subject" if {
 
 # Another role (or a direct grant) gives approval:decide unnarrowed. Holding "executive" plus a role without
 # that permission (e.g. analyst) must not widen what the executive role may approve.
-approval_decide_beyond_executive if {
+approval_decide_beyond_executive if held_beyond_executive("approval:decide")
+
+# ---------- executives send only board-pack distribution e-mails ----------
+# The flag comes from the server (the board report's distribution log lists the outbox item), never the client.
+deny contains "executive_cannot_send_outbox_item" if {
+	input.action == "outbox:send"
+	"executive" in input.subject.roles
+	not held_beyond_executive("outbox:send")
+	not input.resource.board_report_distribution == true
+}
+
+held_beyond_executive(perm) if {
 	some role in input.subject.roles
 	role != "executive"
 	some g in data.rbac.roles[role].permissions
-	matches(g, "approval:decide")
+	matches(g, perm)
 }
 
-approval_decide_beyond_executive if {
+held_beyond_executive(perm) if {
 	some g in input.subject.grants
-	matches(g, "approval:decide")
+	matches(g, perm)
 }
 
 # ---------- raw Cypher is admin-only (§8 /graph/query) ----------
