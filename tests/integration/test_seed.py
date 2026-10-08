@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 
 import fakeredis.aioredis
@@ -50,8 +51,65 @@ async def test_seed_then_purge(engine):
                 )
             ).scalar()
             assert scored > 0  # seeded relationships feed the relationship_strength factor
+        # demo work products from Phase 2/3 flows: an APPROVED demo e-mail (outbox → approval FK) and a demo
+        # board pack with its approval and distribution e-mail (linked only through the payload)
+        async with session_scope() as s:
+            opp = (await s.execute(text("SELECT id FROM opportunity WHERE is_demo LIMIT 1"))).scalar_one()
+            oid = (
+                await s.execute(
+                    text(
+                        "INSERT INTO outbox (channel, payload, content_hash, status, created_by, opportunity_id) "
+                        "VALUES ('email', '{\"to\": \"x@example.org\"}'::jsonb, 'h', 'draft', 'u', :o) RETURNING id"
+                    ),
+                    {"o": opp},
+                )
+            ).scalar_one()
+            aid = (
+                await s.execute(
+                    text(
+                        "INSERT INTO approval (subject_type, subject_id, content_hash, requested_by, approver_id, decision) "
+                        "VALUES ('outbox', :o, 'h', 'u', 'v', 'approved') RETURNING id"
+                    ),
+                    {"o": oid},
+                )
+            ).scalar_one()
+            await s.execute(
+                text("UPDATE outbox SET status = 'approved', approval_id = :a WHERE id = :o"), {"a": aid, "o": oid}
+            )
+            bid = (
+                await s.execute(
+                    text(
+                        "INSERT INTO board_report (period_start, period_end, title, content, content_hash, created_by, is_demo) "
+                        "VALUES (current_date, current_date, 'Demo pack', '{}'::jsonb, 'h', 'u', true) RETURNING id"
+                    )
+                )
+            ).scalar_one()
+            await s.execute(
+                text(
+                    "INSERT INTO approval (subject_type, subject_id, content_hash, requested_by, approver_id, decision) "
+                    "VALUES ('board_report', :b, 'h', 'u', 'v', 'approved')"
+                ),
+                {"b": bid},
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO outbox (channel, payload, content_hash, status, created_by) "
+                    "VALUES ('email', CAST(:p AS jsonb), 'h', 'draft', 'u')"
+                ),
+                {"p": json.dumps({"board_report_id": str(bid)})},
+            )
         purged = await purge()
-        assert purged["opportunity"] == 33
+        assert purged["opportunity"] == 33 and purged["outbox"] >= 2 and purged["approval"] >= 2, purged
+        async with session_scope() as s:
+            orphans = (
+                await s.execute(
+                    text(
+                        "SELECT count(*) FROM approval a WHERE a.subject_type = 'board_report' "
+                        "AND NOT EXISTS (SELECT 1 FROM board_report b WHERE b.id = a.subject_id)"
+                    )
+                )
+            ).scalar()
+            assert orphans == 0, "an approval leaves with its demo subject"
         async with session_scope() as s:
             left = (
                 await s.execute(
