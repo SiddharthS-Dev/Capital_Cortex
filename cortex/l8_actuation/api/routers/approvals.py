@@ -261,11 +261,16 @@ async def request_outbox_approval(
     return out
 
 
+async def _outbox_release_resource(request: Request) -> Resource:
+    """Board-pack distribution e-mails are flagged so OPA can let executives send exactly those."""
+    async with session_scope() as s:
+        return await outbox_sender.release_resource(s, request.path_params.get("id"))
+
+
 @router.post("/outbox/{id}/send", summary="Release an approved item (token + hash match; step-up MFA)")
 async def send_outbox(
-    id: str, p: Principal = Depends(authorize("outbox:send", "outbox", step_up=True))
+    id: str, p: Principal = Depends(authorize("outbox:send", "outbox", _outbox_release_resource, step_up=True))
 ) -> dict[str, Any]:
-    async with session_scope() as s:
-        out = await outbox_sender.release(s, p, id)
+    out = await outbox_sender.release(p, id)  # its own transactions: claim, send, record
     await publish_event({"type": "outbox.updated", "status": out["status"], "ids": [id]})
     return out
