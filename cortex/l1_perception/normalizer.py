@@ -60,7 +60,9 @@ def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
     for f in list(fields):
         v = fields[f]
         if f in DATE_FIELDS:
-            fields[f] = to_date(v, dayfirst=cfg.date_dayfirst, require_day=True)
+            fields[f] = to_date(
+                v, dayfirst=cfg.date_dayfirst, require_day=True, tz=cfg.date_timezone, end_of_day=f == "deadline"
+            )
         elif f in NUMBER_FIELDS:
             rng = to_range(v)
             if rng:  # "10,000 to 50,000" in one field fills both ends (an explicit other field still wins)
