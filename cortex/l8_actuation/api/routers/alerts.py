@@ -18,7 +18,7 @@ from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, session_scope
 from platform_core.errors import NotFound, Problem
 
 router = APIRouter(prefix="/v1", tags=["alerts"])
@@ -168,13 +168,17 @@ async def resolve(
 
 
 @router.post("/alerts/evaluate", summary="Evaluate every enabled rule now")
-async def evaluate_now(
-    p: Principal = Depends(authorize("alert:write", "alert_rule")),
-    session: AsyncSession = Depends(get_session, scope="function"),
-) -> dict[str, Any]:
-    await engine.seed_default_rules(session)
-    out = await engine.evaluate(session)
-    await audit_service.record(session, p, "alerts.evaluated", "alert_rule:*", out)
+async def evaluate_now(p: Principal = Depends(authorize("alert:write", "alert_rule"))) -> dict[str, Any]:
+    pending: list[dict[str, Any]] = []
+    async with session_scope() as session:
+        await engine.seed_default_rules(session)
+        out = await engine.evaluate(session, pending=pending)
+        out = {k: out[k] for k in ("rules", "created", "resolved")} | {"ids": out["ids"][:50]}
+        await audit_service.record(
+            session, p, "alerts.evaluated", "alert_rule:*", {k: out[k] for k in ("rules", "created", "resolved")}
+        )
+    # after the commit: external deliveries happen once, for alerts that really exist
+    out["delivered"] = await engine.deliver_pending(pending, out["ids"])
     return out
 
 
