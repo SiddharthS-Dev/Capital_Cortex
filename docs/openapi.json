@@ -7267,6 +7267,23 @@
         ],
         "summary": "Compute and persist base/downside/upside forecasts",
         "operationId": "create_v1_forecasts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateForecastIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "Successful Response",
@@ -16839,6 +16856,18 @@
           "name"
         ],
         "title": "ContactIn"
+      },
+      "CreateForecastIn": {
+        "properties": {
+          "include_demo": {
+            "type": "boolean",
+            "title": "Include Demo",
+            "description": "mix synthetic demo snapshots and pipeline in (the saved rows are then demo)",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "CreateForecastIn"
       },
       "DataOrigins": {
         "properties": {
