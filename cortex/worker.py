@@ -37,6 +37,8 @@ class Job:
     permission: str | tuple[str, ...]  # several = any one suffices
     resource: str
     fn: Callable[[Envelope, Principal], Awaitable[None]]
+    # builds the OPA resource from the job (attributes policy narrows on); default: just the resource type
+    resource_fn: Callable[[Envelope], Awaitable[Resource]] | None = None
 
 
 async def _ping(env: Envelope, principal: Principal) -> None:
@@ -91,19 +93,29 @@ async def _release(env: Envelope, principal: Principal) -> None:
     from cortex.l2_representation.pipeline import publish_event
     from cortex.l7_governance.outbox import release
 
-    async with session_scope() as s:
-        out = await release(s, principal, env.payload["outbox_id"])
+    out = await release(principal, env.payload["outbox_id"])  # its own transactions: claim, send, record
     await publish_event({"type": "outbox.updated", "status": out["status"], "ids": [env.payload["outbox_id"]]})
 
 
-async def _alerts(env: Envelope, principal: Principal) -> None:
-    from cortex.l8_actuation.alerts import evaluate, seed_default_rules
+async def _release_resource(env: Envelope) -> Resource:
+    from cortex.l7_governance.outbox import release_resource
 
     async with session_scope() as s:
+        return await release_resource(s, env.payload.get("outbox_id"))
+
+
+async def _alerts(env: Envelope, principal: Principal) -> None:
+    from cortex.l8_actuation.alerts import deliver_pending, evaluate, seed_default_rules
+
+    pending: list[dict] = []
+    async with session_scope() as s:
         await seed_default_rules(s)
-        out = await evaluate(s)
+        out = await evaluate(s, pending=pending)
         if out["created"] or out["resolved"]:
-            await audit_service.record(s, principal, "alerts.evaluated", "alert_rule:*", out)
+            summary = {k: out[k] for k in ("rules", "created", "resolved")}
+            await audit_service.record(s, principal, "alerts.evaluated", "alert_rule:*", summary)
+    # only now, with the alerts committed: e-mails/webhooks go out once and are never repeated by a rollback
+    await deliver_pending(pending, out["ids"])
 
 
 async def _memory(env: Envelope, principal: Principal) -> None:
@@ -191,7 +203,7 @@ JOBS: dict[str, Job] = {
     "signal.ingested": Job(("graph:write", "source:run"), "signal", _process_signal),
     "scoring.rescore": Job("opportunity:write", "opportunity", _rescore),
     "council.run": Job("agent:run", "agent_run", _council),
-    "outbox.release": Job("outbox:send", "outbox", _release),
+    "outbox.release": Job("outbox:send", "outbox", _release, _release_resource),
     "alerts.evaluate": Job("alert:write", "alert_rule", _alerts),
     "memory.maintenance": Job("memory:write", "memory", _memory),
     "ml.retrain": Job("ml:train", "ml_model", _retrain),
@@ -225,9 +237,10 @@ async def dispatch(env: Envelope) -> None:
     principal = await get_verifier().verify_job(env.actor_token, env.ts)
     perms = (job.permission,) if isinstance(job.permission, str) else job.permission
     ctx = {"job": env.type, "envelope": env.id}
+    resource = await job.resource_fn(env) if job.resource_fn is not None else Resource(type=job.resource)
     for i, perm in enumerate(perms):  # any one of the listed permissions suffices
         try:
-            await check_access(principal, perm, Resource(type=job.resource), ctx)
+            await check_access(principal, perm, resource, ctx)
             break
         except Forbidden:
             if i == len(perms) - 1:
