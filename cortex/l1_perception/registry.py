@@ -32,6 +32,8 @@ class SourceConfig(BaseModel):
     rate_limit: dict[str, float] = Field(default_factory=lambda: {"min_interval_seconds": 1.0})
     timeout_seconds: float = 30.0  # per request (connect, read, write)
     date_dayfirst: bool = False  # ambiguous numeric dates are DD/MM/YYYY in this source (ISO dates unaffected)
+    # the source's local time zone (IANA) for dates without one; a date-only deadline closes at 23:59:59 there
+    date_timezone: str = "UTC"
     retries: int = 3  # extra attempts on timeouts, connection errors and 429/502/503/504
     respect_robots: bool = True
     max_items: int = 500
