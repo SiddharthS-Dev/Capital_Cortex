@@ -26,8 +26,8 @@ TABLES = [
     "alert_delivery",
     "alert",
     "approval_decision",
+    "outbox",  # before approval: outbox.approval_id references approval
     "approval",
-    "outbox",
     "interaction",
     "memory",
     "ml_model",
@@ -72,9 +72,6 @@ async def purge() -> dict[str, int]:
             "UPDATE agent_run SET is_demo = true WHERE opportunity_id IN (SELECT id FROM opportunity WHERE is_demo)",
             "UPDATE outbox SET is_demo = true WHERE opportunity_id IN (SELECT id FROM opportunity WHERE is_demo) "
             "OR recommendation_id IN (SELECT id FROM recommendation WHERE is_demo)",
-            "UPDATE approval SET is_demo = true WHERE subject_id IN (SELECT id FROM outbox WHERE is_demo) "
-            "OR subject_id IN (SELECT id FROM recommendation WHERE is_demo)",
-            "UPDATE approval_decision SET is_demo = true WHERE approval_id IN (SELECT id FROM approval WHERE is_demo)",
             "UPDATE alert_delivery SET is_demo = true WHERE alert_id IN (SELECT id FROM alert WHERE is_demo)",
             "UPDATE milestone SET is_demo = true WHERE opportunity_id IN (SELECT id FROM opportunity WHERE is_demo)",
             "UPDATE proposal SET is_demo = true WHERE opportunity_id IN (SELECT id FROM opportunity WHERE is_demo)",
@@ -84,6 +81,15 @@ async def purge() -> dict[str, int]:
             "UPDATE document SET is_demo = true WHERE opportunity_id IN (SELECT id FROM opportunity WHERE is_demo)",
             "UPDATE document_access SET is_demo = true WHERE document_id IN (SELECT id FROM document WHERE is_demo)",
             "UPDATE share_link SET is_demo = true WHERE package_id IN (SELECT id FROM dataroom_package WHERE is_demo)",
+            # outbox e-mails of demo board packs and demo share links carry their parent only in the payload
+            "UPDATE outbox SET is_demo = true WHERE payload ->> 'board_report_id' IN (SELECT id::text FROM board_report WHERE is_demo) "
+            "OR payload ->> 'share_link_id' IN (SELECT id::text FROM share_link WHERE is_demo)",
+            # last: an approval goes with its subject, whichever kind it is (all subjects are flagged by now)
+            "UPDATE approval SET is_demo = true WHERE subject_id IN (SELECT id FROM outbox WHERE is_demo) "
+            "OR subject_id IN (SELECT id FROM recommendation WHERE is_demo) "
+            "OR subject_id IN (SELECT id FROM proposal WHERE is_demo) "
+            "OR subject_id IN (SELECT id FROM board_report WHERE is_demo)",
+            "UPDATE approval_decision SET is_demo = true WHERE approval_id IN (SELECT id FROM approval WHERE is_demo)",
         ):
             await s.execute(text(stmt))
         await s.execute(text("DELETE FROM agent_run WHERE is_demo AND parent_run_id IS NOT NULL"))
