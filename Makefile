@@ -21,6 +21,7 @@ venv:  ## create .venv and install backend + dev deps
 	cd $(WEB) && npm ci
 
 up:  ## build and start the full stack (waits for health)
+	$(PY) scripts/check_env.py
 	$(COMPOSE) up -d --build --wait postgres redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
 	$(COMPOSE) up -d --build mailpit minio-init migrate api worker web
 	$(PY) scripts/bootstrap_admin.py
