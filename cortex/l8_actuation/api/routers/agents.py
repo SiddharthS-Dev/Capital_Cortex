@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -20,7 +21,9 @@ from cortex.l6_agency.agent_config import agents
 from cortex.l6_agency.tool_registry import describe as describe_tools
 from cortex.l7_governance import approval_service, audit_service
 from cortex.l7_governance.approval_service import recommendation_content
+from cortex.l7_governance.citation_checker import check as citation_check
 from cortex.l7_governance.policy_engine import content_flags
+from cortex.l7_governance.refs import DBRefResolver
 from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
@@ -283,6 +286,55 @@ async def get_recommendation(
     return row(r)
 
 
+def _sentences(t: str, limit: int = 1900) -> list[str]:
+    """Split edited text into claim-sized pieces (the checker reads at most 2,000 characters of a claim)."""
+    out: list[str] = []
+    for sent in re.split(r"(?<=[.!?;])\s+|\n+", t):
+        sent = sent.strip()
+        while len(sent) > limit:
+            cut = sent.rfind(" ", 0, limit)
+            cut = cut if cut > 0 else limit
+            out.append(sent[:cut])
+            sent = sent[cut:].strip()
+        if sent:
+            out.append(sent)
+    return out
+
+
+async def check_edited_text(s: AsyncSession, p: Principal, rec: dict[str, Any], new_text: str) -> dict[str, Any]:
+    """Citation report for a human edit: every sentence is checked against the recommendation's own evidence."""
+    refs = [str(e["ref"]) for e in (rec.get("evidence") or []) if isinstance(e, dict) and e.get("ref")]
+    refs += [
+        x
+        for c in (rec.get("claims") or [])
+        if isinstance(c, dict)
+        for x in (c.get("evidence") or []) + (c.get("basis") or [])
+    ]
+    refs = list(dict.fromkeys(refs))[:20]
+    pieces = _sentences(new_text)
+    if not refs:
+        return {
+            "status": "rejected",
+            "human_edit": True,
+            "edited_by": p.sub,
+            "checked": len(pieces),
+            "passed": 0,
+            "rejected": len(pieces),
+            "problems": ["the recommendation cites no evidence to check the edit against"],
+        }
+    rep = await citation_check(
+        [{"text": x, "kind": "fact", "evidence": refs} for x in pieces], DBRefResolver(s, p), "recommendation_edit"
+    )
+    d = rep.as_dict()
+    problems = [f"{c.claim.text[:80]}: {pr}" for c in rep.rejected for pr in c.problems]
+    return {
+        **{k: d[k] for k in ("status", "checked", "passed", "rejected")},
+        "human_edit": True,
+        "edited_by": p.sub,
+        "problems": problems[:20],
+    }
+
+
 class RecommendationEdit(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
@@ -308,11 +360,16 @@ async def edit_recommendation(
         raise NotFound("recommendation not found")
     new = {**dict(r), "text": body.text}
     h = content_hash(recommendation_content(new))
+    # The council's citation report covered the old text only. Re-check the edited text against the records the
+    # recommendation already cites (numbers within ±0.5%, exact dates, named organisations), so an approver never
+    # sees "pass" for figures nobody verified (I1/I2).
+    report = await check_edited_text(session, p, dict(r), body.text)
     await session.execute(
         text(
-            "UPDATE recommendation SET text = :t, content_hash = :h, version = version + 1, edited_by = :by WHERE id = :id"
+            "UPDATE recommendation SET text = :t, content_hash = :h, version = version + 1, edited_by = :by, "
+            "citation_report = CAST(:cr AS jsonb) WHERE id = :id"
         ),
-        {"t": body.text, "h": h, "by": p.sub, "id": r["id"]},
+        {"t": body.text, "h": h, "by": p.sub, "id": r["id"], "cr": json.dumps(report, default=str)},
     )
     # linked export drafts embed the recommendation text: regenerate them (their trigger invalidates approvals)
     invalidated = 0
@@ -320,7 +377,7 @@ async def edit_recommendation(
         await session.execute(
             text(
                 "SELECT id, payload, kind, recipient FROM outbox WHERE recommendation_id = :id AND status <> 'sent' "
-                "AND channel = 'portal_export'"
+                "AND channel = 'portal_export' AND (delivery ->> 'state') IS DISTINCT FROM 'sending'"
             ),
             {"id": r["id"]},
         )
@@ -344,7 +401,14 @@ async def edit_recommendation(
         {"content_hash": h, "approvals_invalidated": invalidated},
     )
     await publish_event({"type": "recommendation.updated", "ids": [id]})
-    return {"id": id, "status": status, "content_hash": h, "approvals_invalidated": invalidated}
+    return {
+        "id": id,
+        "status": status,
+        "content_hash": h,
+        "approvals_invalidated": invalidated,
+        "citation_status": report["status"],
+        "citation_problems": report["problems"],
+    }
 
 
 @router.post("/recommendations/{id}/approve", summary="Request approval for a recommendation (and its outbound drafts)")
@@ -365,6 +429,14 @@ async def request_recommendation_approval(
     )
     if r is None:
         raise NotFound("recommendation not found")
+    cr = r["citation_report"] or {}
+    if cr.get("human_edit") and cr.get("status") != "pass":
+        raise Problem(
+            409,
+            "Edited text is not supported by the evidence",
+            "; ".join(cr.get("problems") or []) or "the edited text failed the citation check",
+            "citation",
+        )
     drafts_ = (
         (
             await session.execute(
