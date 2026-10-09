@@ -22,8 +22,13 @@ popovers · change weights → live re-rank · graph path finder works.
    from the raw payload or a declared source default, plus the classification rationale and runner-up.
 6. **Re-rank live:** *Scoring Studio* → move a weight slider. The preview re-ranks with ▲/▼ deltas and
    nothing is saved. Admins can *Save as new version* → *Activate*, which queues a batch rescore.
-7. **Graph:** *Knowledge Graph* → click nodes (inspector + DERIVED_FROM provenance), double-click to expand,
-   and use *Path finder* between an opportunity and its funder.
+7. **Graph:** *Knowledge Graph* → click nodes (inspector + DERIVED_FROM provenance), double-click to expand.
+   *Path finder*: pick a **From** node (searchable; only nodes with at least one edge). The **To** list then
+   holds only the nodes reachable from it within 4 hops, grouped "1 hop", "2 hops"…, so every choice has a
+   path. *Find paths* switches the canvas to **Path view**: only the path nodes and edges, left → right from
+   From, with the shortest path highlighted and its ends ringed. Each path is listed as "n hops: A → B → C";
+   click one to highlight it. *Back to full graph* restores the previous graph, layout and zoom exactly. A
+   search that hits the 5 s limit says "Search timed out — try fewer hops" rather than "No path".
 8. **Radar:** facets (class, band, stage, geography, source), full-text search, Kanban (drag or use the
    per-card stage selector, which is keyboard-accessible), map view, and bulk assign/rescore/archive.
 9. **Runway:** *Runway & Forecast* → import monthly financials (CSV/XLSX → map columns → import), then adjust

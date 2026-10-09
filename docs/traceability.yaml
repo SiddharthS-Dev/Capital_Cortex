@@ -50,6 +50,7 @@ items:
     endpoints:
     - GET /v1/graph/query
     - GET /v1/graph/paths
+    - GET /v1/graph/reachable
     - GET /v1/graph/stats
     - GET /v1/entities/merge-queue
     - POST /v1/entities/merge-queue
@@ -70,6 +71,11 @@ items:
     - tests/integration/test_schema.py::test_pgvector_hnsw_search
     - evals/run.py::classification_accuracy
     - tests/integration/test_graph_traversal.py::test_neighbourhood_and_paths_match_cypher
+    - tests/integration/test_graph_traversal.py::test_seed_graph_reachable_nodes_all_have_paths
+    - tests/integration/test_graph_traversal.py::test_statement_timeout_is_recognised
+    - tests/unit/test_graph_paths.py::test_reachable_is_exactly_what_paths_can_find
+    - tests/unit/test_graph_paths.py::test_paths_deterministic_whatever_the_storage_order
+    - tests/unit/test_graph_paths.py::test_search_timeout_is_503_problem
   FR-03:
     title: Capital Opportunity Score (configurable, explainable)
     layer: L4
