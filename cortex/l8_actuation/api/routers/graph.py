@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.l2_representation import graph_traversal
@@ -42,8 +43,8 @@ _WRITE = re.compile(r"\b(create|merge|set|delete|detach|remove|load|call|drop)\b
 _UUID = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
-def _collect(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """AGE vertices/edges/paths → {nodes, edges} keyed by the domain id property."""
+def _walk(rows: list[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    """AGE vertices/edges/paths in result rows, keyed by graph id."""
     nodes: dict[int, dict[str, Any]] = {}
     edges: dict[int, dict[str, Any]] = {}
 
@@ -62,10 +63,22 @@ def _collect(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     for r in rows:
         visit(list(r.values()))
+    return nodes, edges
+
+
+def _collect(rows: list[dict[str, Any]], degree: dict[str, int] | None = None) -> dict[str, Any]:
+    """AGE vertices/edges/paths → {nodes, edges} keyed by the domain id property (+ CKG degree when given)."""
+    nodes, edges = _walk(rows)
     gid = {k: (n.get("properties") or {}).get("id", str(k)) for k, n in nodes.items()}
     return {
         "nodes": [
-            {"id": gid[k], "label": n["label"], "properties": n.get("properties") or {}} for k, n in nodes.items()
+            {
+                "id": gid[k],
+                "label": n["label"],
+                "properties": n.get("properties") or {},
+                **({} if degree is None else {"degree": degree.get(str(k), 0)}),
+            }
+            for k, n in nodes.items()
         ],
         "edges": [
             {
@@ -116,7 +129,21 @@ async def query(
     rows = await age.cypher(
         session, GRAPH, f"MATCH (n:{label}) OPTIONAL MATCH (n)-[r]->(m) RETURN [n, r, m] LIMIT {limit}"
     )
-    return _collect(rows)
+    # only outgoing edges are drawn, so give each node its full CKG degree (the path finder lists connected nodes)
+    return _collect(rows, await graph_traversal.degrees(session, [str(k) for k in _walk(rows)[0]]))
+
+
+async def _bounded(session: AsyncSession) -> None:
+    """Search endpoints: read-only, and a statement may run at most 5 s."""
+    await session.execute(text("SET TRANSACTION READ ONLY"))
+    await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+
+
+def _timed_out(exc: DBAPIError) -> bool:
+    return getattr(getattr(exc, "orig", None), "sqlstate", None) == "57014"  # query_canceled (statement_timeout)
+
+
+_TIMEOUT = ("Search timed out", "The graph search exceeded 5 s. Try fewer hops.", "timeout")
 
 
 @router.get("/paths", summary="Shortest paths between two nodes (warm-intro path finder)")
@@ -130,11 +157,36 @@ async def paths(
 ) -> dict[str, Any]:
     if not (_UUID.match(from_) and _UUID.match(to)):
         raise Problem(422, "ids required", "from and to must be node ids", "validation")
-    await session.execute(text("SET TRANSACTION READ ONLY"))
-    await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+    await _bounded(session)
     # bidirectional BFS instead of AGE's variable-length match, which loads the whole graph per backend (§4.3)
-    out = await graph_traversal.paths(session, from_, to, max_hops, limit)
+    try:
+        out = await graph_traversal.paths(session, from_, to, max_hops, limit)
+    except DBAPIError as e:  # a timeout is an error, never "no path"
+        if _timed_out(e):
+            raise Problem(503, *_TIMEOUT) from e
+        raise
     return {**out, "count": len(out["paths"]), "max_hops": max_hops}
+
+
+@router.get("/reachable", summary="Nodes reachable from a node within max_hops (path finder destinations)")
+async def reachable(
+    from_: str = Query(..., alias="from"),
+    max_hops: int = Query(4, ge=1, le=5),
+    limit: int = Query(500, ge=1, le=2000),
+    _: Principal = Depends(authorize("graph:read", "graph")),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> list[dict[str, Any]]:
+    """[{id, label, title, hops}] by hops then title, `from` excluded. Uses the same BFS as /paths, so every node
+    listed has at least one path there with the same max_hops."""
+    if not _UUID.match(from_):
+        raise Problem(422, "id required", "from must be a node id", "validation")
+    await _bounded(session)
+    try:
+        return await graph_traversal.reachable(session, from_, max_hops, limit)
+    except DBAPIError as e:
+        if _timed_out(e):
+            raise Problem(503, *_TIMEOUT) from e
+        raise
 
 
 @router.get("/stats", summary="Node and edge counts per label")
