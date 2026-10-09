@@ -313,7 +313,7 @@ export function Radar() {
           <EmptyState title="No opportunities match" next={<span>Clear the filters, or run a source from <Link className="text-primary underline" to="/sources">Sources & Ingestion</Link>.</span>} />
         ) : view === "table" ? (
           <Card>
-            <div className="overflow-x-auto">
+            <div className="relative overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
                   {table.getHeaderGroups().map((hg) => <tr key={hg.id}>{hg.headers.map((h) => <th key={h.id} scope="col" className="px-3 py-2 font-medium">{flexRender(h.column.columnDef.header, h.getContext())}</th>)}</tr>)}

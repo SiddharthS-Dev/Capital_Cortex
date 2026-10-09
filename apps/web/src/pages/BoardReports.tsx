@@ -27,7 +27,7 @@ function ReportList({ onOpen, canWrite }: { onOpen: (id: string) => void; canWri
           <EmptyState title="No board packs yet"
             next={canWrite ? "Generate one above: pick the period (last quarter by default) and the board recipients." : "Board packs appear here once someone with board_report:write generates one."} />
         ) : (
-          <div className="overflow-x-auto rounded-md border">
+          <div className="relative overflow-x-auto rounded-md border">
             <table className="w-full text-sm" aria-label="Board packs">
               <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
                 <tr><th scope="col" className="px-3 py-2">Pack</th><th scope="col">Period</th><th scope="col">Status</th><th scope="col">Compliance</th><th scope="col">Recipients</th><th scope="col">Distributed</th><th scope="col">Created</th><th scope="col"><span className="sr-only">Actions</span></th></tr>

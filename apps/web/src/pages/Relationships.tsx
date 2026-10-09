@@ -29,7 +29,7 @@ const TABS = [
 
 function ContactsTable({ rows, selected, onSelect }: { rows: Contact[]; selected: string | null; onSelect: (id: string) => void }) {
   return (
-    <div className="overflow-x-auto rounded-md border">
+    <div className="relative overflow-x-auto rounded-md border">
       <table className="w-full text-sm">
         <caption className="sr-only">Contacts with computed warmth. Select a name to open the timeline.</caption>
         <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
