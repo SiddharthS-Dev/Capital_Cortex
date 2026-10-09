@@ -113,7 +113,7 @@ export function ScenarioBuilder({ draft, setDraft, opps, oppsFromBase, currency,
           {opps.length === 0 ? (
             <p className="text-xs text-muted-foreground">No expected inflows inside the horizon. Qualify opportunities (stage "qualified" or later) with an amount and deadline to see them here.</p>
           ) : (
-            <ul className="max-h-80 min-w-0 space-y-2 overflow-y-auto overflow-x-hidden pr-1">
+            <ul className="relative max-h-80 min-w-0 space-y-2 overflow-y-auto overflow-x-hidden pr-1">
               {opps.map((o) => {
                 const ov = draft.probability_overrides[o.id];
                 const v = ov ?? o.p ?? 0;

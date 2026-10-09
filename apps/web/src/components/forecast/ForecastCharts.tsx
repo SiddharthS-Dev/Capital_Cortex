@@ -23,7 +23,7 @@ export function CashCurve({ data, saved }: { data: RunOut; saved: string[] }) {
         name: scenarioName(r.scenario), type: "line", showSymbol: false, smooth: true, color: scenarioColor(r.scenario, saved),
         lineStyle: { width: r.scenario === "custom" ? 3 : 1.5, type: scenarioDash(r.scenario) },
         data: r.series.map((p) => p.cash_end),
-        markLine: r === res[0] ? { silent: true, symbol: "none", label: { formatter: "zero cash" }, data: [{ yAxis: 0 }] } : undefined,
+        markLine: r === res[0] ? { silent: true, symbol: "none", label: { formatter: "zero cash", position: "insideEndTop" }, data: [{ yAxis: 0 }] } : undefined,
       })),
     };
   }, [res, ccy, saved]);

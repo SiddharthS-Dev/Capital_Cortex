@@ -157,7 +157,7 @@ export function DocumentsTab({ suggestedTags, onAssemble }: Props) {
             <EmptyState title={search || approved || folder ? "No documents match" : "The data room is empty"}
               next={search || approved || folder ? "Clear the search, filter or folder." : canWrite ? "Drag files onto this card or use Upload. New uploads need approval before they can be packaged." : "Ask a team member with upload rights to add documents."} />
           ) : (
-            <div className="overflow-x-auto rounded-md border">
+            <div className="relative overflow-x-auto rounded-md border">
               <table className="w-full text-sm" aria-label="Data room documents">
                 <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
                   <tr>

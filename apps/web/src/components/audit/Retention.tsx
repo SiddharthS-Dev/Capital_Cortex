@@ -197,7 +197,7 @@ export function RetentionSection() {
                 )}
               </div>
               {Object.keys(d!.policies).length === 0 ? <EmptyState title="No retention policies configured" next="Policies are defined in config/retention.yaml." /> : (
-                <div className="overflow-x-auto rounded-md border">
+                <div className="relative overflow-x-auto rounded-md border">
                   <table className="w-full text-sm" aria-label="Retention policies">
                     <thead className="bg-muted/50 text-left text-xs text-muted-foreground"><tr><th className="px-3 py-2">Policy</th><th>Retain</th><th>Warm tier</th><th>Then</th><th>Action</th><th>Immutable</th>{isAdmin && <th><span className="sr-only">Edit</span></th>}</tr></thead>
                     <tbody>{Object.entries(d!.policies).map(([name, p]) => {
@@ -249,7 +249,7 @@ export function RetentionSection() {
               {d!.legal_holds.length === 0 ? (
                 <EmptyState title="No legal holds" next={canHold ? "Place a hold to protect records from retention during litigation or investigation." : "Legal places holds when litigation or an investigation requires it."} />
               ) : (
-                <div className="overflow-x-auto rounded-md border">
+                <div className="relative overflow-x-auto rounded-md border">
                   <table className="w-full text-xs" aria-label="Legal holds">
                     <thead className="bg-muted/50 text-left text-muted-foreground"><tr><th className="px-2 py-1.5">Status</th><th>Target</th><th>Reason</th><th>Placed</th><th>Released</th>{canHold && <th><span className="sr-only">Actions</span></th>}</tr></thead>
                     <tbody>{[...active, ...released].map((h) => (

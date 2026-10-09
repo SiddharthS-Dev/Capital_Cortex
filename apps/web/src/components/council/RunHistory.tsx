@@ -37,7 +37,7 @@ export function RunHistory({ opportunityId, selected, onOpen, onClearFilter, can
           <EmptyState title="No council runs yet"
             next={canRun ? "Pick an opportunity in the composer and run a task; its deliberation streams here." : "Runs started by your team appear here. Your role can view runs but not start them."} />
         ) : (
-          <div className="overflow-x-auto rounded-md border">
+          <div className="relative overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
               <caption className="sr-only">Council runs, newest first. Activate a row to open its deliberation.</caption>
               <thead className="bg-muted/50 text-left text-xs text-muted-foreground">

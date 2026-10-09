@@ -236,7 +236,7 @@ export function OutboxPanel() {
             <EmptyState title={status === ALL ? "The outbox is empty" : `No ${label(status).toLowerCase()} items`}
               next={status === ALL ? "Outbound emails, webhooks and portal exports appear here once they're drafted from an opportunity or an agent recommendation." : "Choose another stage above, or All."} />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="relative overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="text-left text-xs text-muted-foreground">
                   <tr><th scope="col" className="py-2 pr-3">Item</th><th scope="col" className="pr-3">Channel</th><th scope="col" className="pr-3">Recipient</th>

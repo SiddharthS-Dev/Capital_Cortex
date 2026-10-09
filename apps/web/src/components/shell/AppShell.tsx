@@ -60,7 +60,7 @@ export function AppShell() {
   }, [theme]);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded focus:bg-card focus:px-3 focus:py-2">
         Skip to content
       </a>
@@ -69,7 +69,7 @@ export function AppShell() {
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar />
-          <main id="main" className="min-h-0 flex-1 overflow-y-auto p-6">
+          <main id="main" className="relative min-h-0 flex-1 overflow-y-auto p-6">
             <Outlet />
           </main>
         </div>

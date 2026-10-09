@@ -97,7 +97,7 @@ function Body({ id }: { id: string }) {
 
       <section aria-label="Version history">
         <h3 className="mb-2 text-sm font-semibold">Version history</h3>
-        <div className="overflow-x-auto rounded-md border">
+        <div className="relative overflow-x-auto rounded-md border">
           <table className="w-full text-xs" aria-label="Version history">
             <thead className="bg-muted/50 text-left text-muted-foreground"><tr><th className="px-2 py-1.5">Version</th><th>Uploaded</th><th>By</th><th>Size</th><th>SHA-256</th><th>Repository</th><th><span className="sr-only">Download</span></th></tr></thead>
             <tbody>{d.versions.map((v) => (

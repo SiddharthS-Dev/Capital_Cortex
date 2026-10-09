@@ -164,7 +164,7 @@ export function CopilotChat({ session }: { session: ReturnType<typeof useCopilot
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite" aria-busy={session.busy}>
+      <div className="relative flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite" aria-busy={session.busy}>
         {session.turns.length === 0 && (
           <div className="space-y-2 text-sm text-muted-foreground">
             <p>Ask about opportunities, rankings, warm intros, deadlines or runway. Every answer is built from cited records in the Capital Knowledge Graph.</p>

@@ -1,7 +1,7 @@
 import cytoscape, { type Core, type ElementDefinition, type NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { Maximize, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent } from "react";
 import type { GraphData } from "@/lib/types";
 import { chartTheme } from "./EChart";
 
@@ -37,8 +37,12 @@ function cytoTheme() {
 const shorten = (s: string, max = 34) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 const ZOOM_STEP = 1.6;
 
-function layoutOptions(name: Layout): cytoscape.LayoutOptions {
+function layoutOptions(name: Layout, roots?: string[]): cytoscape.LayoutOptions {
   const base = { name, animate: false, padding: 30, fit: true, nodeDimensionsIncludeLabels: true };
+  if (name === "breadthfirst" && roots?.length) {
+    // levels run left → right from the roots (ids, not selectors: a UUID may start with a digit)
+    return { ...base, roots, directed: false, direction: "rightward", spacingFactor: 0.5 } as cytoscape.LayoutOptions;
+  }
   switch (name) {
     case "fcose":
       // packComponents tiles the many small org-centred clusters instead of letting them collide
@@ -55,14 +59,46 @@ function layoutOptions(name: Layout): cytoscape.LayoutOptions {
   }
 }
 
+/** Node positions plus zoom and pan: enough to put a canvas back exactly as it was. */
+export interface CytoSnapshot {
+  positions: Record<string, cytoscape.Position>;
+  zoom: number;
+  pan: cytoscape.Position;
+}
+export interface CytoHandle {
+  snapshot: () => CytoSnapshot | null;
+}
+/** Elements to emphasise: `nodes`/`edges` by domain id, `ends` ringed (path endpoints). */
+export interface CytoHighlight {
+  nodes: string[];
+  edges: string[];
+  ends: string[];
+}
+
 /** Cytoscape canvas. Nodes are keyed by their domain id; clicking one calls onSelect. */
-export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSelect, onExpand }: {
+export const CytoGraph = forwardRef<CytoHandle, {
   data: GraphData; layout?: Layout; height?: number; selected?: string | null;
   onSelect?: (id: string) => void; onExpand?: (id: string) => void;
-}) {
+  /** breadthfirst roots (laid out left → right) */ roots?: string[];
+  /** restore these positions, zoom and pan instead of running the layout */ restore?: CytoSnapshot | null;
+  highlight?: CytoHighlight | null;
+}>(function CytoGraph({ data, layout = "fcose", height = 520, selected, onSelect, onExpand, roots, restore, highlight }, handle) {
   const ref = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
   const [zoom, setZoom] = useState(1);
+  const expandRef = useRef(onExpand);
+  expandRef.current = onExpand;
+  const restored = useRef<CytoSnapshot | null>(null);
+
+  useImperativeHandle(handle, () => ({
+    snapshot: () => {
+      const c = cy.current;
+      if (!c) return null;
+      const positions: Record<string, cytoscape.Position> = {};
+      c.nodes().forEach((n) => { positions[n.id()] = { ...n.position() }; });
+      return { positions, zoom: c.zoom(), pan: { ...c.pan() } };
+    },
+  }), []);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -91,6 +127,10 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
         { selector: "node.hl", style: { "min-zoomed-font-size": 0, "z-index": 10 } },
         { selector: "edge.hl", style: { width: 2, "line-color": t.primary, "target-arrow-color": t.primary, "min-zoomed-font-size": 0, "z-index": 10 } },
         { selector: "node:selected", style: { "border-width": 3, "border-color": t.primary } },
+        // Path view: the highlighted path drawn thick in the primary colour, its endpoints ringed.
+        { selector: "edge.path", style: { width: 4, "line-color": t.primary, "target-arrow-color": t.primary, "min-zoomed-font-size": 0, "z-index": 20 } },
+        { selector: "node.path", style: { "font-size": 11, "min-zoomed-font-size": 0, "z-index": 20 } },
+        { selector: "node.end", style: { "border-width": 4, "border-color": t.primary, "border-style": "double", "font-weight": "bold" } },
       ],
     });
     const c = cy.current;
@@ -105,7 +145,7 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
       else c.elements().removeClass("faded hl");
     };
     c.on("tap", "node", (e) => onSelect?.(e.target.id()));
-    c.on("dbltap", "node", (e) => onExpand?.(e.target.id()));
+    c.on("dbltap", "node", (e) => expandRef.current?.(e.target.id()));
     c.on("mouseover", "node", (e) => focus(e.target));
     c.on("mouseout", "node", unfocus);
     c.on("select unselect", "node", unfocus);
@@ -132,9 +172,29 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
     ];
     c.elements().remove();
     c.add(els);
-    c.layout(layoutOptions(layout)).run();
+    if (restore && restored.current !== restore) {  // each snapshot is applied once
+      restored.current = restore;
+      c.layout({ name: "preset", positions: (n: NodeSingular) => restore.positions[n.id()] ?? { x: 0, y: 0 }, fit: false, animate: false } as cytoscape.LayoutOptions).run();
+      c.viewport({ zoom: restore.zoom, pan: restore.pan });
+    } else {
+      c.layout(layoutOptions(layout, roots)).run();
+    }
     setZoom(c.zoom());
+    // `restore` and `roots` only matter together with a new `data`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, layout]);
+
+  useEffect(() => {
+    const c = cy.current;
+    if (!c) return;
+    c.elements().removeClass("path end");
+    if (!highlight) return;
+    const nodes = new Set(highlight.nodes);
+    const edges = new Set(highlight.edges.map((e) => `e${e}`));
+    c.nodes().filter((n) => nodes.has(n.id())).addClass("path");
+    c.edges().filter((e) => edges.has(e.id())).addClass("path");
+    c.nodes().filter((n) => highlight.ends.includes(n.id())).addClass("end");
+  }, [highlight, data, layout]);
 
   useEffect(() => {
     const c = cy.current;
@@ -174,4 +234,4 @@ export function CytoGraph({ data, layout = "fcose", height = 520, selected, onSe
       </div>
     </div>
   );
-}
+});

@@ -106,7 +106,7 @@ export function UsersTab() {
         {d.items.length === 0 ? (
           <EmptyState title="No users in the realm" next="Create users in Keycloak, then assign platform roles here." />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="relative overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-xs text-muted-foreground">
                 <tr>
