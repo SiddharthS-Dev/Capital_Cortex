@@ -53,8 +53,26 @@ test.describe("Phase 3: Proposal Factory, Data Room, board pack, Copilot, Admin"
 
     // Forecast Studio (full)
     await page.goto("/forecast");
+    const flowCards = page.locator("#main .grid").filter({ has: page.getByText(/Expected inflows by capital class/) }).last();
+    await expect(flowCards).toBeVisible({ timeout: 20_000 });
     await page.waitForTimeout(1500);
-    await page.screenshot({ path: `${SHOTS}/phase3-forecast.png`, fullPage: true });
+    // No blank scroll area below the last card (sr-only labels in a scrolled list once stretched #main to ~22,000 px).
+    const slack = await flowCards.evaluate((el) => {
+      const main = document.querySelector("#main")!;
+      const bottom = el.getBoundingClientRect().bottom - main.getBoundingClientRect().top + main.scrollTop;
+      return main.scrollHeight - bottom;
+    });
+    expect(slack).toBeLessThan(200);
+    // #main scrolls, not the document, so grow the viewport to capture the whole page.
+    const vp = page.viewportSize()!;
+    const full = await page.evaluate(() => {
+      const main = document.querySelector("#main")!;
+      return document.documentElement.clientHeight + main.scrollHeight - main.clientHeight;
+    });
+    await page.setViewportSize({ width: vp.width, height: full });
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${SHOTS}/phase3-forecast.png` });
+    await page.setViewportSize(vp);
 
     // Copilot drawer: grounded Q&A with citations, or an honest refusal
     await page.getByRole("button", { name: "Open Capital Copilot" }).click();

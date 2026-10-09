@@ -63,6 +63,12 @@
   #root {
     height: 100%;
   }
+  /* The app shell scrolls inside <main>; the document itself must never scroll (stray absolutely
+     positioned nodes such as sr-only labels would otherwise stretch it and leave a blank page). */
+  html,
+  body {
+    overflow: hidden;
+  }
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "tnum" 1; /* tabular numbers for dense financial tables */

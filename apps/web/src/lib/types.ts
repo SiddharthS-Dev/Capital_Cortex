@@ -215,6 +215,8 @@ export interface GraphNode {
   id: string;
   label: string;
   properties: Record<string, unknown>;
+  /** incident edges in the whole CKG (both directions), when the endpoint reports it */
+  degree?: number;
 }
 export interface GraphEdge {
   id: string;
@@ -227,6 +229,24 @@ export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];
   rows?: unknown[];
+}
+/** One /v1/graph/paths result: nodes and edges in order from `from` to `to`; `sequence` is the node ids. */
+export interface GraphPath extends GraphData {
+  hops: number;
+  sequence: string[];
+}
+export interface GraphPaths {
+  paths: GraphPath[];
+  count: number;
+  truncated: boolean;
+  max_hops: number;
+}
+/** One /v1/graph/reachable row. */
+export interface ReachableNode {
+  id: string;
+  label: string;
+  title: string;
+  hops: number;
 }
 
 export interface OrgSummary {
