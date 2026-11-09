@@ -1,6 +1,9 @@
 # Capital Cortex — developer entrypoints. On Windows without GNU make: `./make.ps1 <target>`.
 # Compose would look for .env next to the compose file; use the repo-root .env when present.
-COMPOSE := docker compose -f infra/docker-compose.yml $(if $(filter prod,$(CORTEX_PROFILE)),,-f infra/docker-compose.dev.yml) $(if $(wildcard .env),--env-file .env)
+# MySQL 8.4 is the default stack. PostgreSQL is reachable only through the *-postgres targets (rollback window).
+DEV_OVERLAY := $(if $(filter prod,$(CORTEX_PROFILE)),,-f infra/docker-compose.dev.yml)
+COMPOSE := docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml $(DEV_OVERLAY) $(if $(wildcard .env),--env-file .env)
+PG_COMPOSE := docker compose --profile postgres-rollback -f infra/docker-compose.yml $(DEV_OVERLAY) $(if $(wildcard .env),--env-file .env)
 ifeq ($(OS),Windows_NT)
   PY ?= .venv/Scripts/python
 else
@@ -11,7 +14,8 @@ PG_IMAGE := capital-cortex/postgres:16-age1.5.0-pgvector0.8.0
 
 .PHONY: help venv up down clean ps logs build migrate seed purge-demo test test-unit test-integration contract-live \
         test-contract test-e2e test-web opa-test eval load lint fmt typecheck openapi traceability smoke realm ci \
-        backup restore-drill scan
+        backup restore-drill mysql-backup mysql-backup-verify mysql-backup-prune scan \
+        up-postgres down-postgres migrate-postgres backup-postgres restore-drill-postgres load-postgres
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
@@ -20,8 +24,8 @@ venv:  ## create .venv and install backend + dev deps
 	python -m venv .venv && $(PY) -m pip install -U pip && $(PY) -m pip install -e ".[dev]"
 	cd $(WEB) && npm ci
 
-up:  ## build and start the full stack (waits for health)
-	$(COMPOSE) up -d --build --wait postgres redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
+up:  ## build and start the full MySQL 8.4 stack (waits for health)
+	$(COMPOSE) up -d --build --wait mysql redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
 	$(COMPOSE) up -d --build mailpit minio-init migrate api worker web
 	$(PY) scripts/bootstrap_admin.py
 	@echo "UI http://localhost:3300 · API http://localhost:8300/v1/docs · Keycloak http://localhost:8380 · Grafana http://localhost:3301 · Mailpit http://localhost:8383"
@@ -29,7 +33,8 @@ up:  ## build and start the full stack (waits for health)
 down:  ## stop the stack (keeps volumes)
 	$(COMPOSE) down
 
-clean:  ## stop the stack and DELETE its volumes
+clean:  ## stop the stack and DELETE its volumes, including the MySQL data (requires CONFIRM=yes)
+	@test "$(CONFIRM)" = "yes" || { echo "clean deletes the database volumes; re-run with CONFIRM=yes"; exit 1; }
 	$(COMPOSE) down -v
 
 ps:
@@ -41,7 +46,7 @@ logs:  ## follow app logs
 build:  ## build all images
 	$(COMPOSE) build
 
-migrate:  ## apply DB migrations in the stack
+migrate:  ## apply the MySQL migration history in the stack (alembic upgrade head)
 	$(COMPOSE) run --rm migrate
 
 realm:  ## regenerate the dev Keycloak realm export
@@ -58,8 +63,7 @@ test: test-unit opa-test test-web  ## unit + policy + web unit tests (no Docker 
 test-unit:
 	$(PY) -m pytest -q
 
-test-integration:  ## schema/invariant tests on the custom Postgres image (testcontainers)
-	docker build -q -t $(PG_IMAGE) infra/postgres
+test-integration:  ## schema/invariant tests on MySQL 8.4
 	$(PY) -m pytest -q -m integration tests/integration
 
 contract-live:  ## schemathesis, read-only (GET), against the running stack with a real token
@@ -80,15 +84,43 @@ opa-test:  ## Rego unit tests
 eval:  ## eval gates (fails on any gate enforceable in the current phase)
 	$(PY) evals/run.py
 
-load:  ## k6 load test: 1M-node seed in a separate DB + api-load (profile load); thresholds = SLOs (tests/load)
+load:  ## not available on MySQL yet: use scripts/benchmark_mysql_slos.py
+	@echo "The k6 load test seeds PostgreSQL only. For MySQL use scripts/benchmark_mysql_slos.py; for the old stack: make load-postgres"; exit 1
+
+load-postgres:  ## ROLLBACK STACK: k6 load test on PostgreSQL (tests/load)
 	PYTHONUTF8=1 $(PY) scripts/load_test.py
 
-backup:  ## base backup + logical dumps to MinIO cortex-backups with a checksum manifest (RUNBOOK §8)
-	$(COMPOSE) up -d --no-deps wal-shipper
+backup: mysql-backup  ## encrypted MySQL backup (same as mysql-backup)
+
+backup-postgres:  ## ROLLBACK STACK: PostgreSQL base backup + logical dumps to MinIO (RUNBOOK section 8)
+	$(PG_COMPOSE) up -d --no-deps wal-shipper
 	PYTHONUTF8=1 $(PY) scripts/backup.py
 
-restore-drill:  ## restore the latest backup into a scratch server; verify counts + audit chain; RTO/RPO report
+restore-drill:  ## show the MySQL restore-drill command
+	@echo "scripts/backup_mysql.py restore --id <id> --database cortex --target-db cortex_restore_drill --strict"
+
+restore-drill-postgres:  ## ROLLBACK STACK: restore the latest PostgreSQL backup into a scratch server
 	PYTHONUTF8=1 $(PY) scripts/restore_drill.py
+
+# ---- PostgreSQL database only (the source for the ETL). The current application is MySQL-only: a rollback checks out the
+# pinned release f2c447a and uses that release's own `make up` (docs/CORTEX_MYSQL_ROLLBACK_RUNBOOK.md).
+up-postgres:  ## start only the PostgreSQL database (ETL source)
+	$(PG_COMPOSE) up -d --build --wait postgres
+
+down-postgres:  ## ROLLBACK STACK: stop it (keeps volumes)
+	$(PG_COMPOSE) down
+
+migrate-postgres:  ## ROLLBACK STACK: apply the PostgreSQL migration history
+	$(PG_COMPOSE) run --rm migrate
+
+mysql-backup:  ## MySQL 8.4: encrypted mysqldump (cortex, keycloak) to MYSQL_BACKUP_DEST, manifest last, verified
+	PYTHONUTF8=1 $(PY) scripts/backup_mysql.py backup
+
+mysql-backup-verify:  ## re-read the newest MySQL backup: ciphertext + plaintext sha256, every GCM frame
+	PYTHONUTF8=1 $(PY) scripts/backup_mysql.py verify
+
+mysql-backup-prune:  ## retention DRY RUN (MYSQL_BACKUP_KEEP); delete only with: scripts/backup_mysql.py prune --confirm
+	PYTHONUTF8=1 $(PY) scripts/backup_mysql.py prune
 
 scan:  ## trivy (images + dependencies) + ZAP baseline (UI) + ZAP API scan (safe mode); docs/SECURITY_SCAN.md
 	PYTHONUTF8=1 $(PY) scripts/scan.py
