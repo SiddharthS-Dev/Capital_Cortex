@@ -19,6 +19,8 @@ COPY --from=build /install /usr/local
 WORKDIR /app
 COPY alembic.ini ./
 COPY migrations ./migrations
+COPY migrations_mysql ./migrations_mysql
+COPY scripts/schema_mysql.sql ./scripts/schema_mysql.sql
 COPY config ./config
 COPY platform_core ./platform_core
 COPY cortex ./cortex

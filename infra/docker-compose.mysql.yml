@@ -1,0 +1,136 @@
+# Capital Cortex — MySQL 8.4 Community Deployment Stack
+# Replaces PostgreSQL with MySQL 8.4 for production / staging environments.
+# Usage:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml --env-file .env up -d
+#
+# Secrets have no fallback: MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must be set
+# (in .env, never committed, or exported from the secret store), otherwise `docker compose config/up` stops with an
+# error. MYSQL_PASSWORD goes into DATABASE_URL, so use URL-safe characters (letters, digits, - _ . ~).
+# The MySQL port binds to 127.0.0.1 by default (MYSQL_BIND_ADDRESS). For production add
+# infra/docker-compose.mysql-private.yml, which publishes no MySQL port at all.
+
+services:
+  postgres:
+    # Replaced by mysql in this profile
+    image: alpine:latest
+    entrypoint: ["sh", "-c", "echo 'PostgreSQL disabled in MySQL mode' && exit 0"]
+    restart: "no"
+    ports: []
+    healthcheck:
+      disable: true
+
+  wal-shipper:
+    # Replaced by mysql-binlog-shipper in this profile
+    image: alpine:latest
+    entrypoint: ["sh", "-c", "echo 'WAL-shipper disabled in MySQL mode' && exit 0"]
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  mysql:
+    image: mysql:8.4
+    container_name: capital-cortex-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-1G}
+      - --max-connections=${MYSQL_MAX_CONNECTIONS:-200}
+      - --default-time-zone=+00:00
+      - --binlog-expire-logs-seconds=604800
+      - --log-bin=mysql-bin
+      - --server-id=1
+      # With binary logging on, CREATE TRIGGER needs SUPER (error 1419) unless this is set; `migrate` runs as the
+      # app user and the schema has 4 triggers. binlog_format is ROW (8.4 default), so the statement-replication
+      # risk this flag guards against does not apply.
+      - --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD (see .env.example)}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cortex}
+      MYSQL_USER: ${MYSQL_USER:-cortex}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD (see .env.example)}
+    ports:
+      - "${MYSQL_BIND_ADDRESS:-127.0.0.1}:${MYSQL_PORT:-53306}:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+      # Runs once, on first initialisation of mysqldata: creates the keycloak database for KC_DB=mysql.
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # MYSQL_PWD keeps the root password out of the process list (`-p<pw>` is visible in `ps`).
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  mysql-binlog-shipper:
+    image: capital-cortex/minio-init:dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do sleep 2; done
+        mc mb --ignore-existing local/cortex-backups/mysql >/dev/null
+        echo "mysql-binlog-shipper: mirroring /var/lib/mysql binary logs -> cortex-backups/mysql every 60 s"
+        while true; do
+          mc mirror --quiet --exclude "*.ibd" --exclude "*.pid" --exclude "ibdata*" /var/lib/mysql local/cortex-backups/mysql >/dev/null 2>&1 || true
+          sleep 60
+        done
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes:
+      - mysqldata:/var/lib/mysql:ro
+    depends_on:
+      - minio
+      - mysql
+    restart: unless-stopped
+
+  keycloak:
+    environment:
+      KC_DB: mysql
+      KC_DB_URL: jdbc:mysql://mysql:3306/keycloak?characterEncoding=UTF-8&serverTimezone=UTC
+      KC_DB_USERNAME: ${MYSQL_USER:-cortex}
+      KC_DB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD (see .env.example)}
+    # !override replaces the base file's depends_on instead of merging into it: the base waits for
+    # `postgres` to be healthy, which the disabled postgres stub above can never become.
+    depends_on: !override
+      mysql:
+        condition: service_healthy
+
+  migrate:
+    # The base command runs the PostgreSQL history (CREATE EXTENSION ...), which fails on MySQL and
+    # blocks `api` (it waits for migrate to succeed). Use the MySQL schema history instead.
+    command: ["alembic", "-n", "mysql", "upgrade", "head"]
+    environment:
+      DATABASE_URL: mysql+asyncmy://${MYSQL_USER:-cortex}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD (see .env.example)}@mysql:3306/${MYSQL_DATABASE:-cortex}?charset=utf8mb4
+    depends_on: !override   # see keycloak: drop the base dependency on the disabled postgres stub
+      mysql:
+        condition: service_healthy
+
+  api:
+    environment:
+      # Set MYSQL_APP_USER / MYSQL_APP_PASSWORD to run on the DML-only account (infra/mysql/runtime_account.sql).
+      DATABASE_URL: mysql+asyncmy://${MYSQL_APP_USER:-${MYSQL_USER:-cortex}}:${MYSQL_APP_PASSWORD:-${MYSQL_PASSWORD:?set MYSQL_PASSWORD (see .env.example)}}@mysql:3306/${MYSQL_DATABASE:-cortex}?charset=utf8mb4
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+
+  worker:
+    environment:
+      DATABASE_URL: mysql+asyncmy://${MYSQL_APP_USER:-${MYSQL_USER:-cortex}}:${MYSQL_APP_PASSWORD:-${MYSQL_PASSWORD:?set MYSQL_PASSWORD (see .env.example)}}@mysql:3306/${MYSQL_DATABASE:-cortex}?charset=utf8mb4
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysqldata:
+    name: ${MYSQL_DATA_VOLUME:-capital-cortex_mysqldata}
+
