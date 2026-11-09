@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 from cortex.l7_governance import audit_service
 from platform_core.config import get_settings
-from platform_core.db import age, session_scope
+from platform_core.db import age, is_mysql_session, session_scope
 
 # child → parent order so foreign keys never block
 TABLES = [
@@ -62,7 +62,9 @@ async def purge() -> dict[str, int]:
     org = get_settings().org_id
     counts: dict[str, int] = {}
     async with session_scope() as s:
-        await age.cypher(s, "ckg", "MATCH (n) WHERE n.is_demo = true DETACH DELETE n RETURN count(*)")
+        mysql = is_mysql_session(s)
+        if not mysql:
+            await age.cypher(s, "ckg", "MATCH (n) WHERE n.is_demo = true DETACH DELETE n RETURN count(*)")
         # source_run rows of the demo source (source_run of real sources are never is_demo)
         await s.execute(
             text("UPDATE source_run SET is_demo = true WHERE source_id IN (SELECT id FROM source WHERE is_demo)")
@@ -88,8 +90,9 @@ async def purge() -> dict[str, int]:
             await s.execute(text(stmt))
         await s.execute(text("DELETE FROM agent_run WHERE is_demo AND parent_run_id IS NOT NULL"))
         for t in TABLES:
+            tbl = f"`{t}`" if (mysql and t == "signal") else t
             counts[t] = (
-                await s.execute(text(f"DELETE FROM {t} WHERE org_id = :org AND is_demo"), {"org": org})
+                await s.execute(text(f"DELETE FROM {tbl} WHERE org_id = :org AND is_demo"), {"org": org})
             ).rowcount
         await audit_service.record(s, "system:purge-demo", "demo.purge", "database:*", {"deleted": counts})
     return counts
