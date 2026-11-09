@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import operator
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Annotated, Any, TypedDict
@@ -37,7 +38,8 @@ from cortex.l7_governance.drafts import create_draft
 from cortex.l7_governance.refs import DBRefResolver
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import session_scope
+from platform_core.db import in_clause, is_mysql_session, order_by_nulls, session_scope
+from platform_core.jsonutil import json_obj
 from platform_core.llm import BudgetExceeded, LLMRequest, get_router
 from platform_core.llm.safety import UNTRUSTED_PREAMBLE, wrap_untrusted
 from platform_core.signing import content_hash
@@ -45,6 +47,13 @@ from platform_core.signing import content_hash
 log = logging.getLogger(__name__)
 STANCES = ("pursue", "watch", "pass")
 EMAIL_CONSENT = ("consent", "legitimate_interest", "contract", "public_professional", "manual_entry")
+
+
+def merge_run_output(old: Any, new_json: str) -> str:
+    """PostgreSQL ``output || new`` for MySQL: a *shallow* top-level merge in which the new value wins and keys whose
+    new value is null are kept (JSON_MERGE_PATCH would delete them and would merge nested objects recursively).
+    ``old`` is the stored column value (JSON text on MySQL, decoded on PostgreSQL, or NULL)."""
+    return json.dumps({**(json_obj(old, {}) or {}), **json.loads(new_json)})
 
 
 class CouncilState(TypedDict, total=False):
@@ -197,15 +206,27 @@ async def _outbound_draft(
     me = await self_profile(s)
     contact = None
     if opp.get("counterparty_id"):
+        if is_mysql_session(s):
+            cb_clause, cb_params = in_clause("c.consent_basis", list(EMAIL_CONSENT), prefix="cb")
+            order_clause = order_by_nulls("r.strength", "DESC", nulls_first=False)
+            sql = (
+                "SELECT c.id, c.name, c.emails->>'$[0]' AS email, r.last_touch_at FROM contact c LEFT JOIN relationship r "
+                f"ON r.from_id = c.id AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
+                f"AND JSON_LENGTH(c.emails) > 0 AND {cb_clause} ORDER BY {order_clause} LIMIT 1"
+            )
+            params = {"cp": opp["counterparty_id"], **cb_params}
+        else:
+            sql = (
+                "SELECT c.id, c.name, c.emails[1] AS email, r.last_touch_at FROM contact c LEFT JOIN relationship r "
+                "ON r.from_id = c.id AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
+                "AND cardinality(c.emails) > 0 AND c.consent_basis = ANY(:cb) ORDER BY r.strength DESC NULLS LAST LIMIT 1"
+            )
+            params = {"cp": opp["counterparty_id"], "cb": list(EMAIL_CONSENT)}
         contact = (
             (
                 await s.execute(
-                    text(
-                        "SELECT c.id, c.name, c.emails[1] AS email, r.last_touch_at FROM contact c LEFT JOIN relationship r "
-                        "ON r.from_id = c.id AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
-                        "AND cardinality(c.emails) > 0 AND c.consent_basis = ANY(:cb) ORDER BY r.strength DESC NULLS LAST LIMIT 1"
-                    ),
-                    {"cp": opp["counterparty_id"], "cb": list(EMAIL_CONSENT)},
+                    text(sql),
+                    params,
                 )
             )
             .mappings()
@@ -283,12 +304,20 @@ def build_graph(principal: Principal, governor: ConcurrencyGovernor):
         tally_ref = f"tool:{run_id}:tally"
         meta: dict[str, Any] = {"mode": "deterministic"}
         async with session_scope() as s:
-            await s.execute(
-                text(
-                    "UPDATE agent_run SET output = jsonb_set(coalesce(output, '{}'::jsonb), '{evidence_pack}', CAST(:p AS jsonb)) WHERE id = :id"
-                ),
-                {"p": json.dumps({"tally": t}), "id": run_id},
-            )
+            if is_mysql_session(s):
+                await s.execute(
+                    text(
+                        "UPDATE agent_run SET output = JSON_SET(COALESCE(output, JSON_OBJECT()), '$.evidence_pack', CAST(:p AS JSON)) WHERE id = :id"
+                    ),
+                    {"p": json.dumps({"tally": t}), "id": run_id},
+                )
+            else:
+                await s.execute(
+                    text(
+                        "UPDATE agent_run SET output = jsonb_set(coalesce(output, '{}'::jsonb), '{evidence_pack}', CAST(:p AS jsonb)) WHERE id = :id"
+                    ),
+                    {"p": json.dumps({"tally": t}), "id": run_id},
+                )
         async with session_scope() as s:
             resolver = DBRefResolver(s, principal, {f"{run_id}:tally": t})
             opp = await load_opportunity(s, state["opportunity_id"])
@@ -335,24 +364,42 @@ def build_graph(principal: Principal, governor: ConcurrencyGovernor):
         async with session_scope() as s:
             opp = await load_opportunity(s, state["opportunity_id"])
             assert opp is not None
-            inference_id = str(
-                (
-                    await s.execute(
-                        text(
-                            "INSERT INTO inference (org_id, method, produced_by, basis_refs, confidence, detail, is_demo) VALUES "
-                            "(:org, 'council.convergence', :by, CAST(:refs AS jsonb), :c, CAST(:d AS jsonb), :demo) RETURNING id"
-                        ),
-                        {
-                            "org": get_settings().org_id,
-                            "by": f"agent_run:{run_id}",
-                            "refs": json.dumps(refs),
-                            "c": t["confidence"],
-                            "d": json.dumps({"tally": t}),
-                            "demo": bool(opp.get("is_demo")),
-                        },
-                    )
-                ).scalar_one()
-            )
+            if is_mysql_session(s):
+                inference_id = str(uuid.uuid4())
+                await s.execute(
+                    text(
+                        "INSERT INTO inference (id, org_id, method, produced_by, basis_refs, confidence, detail, is_demo) VALUES "
+                        "(:id, :org, 'council.convergence', :by, CAST(:refs AS JSON), :c, CAST(:d AS JSON), :demo)"
+                    ),
+                    {
+                        "id": inference_id,
+                        "org": get_settings().org_id,
+                        "by": f"agent_run:{run_id}",
+                        "refs": json.dumps(refs),
+                        "c": t["confidence"],
+                        "d": json.dumps({"tally": t}),
+                        "demo": bool(opp.get("is_demo")),
+                    },
+                )
+            else:
+                inference_id = str(
+                    (
+                        await s.execute(
+                            text(
+                                "INSERT INTO inference (org_id, method, produced_by, basis_refs, confidence, detail, is_demo) VALUES "
+                                "(:org, 'council.convergence', :by, CAST(:refs AS jsonb), :c, CAST(:d AS jsonb), :demo) RETURNING id"
+                            ),
+                            {
+                                "org": get_settings().org_id,
+                                "by": f"agent_run:{run_id}",
+                                "refs": json.dumps(refs),
+                                "c": t["confidence"],
+                                "d": json.dumps({"tally": t}),
+                                "demo": bool(opp.get("is_demo")),
+                            },
+                        )
+                    ).scalar_one()
+                )
             text_ = " ".join(c["text"] for c in passed[:5])
             rec = {
                 "text": text_,
@@ -366,24 +413,53 @@ def build_graph(principal: Principal, governor: ConcurrencyGovernor):
                 "positions": [{k: p.get(k) for k in ("agent", "title", "stance", "confidence", "mode", "tier", "status", "claims", "gaps", "blockers", "support", "run_id")} for p in positions],
                 "trail": ["plan", "fan-out", "converge", "citation_check", "policy", "approval_queue"],
             }  # fmt: skip
-            rec_id = str(
-                (
-                    await s.execute(
-                        text(
-                            "INSERT INTO recommendation (org_id, opportunity_id, agent_run_id, text, confidence, evidence, reasoning, "
-                            "status, stance, method, claims, gaps, citation_report, content_hash, inference_id, is_demo) VALUES (:org, :opp, "
-                            ":run, :t, :c, CAST(:ev AS jsonb), CAST(:rs AS jsonb), 'proposed', :st, :m, CAST(:cl AS jsonb), CAST(:g AS jsonb), "
-                            "CAST(:cr AS jsonb), :h, :inf, :demo) RETURNING id"
-                        ),
-                        {
-                            "org": get_settings().org_id, "opp": opp["id"], "run": run_id, "t": text_, "c": t["confidence"],
-                            "ev": json.dumps(rec["evidence"]), "rs": json.dumps(reasoning, default=str), "st": t["stance"],
-                            "m": cit["meta"]["mode"], "cl": json.dumps(passed), "g": json.dumps(gaps), "cr": json.dumps(report),
-                            "h": content_hash(recommendation_content(rec)), "inf": inference_id, "demo": bool(opp.get("is_demo")),
-                        },
-                    )
-                ).scalar_one()
-            )  # fmt: skip
+            if is_mysql_session(s):
+                rec_id = str(uuid.uuid4())
+                await s.execute(
+                    text(
+                        "INSERT INTO recommendation (id, org_id, opportunity_id, agent_run_id, text, confidence, evidence, reasoning, "
+                        "status, stance, method, claims, gaps, citation_report, content_hash, inference_id, is_demo) VALUES (:id, :org, :opp, "
+                        ":run, :t, :c, CAST(:ev AS JSON), CAST(:rs AS JSON), 'proposed', :st, :m, CAST(:cl AS JSON), CAST(:g AS JSON), "
+                        "CAST(:cr AS JSON), :h, :inf, :demo)"
+                    ),
+                    {
+                        "id": rec_id,
+                        "org": get_settings().org_id,
+                        "opp": opp["id"],
+                        "run": run_id,
+                        "t": text_,
+                        "c": t["confidence"],
+                        "ev": json.dumps(rec["evidence"]),
+                        "rs": json.dumps(reasoning, default=str),
+                        "st": t["stance"],
+                        "m": cit["meta"]["mode"],
+                        "cl": json.dumps(passed),
+                        "g": json.dumps(gaps),
+                        "cr": json.dumps(report),
+                        "h": content_hash(recommendation_content(rec)),
+                        "inf": inference_id,
+                        "demo": bool(opp.get("is_demo")),
+                    },
+                )
+            else:
+                rec_id = str(
+                    (
+                        await s.execute(
+                            text(
+                                "INSERT INTO recommendation (org_id, opportunity_id, agent_run_id, text, confidence, evidence, reasoning, "
+                                "status, stance, method, claims, gaps, citation_report, content_hash, inference_id, is_demo) VALUES (:org, :opp, "
+                                ":run, :t, :c, CAST(:ev AS jsonb), CAST(:rs AS jsonb), 'proposed', :st, :m, CAST(:cl AS jsonb), CAST(:g AS jsonb), "
+                                "CAST(:cr AS jsonb), :h, :inf, :demo) RETURNING id"
+                            ),
+                            {
+                                "org": get_settings().org_id, "opp": opp["id"], "run": run_id, "t": text_, "c": t["confidence"],
+                                "ev": json.dumps(rec["evidence"]), "rs": json.dumps(reasoning, default=str), "st": t["stance"],
+                                "m": cit["meta"]["mode"], "cl": json.dumps(passed), "g": json.dumps(gaps), "cr": json.dumps(report),
+                                "h": content_hash(recommendation_content(rec)), "inf": inference_id, "demo": bool(opp.get("is_demo")),
+                            },
+                        )
+                    ).scalar_one()
+                )  # fmt: skip
             await audit_service.record(
                 s,
                 principal,
@@ -424,11 +500,11 @@ def build_graph(principal: Principal, governor: ConcurrencyGovernor):
 async def run_council(run_id: str, principal: Principal) -> dict[str, Any]:
     """Executes a queued council run (called by the worker under the requester's verified token)."""
     async with session_scope() as s:
-        r = (
-            (await s.execute(text("SELECT * FROM agent_run WHERE id = CAST(:id AS uuid) FOR UPDATE"), {"id": run_id}))
-            .mappings()
-            .first()
-        )
+        if is_mysql_session(s):
+            select_sql = "SELECT * FROM agent_run WHERE id = :id FOR UPDATE"
+        else:
+            select_sql = "SELECT * FROM agent_run WHERE id = CAST(:id AS uuid) FOR UPDATE"
+        r = (await s.execute(text(select_sql), {"id": run_id})).mappings().first()
         if r is None:
             raise ValueError("run not found")
         if r["status"] != "queued":  # a redelivered job never re-runs a council
@@ -436,7 +512,9 @@ async def run_council(run_id: str, principal: Principal) -> dict[str, Any]:
         await s.execute(
             text("UPDATE agent_run SET status = 'running', started_at = now() WHERE id = :id"), {"id": run_id}
         )
-        inp = dict(r["input"] or {})
+        inp_raw = r["input"]
+        inp = json.loads(inp_raw) if isinstance(inp_raw, str) else dict(inp_raw or {})
+
     governor = ConcurrencyGovernor(
         max_parallel=int(get_settings().agent_max_parallel),
         run_budget_tokens=inp.get("budget_tokens"),
@@ -467,16 +545,34 @@ async def run_council(run_id: str, principal: Principal) -> dict[str, Any]:
     }  # fmt: skip
     meta = ((final.get("citation") or {}).get("meta") or {}) if final else {}
     async with session_scope() as s:
-        await s.execute(
-            text(
+        if is_mysql_session(s):
+            update_sql = (
+                "UPDATE agent_run SET status = :st, finished_at = now(), error = :e, incomplete = :inc, "
+                "tokens_in = :ti + COALESCE((SELECT sum(c.tokens_in) FROM (SELECT tokens_in, parent_run_id FROM agent_run) c WHERE c.parent_run_id = :id), 0), "
+                "tokens_out = :to + COALESCE((SELECT sum(c.tokens_out) FROM (SELECT tokens_out, parent_run_id FROM agent_run) c WHERE c.parent_run_id = :id), 0), "
+                "cost_usd = :c + COALESCE((SELECT sum(c.cost_usd) FROM (SELECT cost_usd, parent_run_id FROM agent_run) c WHERE c.parent_run_id = :id), 0), "
+                "mode = :mode, output = CAST(:out AS JSON) WHERE id = :id"
+            )
+        else:
+            update_sql = (
                 "UPDATE agent_run SET status = :st, finished_at = now(), error = :e, incomplete = :inc, "
                 "tokens_in = :ti + COALESCE((SELECT sum(tokens_in) FROM agent_run c WHERE c.parent_run_id = agent_run.id), 0), "
                 "tokens_out = :to + COALESCE((SELECT sum(tokens_out) FROM agent_run c WHERE c.parent_run_id = agent_run.id), 0), "
                 "cost_usd = :c + COALESCE((SELECT sum(cost_usd) FROM agent_run c WHERE c.parent_run_id = agent_run.id), 0), "
                 "mode = :mode, output = coalesce(output, '{}'::jsonb) || CAST(:out AS jsonb) WHERE id = :id"
-            ),
+            )
+        out_json = json.dumps(summary, default=str)
+        if is_mysql_session(s):
+            # jsonb `||` is a shallow merge that keeps null values; JSON_MERGE_PATCH (RFC 7396) deletes keys whose new
+            # value is null and merges nested objects. Merge here, under the row lock, with PostgreSQL's semantics.
+            old = (
+                await s.execute(text("SELECT output FROM agent_run WHERE id = :id FOR UPDATE"), {"id": run_id})
+            ).scalar()
+            out_json = merge_run_output(old, out_json)
+        await s.execute(
+            text(update_sql),
             {"st": status, "e": err, "inc": status == "partial", "ti": meta.get("tokens_in", 0), "to": meta.get("tokens_out", 0),
-             "c": meta.get("cost_usd", 0.0), "mode": meta.get("mode", "deterministic"), "out": json.dumps(summary, default=str), "id": run_id},
+             "c": meta.get("cost_usd", 0.0), "mode": meta.get("mode", "deterministic"), "out": out_json, "id": run_id},
         )  # fmt: skip
         await audit_service.record(
             s,
