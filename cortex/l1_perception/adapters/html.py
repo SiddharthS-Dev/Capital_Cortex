@@ -1,8 +1,12 @@
 """HTML adapter (robots-aware): CSS selectors over listing pages → opportunity signals.
 
 ``request.selectors``: ``{item: "<css for one listing>", fields: {name: "<css>" | "<css>@attr"}}``. Every
-fetch goes through FetchContext, so robots.txt and the rate limit apply (R11). Pages that need JavaScript can
-set ``request.render: playwright``, which needs the optional Playwright runtime in the image.
+fetch goes through FetchContext, so robots.txt, the rate limit and the SSRF guard apply (R11). Pages that need
+JavaScript can set ``request.render: playwright``, which needs the optional Playwright runtime in the image.
+
+Pagination is configuration: ``request.next: "<css>@href"`` follows the listing's next-page link, up to
+``request.max_pages`` pages per start URL (default 1). A 404 on a page after the first ends that listing
+(sites answer past-the-end pages that way) instead of failing the run.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
+import httpx
 from bs4 import BeautifulSoup
 
 from cortex.l1_perception.adapters.base import FetchContext, register
@@ -41,6 +46,16 @@ def extract(html: str, base_url: str, selectors: dict[str, Any]) -> list[dict[st
         if len(rec) > 1:
             out.append(rec)
     return out
+
+
+def next_page(html: str, base_url: str, spec: str | None) -> str | None:
+    """The absolute URL of the next listing page named by ``spec`` ("<css>@attr"), or None."""
+    if not spec:
+        return None
+    css, _, attr = spec.partition("@")
+    el = BeautifulSoup(html, "html.parser").select_one(css)
+    val = el.get(attr or "href") if el is not None else None
+    return urljoin(base_url, str(val)) if val else None
 
 
 async def _render(ctx: FetchContext, url: str) -> tuple[str, str]:
@@ -74,18 +89,31 @@ class HTMLAdapter:
         if not selectors or "item" not in selectors:
             raise ValueError("html source needs request.selectors.item")
         render = req.get("render") == "playwright"
+        max_pages = max(1, int(req.get("max_pages", 1)))
         n = 0
-        for url in cfg.urls:
-            if render:
-                page_html, final_url = await _render(ctx, url)
-            else:
-                r = await ctx.request("GET", url)  # robots.txt + rate limit
-                page_html, final_url = r.text, str(r.url)
-            for rec in extract(page_html, final_url, selectors):
-                if n >= ctx.max_items:
-                    return
-                n += 1
-                yield RawItem(payload=rec, url=rec.get("url") or url, fetched_at=datetime.now(UTC))
+        for start in cfg.urls:
+            url: str | None = start
+            visited: set[str] = set()
+            for page_no in range(max_pages):
+                if url is None or url in visited:
+                    break
+                visited.add(url)
+                if render:
+                    page_html, final_url = await _render(ctx, url)
+                else:
+                    try:
+                        r = await ctx.request("GET", url)  # robots.txt + rate limit + SSRF guard
+                    except httpx.HTTPStatusError as e:
+                        if page_no > 0 and e.response.status_code == 404:
+                            break  # past the last page
+                        raise
+                    page_html, final_url = r.text, str(r.url)
+                for rec in extract(page_html, final_url, selectors):
+                    if n >= ctx.max_items:
+                        return
+                    n += 1
+                    yield RawItem(payload=rec, url=rec.get("url") or url, fetched_at=datetime.now(UTC))
+                url = next_page(page_html, final_url, req.get("next"))
 
 
 register(HTMLAdapter())
