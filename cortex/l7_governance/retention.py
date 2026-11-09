@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,7 +21,9 @@ from cortex.l7_governance import audit_service
 from platform_core import objectstore
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db import in_clause, is_mysql_session
 from platform_core.errors import NotFound, Problem
+from platform_core.jsonutil import json_obj
 
 COLD_BUCKET = "cortex-cold"
 HOLDABLE = {"document", "proposal", "signal", "meeting", "interaction", "outbox", "agent_run", "opportunity"}
@@ -47,7 +50,7 @@ def policies(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return base
 
 
-def _held_sql(table: str, alias: str = "t") -> str:
+def _held_sql(table: str, alias: str = "t", mysql: bool = False) -> str:
     """SQL predicate: this row is under legal hold (row, table-wide, or via its opportunity)."""
     opp_col = {"proposal": "opportunity_id", "document": "opportunity_id", "meeting": "opportunity_id",
                "interaction": "opportunity_id", "outbox": "opportunity_id", "agent_run": "opportunity_id"}.get(table)  # fmt: skip
@@ -56,9 +59,14 @@ def _held_sql(table: str, alias: str = "t") -> str:
         f"AND (h.target_id IS NULL OR h.target_id = {alias}.id))"
     ]
     if opp_col:
-        parts.append(
-            f"EXISTS (SELECT 1 FROM legal_hold h WHERE h.released_at IS NULL AND h.scope ->> 'opportunity_id' = {alias}.{opp_col}::text)"
-        )
+        if mysql:
+            parts.append(
+                f"EXISTS (SELECT 1 FROM legal_hold h WHERE h.released_at IS NULL AND h.scope ->> '$.opportunity_id' = {alias}.{opp_col})"
+            )
+        else:
+            parts.append(
+                f"EXISTS (SELECT 1 FROM legal_hold h WHERE h.released_at IS NULL AND h.scope ->> 'opportunity_id' = {alias}.{opp_col}::text)"
+            )
     if table in ("document", "proposal", "signal", "meeting"):
         parts.append(f"{alias}.legal_hold")
     return "(" + " OR ".join(parts) + ")"
@@ -75,10 +83,11 @@ async def _log(
     held: int,
     detail: dict[str, Any],
 ) -> None:
+    cast_type = "JSON" if is_mysql_session(s) else "jsonb"
     await s.execute(
         text(
-            "INSERT INTO retention_run (org_id, policy, target_table, action, dry_run, rows_affected, rows_held, detail, run_by) "
-            "VALUES (:org, :p, :t, :a, :d, :n, :h, CAST(:det AS jsonb), :by)"
+            f"INSERT INTO retention_run (org_id, policy, target_table, action, dry_run, rows_affected, rows_held, detail, run_by) "
+            f"VALUES (:org, :p, :t, :a, :d, :n, :h, CAST(:det AS {cast_type}), :by)"
         ),
         {
             "org": get_settings().org_id,
@@ -100,6 +109,7 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
     who = actor if isinstance(actor, str) else f"user:{actor.sub}"
     pol = policies(overrides)
     org = get_settings().org_id
+    mysql = is_mysql_session(s)
     results: list[dict[str, Any]] = []
 
     async def count(sql: str, p: dict[str, Any]) -> int:
@@ -107,16 +117,19 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
 
     # signals: warm for N, then raw payload moves to the cold tier (row + provenance stay)
     cutoff = now - duration(pol["signal"]["warm"])
-    base = "signal t WHERE t.org_id = :org AND t.ingested_at < :c AND t.raw IS NOT NULL"
-    held = await count(f"{base} AND {_held_sql('signal')}", {"org": org, "c": cutoff})
-    ids = (await s.execute(text(f"SELECT t.id, t.raw FROM {base} AND NOT {_held_sql('signal')} LIMIT :n"),
+    sig_table = "`signal`" if mysql else "signal"
+    base = f"{sig_table} t WHERE t.org_id = :org AND t.ingested_at < :c AND t.raw IS NOT NULL"
+    held = await count(f"{base} AND {_held_sql('signal', mysql=mysql)}", {"org": org, "c": cutoff})
+    ids = (await s.execute(text(f"SELECT t.id, t.raw FROM {base} AND NOT {_held_sql('signal', mysql=mysql)} LIMIT :n"),
                            {"org": org, "c": cutoff, "n": batch})).all()  # fmt: skip
     if not dry_run:
         for r in ids:
             key = f"signals/{r.id}.json"
-            await objectstore.put_bytes(COLD_BUCKET, key, json.dumps(r.raw, default=str).encode(), "application/json")
+            await objectstore.put_bytes(
+                COLD_BUCKET, key, json.dumps(json_obj(r.raw), default=str).encode(), "application/json"
+            )
             await s.execute(
-                text("UPDATE signal SET raw = NULL, raw_key = :k WHERE id = :id"),
+                text(f"UPDATE {sig_table} SET raw = NULL, raw_key = :k WHERE id = :id"),
                 {"k": f"s3://{COLD_BUCKET}/{key}", "id": r.id},
             )
     results.append({"policy": "signal", "table": "signal", "action": "to_cold", "rows": len(ids), "held": held})
@@ -142,11 +155,11 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
     cutoff = now - duration(pol["proposal_draft"]["retain"])
     base = ("proposal t WHERE t.org_id = :org AND t.status = 'draft' AND t.updated_at < :c AND NOT EXISTS (SELECT 1 FROM approval a "
             "WHERE a.subject_type = 'proposal' AND a.subject_id = t.id AND a.decision = 'approved')")  # fmt: skip
-    held = await count(f"{base} AND {_held_sql('proposal')}", {"org": org, "c": cutoff})
+    held = await count(f"{base} AND {_held_sql('proposal', mysql=mysql)}", {"org": org, "c": cutoff})
     ids = (
         (
             await s.execute(
-                text(f"SELECT t.id FROM {base} AND NOT {_held_sql('proposal')} LIMIT :n"),
+                text(f"SELECT t.id FROM {base} AND NOT {_held_sql('proposal', mysql=mysql)} LIMIT :n"),
                 {"org": org, "c": cutoff, "n": batch},
             )
         )
@@ -154,9 +167,17 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
         .all()
     )
     if not dry_run and ids:
-        for tbl in ("proposal_export", "proposal_version"):
-            await s.execute(text(f"DELETE FROM {tbl} WHERE proposal_id = ANY(:ids)"), {"ids": list(ids)})
-        await s.execute(text("DELETE FROM proposal WHERE id = ANY(:ids)"), {"ids": list(ids)})
+        id_list = list(ids)
+        if mysql:
+            in_clause_p, in_params_p = in_clause("proposal_id", id_list, prefix="p")
+            in_clause_id, in_params_id = in_clause("id", id_list, prefix="pid")
+            for tbl in ("proposal_export", "proposal_version"):
+                await s.execute(text(f"DELETE FROM {tbl} WHERE {in_clause_p}"), in_params_p)
+            await s.execute(text(f"DELETE FROM proposal WHERE {in_clause_id}"), in_params_id)
+        else:
+            for tbl in ("proposal_export", "proposal_version"):
+                await s.execute(text(f"DELETE FROM {tbl} WHERE proposal_id = ANY(:ids)"), {"ids": id_list})
+            await s.execute(text("DELETE FROM proposal WHERE id = ANY(:ids)"), {"ids": id_list})
     results.append(
         {"policy": "proposal_draft", "table": "proposal", "action": "delete", "rows": len(ids), "held": held}
     )
@@ -166,11 +187,11 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
     base = ("agent_run t WHERE t.org_id = :org AND t.created_at < :c AND NOT EXISTS (SELECT 1 FROM recommendation r WHERE r.agent_run_id = t.id "
             "OR r.agent_run_id = t.parent_run_id) AND NOT EXISTS (SELECT 1 FROM proposal p WHERE p.agent_run_id = t.id) "
             "AND NOT EXISTS (SELECT 1 FROM agent_run c WHERE c.parent_run_id = t.id)")  # fmt: skip
-    held = await count(f"{base} AND {_held_sql('agent_run')}", {"org": org, "c": cutoff})
+    held = await count(f"{base} AND {_held_sql('agent_run', mysql=mysql)}", {"org": org, "c": cutoff})
     ids = (
         (
             await s.execute(
-                text(f"SELECT t.id FROM {base} AND NOT {_held_sql('agent_run')} LIMIT :n"),
+                text(f"SELECT t.id FROM {base} AND NOT {_held_sql('agent_run', mysql=mysql)} LIMIT :n"),
                 {"org": org, "c": cutoff, "n": batch},
             )
         )
@@ -178,7 +199,12 @@ async def run(s: AsyncSession, actor: Principal | str, *, dry_run: bool = True, 
         .all()
     )
     if not dry_run and ids:
-        await s.execute(text("DELETE FROM agent_run WHERE id = ANY(:ids)"), {"ids": list(ids)})
+        id_list = list(ids)
+        if mysql:
+            in_clause_ar, in_params_ar = in_clause("id", id_list, prefix="arid")
+            await s.execute(text(f"DELETE FROM agent_run WHERE {in_clause_ar}"), in_params_ar)
+        else:
+            await s.execute(text("DELETE FROM agent_run WHERE id = ANY(:ids)"), {"ids": id_list})
     results.append({"policy": "agent_run", "table": "agent_run", "action": "delete", "rows": len(ids), "held": held})
 
     # TTL-managed tiers and the immutable audit log: reported, never touched here
@@ -237,20 +263,52 @@ async def place_hold(
         if not target_id:
             raise Problem(422, "Opportunity required", "an opportunity hold needs its id", "validation")
         scope = {**scope, "opportunity_id": target_id}
-    hid = str(
-        (
-            await s.execute(
-                text("INSERT INTO legal_hold (org_id, target_table, target_id, scope, reason, created_by) VALUES "
-                     "(:org, :t, :id, CAST(:sc AS jsonb), :r, :by) RETURNING id"),
-                {"org": get_settings().org_id, "t": target_table, "id": target_id if target_table != "opportunity" else None,
-                 "sc": json.dumps(scope), "r": reason, "by": actor.sub},
-            )
-        ).scalar_one()
-    )  # fmt: skip
-    if target_table in ("document", "proposal", "signal", "meeting") and target_id:
+    mysql = is_mysql_session(s)
+    target_id_val = target_id if target_table != "opportunity" else None
+    if mysql:
+        hid = str(uuid.uuid4())
         await s.execute(
-            text(f"UPDATE {target_table} SET legal_hold = true WHERE id = CAST(:id AS uuid)"), {"id": target_id}
+            text(
+                "INSERT INTO legal_hold (id, org_id, target_table, target_id, scope, reason, created_by) VALUES "
+                "(:id, :org, :t, :target_id, CAST(:sc AS JSON), :r, :by)"
+            ),
+            {
+                "id": hid,
+                "org": get_settings().org_id,
+                "t": target_table,
+                "target_id": target_id_val,
+                "sc": json.dumps(scope),
+                "r": reason,
+                "by": actor.sub,
+            },
         )
+    else:
+        hid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO legal_hold (org_id, target_table, target_id, scope, reason, created_by) VALUES "
+                        "(:org, :t, :id, CAST(:sc AS jsonb), :r, :by) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "t": target_table,
+                        "id": target_id_val,
+                        "sc": json.dumps(scope),
+                        "r": reason,
+                        "by": actor.sub,
+                    },
+                )
+            ).scalar_one()
+        )
+    if target_table in ("document", "proposal", "signal", "meeting") and target_id:
+        tbl_name = f"`{target_table}`" if (mysql and target_table == "signal") else target_table
+        upd_sql = (
+            f"UPDATE {tbl_name} SET legal_hold = true WHERE id = :id"
+            if mysql
+            else f"UPDATE {target_table} SET legal_hold = true WHERE id = CAST(:id AS uuid)"
+        )
+        await s.execute(text(upd_sql), {"id": target_id})
     await audit_service.record(
         s,
         actor,
@@ -262,10 +320,16 @@ async def place_hold(
 
 
 async def release_hold(s: AsyncSession, actor: Principal, hid: str, reason: str) -> dict[str, Any]:
+    mysql = is_mysql_session(s)
+    sel_sql = (
+        "SELECT * FROM legal_hold WHERE id = :id AND released_at IS NULL FOR UPDATE"
+        if mysql
+        else "SELECT * FROM legal_hold WHERE id = CAST(:id AS uuid) AND released_at IS NULL FOR UPDATE"
+    )
     h = (
         (
             await s.execute(
-                text("SELECT * FROM legal_hold WHERE id = CAST(:id AS uuid) AND released_at IS NULL FOR UPDATE"),
+                text(sel_sql),
                 {"id": hid},
             )
         )
@@ -286,8 +350,7 @@ async def release_hold(s: AsyncSession, actor: Principal, hid: str, reason: str)
             )
         ).scalar()
         if not other:
-            await s.execute(
-                text(f"UPDATE {h['target_table']} SET legal_hold = false WHERE id = :id"), {"id": h["target_id"]}
-            )
+            tbl_name = f"`{h['target_table']}`" if (mysql and h["target_table"] == "signal") else h["target_table"]
+            await s.execute(text(f"UPDATE {tbl_name} SET legal_hold = false WHERE id = :id"), {"id": h["target_id"]})
     await audit_service.record(s, actor, "legal_hold.released", f"legal_hold:{hid}", {"reason": reason})
     return {"id": hid, "released": True}
