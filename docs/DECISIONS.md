@@ -64,7 +64,9 @@ should validate against the SyRS/HLD/LLD source documents, which are not in this
 - **D-013 · Dev-only credentials.** `infra/keycloak/generate_realm.py` holds dev passwords, client secrets and
   a pre-seeded TOTP secret for `smoke-auditor`, so `make smoke`/E2E can do a real MFA login unattended. They
   are allow-listed in `.gitleaks.toml`. Production realms are provisioned with secrets from Vault and without
-  these users (RUNBOOK §Identity).
+  these users (RUNBOOK §Identity). **Superseded (SEC-1/SEC-2, 2026-11-03):** the repository is public, so no
+  credential is committed any more. The realm carries `${VAR}` placeholders resolved from `.env` at import, the
+  TOTP seed is supplied only when generating a smoke/E2E realm, and the gitleaks allow-list is removed.
 - **D-016 · Worker authn.** Bus envelopes carry the actor's JWT. Workers re-verify it and re-check RBAC + OPA
   per job (I4). Authn/authz failures are permanent and go straight to the DLQ. Long-running jobs (Phase 1+)
   will use the worker's client-credentials token plus an `on_behalf_of` claim, because user tokens expire
@@ -114,6 +116,9 @@ should validate against the SyRS/HLD/LLD source documents, which are not in this
   EU Funding & Tenders and a generic RSS template ship disabled until their current terms are verified (R11).
   The Radar, Command Center and graph show real, sourced records by default. The synthetic demo dataset is
   opt-in (`make seed`) and removable (`make purge-demo`).
+  **Update (2026-11-09):** the EU Funding & Tenders, UKRI and NSF configurations are complete but ship
+  `enabled: false`: no live crawling from them until each source's terms are verified. Enabling one is a separate,
+  per-source decision. Grants.gov is unchanged.
 - **D-035 · Source defaults are declared, never silent.** A value a source always implies (Grants.gov →
   currency USD, eligible country US, counterparty kind agency, class hint "grant") lives in the adapter's
   `defaults` block. It is recorded per field as `field_sources[f] = "source_default"` and shown in the
@@ -300,6 +305,16 @@ should validate against the SyRS/HLD/LLD source documents, which are not in this
   ids must look like Redis stream ids. The Copilot validates its body before the stream opens, and a failure
   after the headers are sent ends the stream with an `error` event. The API sends
   `Cross-Origin-Resource-Policy: same-origin`.
+
+## Database platform
+
+- **D-100 · MySQL 8.4 LTS replaces PostgreSQL.** The application database is MySQL 8.4 Community (InnoDB,
+  `utf8mb4_0900_ai_ci`), with its history in `migrations_mysql/` (`alembic upgrade head`). The Apache AGE graph is
+  replaced by the relational `entity` and `relationship_edge` tables, and raw Cypher queries are refused. pgvector is
+  replaced by 1024-dimension float32 BLOBs in `embedding`, searched by exact in-memory cosine similarity with tenant
+  isolation. PostgreSQL remains only as the ETL source and in the rollback release `f2c447a`: the current code does not
+  run on it. This supersedes the PostgreSQL-specific parts of earlier decisions. Design:
+  `docs/CORTEX_MYSQL_DATABASE_DESIGN.md`. Production cutover has not happened.
 
 ## Open items
 

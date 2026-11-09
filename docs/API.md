@@ -49,7 +49,7 @@ stale). It is served live at `/v1/openapi.json` and browsable at `/v1/docs`.
 | POST | `/v1/scoring/preview` | `scoring:preview` | re-rank with candidate weights and thresholds; nothing is persisted |
 | GET | `/v1/scoring/backtest` | `scoring:read` | hit rate by band over realised outcomes |
 | GET/PUT | `/v1/organization/self` | `opportunity:read` / `scoring:preview` | the self-organisation profile that scoring compares against; PUT rescores everything |
-| GET | `/v1/graph/query` | `graph:read` (`graph:cypher` + admin for `template=cypher`) | templates `neighbourhood` (depth 1–2), `provenance`, `label`; raw Cypher is read-only |
+| GET | `/v1/graph/query` | `graph:read` (`template=cypher` is refused with an explicit error: MySQL has no Cypher engine) | templates `neighbourhood` (depth 1–2), `provenance`, `label`; raw Cypher is read-only |
 | GET | `/v1/graph/paths?from=&to=` | `graph:read` | up to 5 paths, ≤ `max_hops` |
 | GET | `/v1/graph/stats` | `graph:read` | vertex and edge counts per label |
 | GET/POST | `/v1/entities/merge-queue` | `entity:read` / `entity:merge` | candidates 0.80–0.92; manual proposals |
@@ -82,7 +82,7 @@ and admin writes) is registered with its permission and phase in
 ```bash
 # service account (client credentials)
 curl -s -X POST http://localhost:8380/realms/cortex/protocol/openid-connect/token \
-  -u cortex-worker:dev-worker-secret-change-me -d grant_type=client_credentials | jq -r .access_token
+  -u "cortex-worker:$WORKER_CLIENT_SECRET" -d grant_type=client_credentials | jq -r .access_token  # from .env
 ```
 
 Human users sign in through the UI (authorization code + PKCE). `scripts/smoke.py` shows the full browser
