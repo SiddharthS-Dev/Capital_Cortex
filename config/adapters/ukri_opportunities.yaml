@@ -1,12 +1,14 @@
 # UK Research and Innovation funding finder: the public listing filtered to open opportunities, soonest closing
-# first. Verified 2026-10-02: robots.txt only disallows /wp-admin/. The RSS feed carries no deadline or amount
-# and also lists closed calls, so the listing page is read instead. 10 per page; a page past the end returns 404
-# (which fails the run), so keep the list within the live page count (14 on 2026-10-02).
+# first. Verified 2026-11-02: robots.txt only disallows /wp-admin/. The RSS feed carries no deadline or amount
+# and also lists closed calls, so the listing page is read instead. 10 per page; the adapter follows the page's
+# own "next" link (request.next) and stops when there is none, so no page list needs maintaining.
+# Fields the listing does not give: eligibility (on each detail page; not fetched, to keep the crawl to one
+# request per 10 opportunities) and a minimum award.
 key: ukri_opportunities
 name: UKRI funding opportunities (UK)
 kind: html
 adapter: html
-enabled: false
+enabled: false                 # D-034: no live crawling until the source's terms are verified
 schedule: "0 7 * * *"          # daily, UTC
 terms_note: >-
   Public UKRI funding-finder pages (www.ukri.org/opportunity), Crown copyright, reusable under the Open
@@ -14,20 +16,13 @@ terms_note: >-
   opportunities per run.
 urls:
   - "https://www.ukri.org/opportunity/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/2/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/3/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/4/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/5/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/6/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/7/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/8/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/9/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
-  - "https://www.ukri.org/opportunity/page/10/?filter_status%5B0%5D=open&filter_order=closing_date&filter_submitted=true"
 rate_limit: {min_interval_seconds: 3.0}
 timeout_seconds: 60
 respect_robots: true
-max_items: 100
+max_items: 100                 # the limit stated in terms_note
 request:
+  next: "a.next.page-numbers@href"
+  max_pages: 20
   selectors:
     item: "div.opportunity"
     fields:
@@ -38,8 +33,11 @@ request:
       funder: 'div.govuk-table__row:-soup-contains("Funders:") dd'     # the Funders row precedes Co-funders
       funding_type: 'div.govuk-table__row:-soup-contains("Funding type") dd'
       max_award: 'div.govuk-table__row:-soup-contains("Maximum award") dd'
-      opening_date: 'div.govuk-table__row:-soup-contains("Opening date") dd'
-      closing_date: 'div.govuk-table__row:-soup-contains("Closing date") dd'
+      # the <time datetime> attribute (ISO, UK local time): the visible text ends in "UK time", which dateutil rejects
+      publication_date: 'div.govuk-table__row:-soup-contains("Publication date") dd time@datetime'
+      opening_date: 'div.govuk-table__row:-soup-contains("Opening date") dd time@datetime'
+      closing_date: 'div.govuk-table__row:-soup-contains("Closing date") dd time@datetime'
+      total_fund: 'div.govuk-table__row:-soup-contains("Total fund") dd'
 mapping:
   external_id: url
   title: title
@@ -47,10 +45,15 @@ mapping:
   url: url
   deadline: closing_date
   open_date: opening_date
-  published_at: opening_date
+  published_at: [publication_date, opening_date]
   counterparty_name: funder
   amount_max: max_award
   instruments: funding_type
+  eligibility_status: status
+  eligibility_total_fund: total_fund     # programme total, not a per-award amount, so not mapped to amount_max
+accept:
+  url_pattern: "^https://www\\.ukri\\.org/opportunity/"
+  future_deadline: true
 defaults:
   currency: GBP
   countries: [GB]
