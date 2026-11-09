@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from datetime import UTC, date, datetime
@@ -32,7 +33,8 @@ from platform_core import embeddings
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
 from platform_core.db import session_scope
-from platform_core.db.vector import to_pgvector
+from platform_core.db.compat import is_mysql_session
+from platform_core.db.vector import search_opportunity_embeddings
 from platform_core.llm import BudgetExceeded, LLMRequest, get_router
 from platform_core.llm.safety import UNTRUSTED_PREAMBLE, wrap_untrusted
 
@@ -65,43 +67,37 @@ def suggestions(page: str | None, has_opportunity: bool) -> list[str]:
 
 async def _retrieve(s: Any, q: str, include_demo: bool) -> list[dict[str, Any]]:
     org = get_settings().org_id
-    rows = (
-        (
-            await s.execute(
-                text(
-                    "SELECT o.id, o.title, o.score, o.score_band, cp.name AS counterparty, ts_rank(o.search, websearch_to_tsquery('english', :q)) AS r "
-                    "FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id WHERE o.org_id = :org AND o.status IN ('active','watchlist') "
-                    "AND (:demo OR NOT o.is_demo) AND (o.search @@ websearch_to_tsquery('english', :q) OR (cardinality(CAST(:names AS text[])) > 0 "
-                    "AND cp.name ILIKE ANY(CAST(:names AS text[])))) "
-                    "ORDER BY r DESC, o.score DESC NULLS LAST LIMIT 5"
-                ),
-                {"org": org, "q": q, "demo": include_demo, "names": [f"%{w}%" for w in re.findall(r"\b[A-Z][\w&-]{3,}\b", q)]},
-            )
-        )
-        .mappings()
-        .all()
-    )  # fmt: skip
+    names = [f"%{w}%" for w in re.findall(r"\b[A-Z][\w&-]{3,}\b", q)]
+
+    name_clauses = []
+    params: dict[str, Any] = {"org": org, "q_like": f"%{q}%", "demo": include_demo}
+    for idx, n in enumerate(names):
+        params[f"name_{idx}"] = n
+        name_clauses.append(f"cp.name LIKE :name_{idx}")
+    cp_name_filter = f"({' OR '.join(name_clauses)})" if name_clauses else "FALSE"
+
+    lex_query = (
+        "SELECT o.id, o.title, o.score, o.score_band, cp.name AS counterparty "
+        "FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
+        "WHERE o.org_id = :org AND o.status IN ('active','watchlist') "
+        "AND (:demo OR NOT o.is_demo) "
+        f"AND (o.title LIKE :q_like OR o.description LIKE :q_like OR {cp_name_filter}) "
+        "ORDER BY (o.score IS NULL) ASC, o.score DESC LIMIT 5"
+    )
+    rows = (await s.execute(text(lex_query), params)).mappings().all()
     found = [dict(r) for r in rows]
     if len(found) < 3:
-        vec = to_pgvector(embeddings.embed(q))
-        more = (
-            (
-                await s.execute(
-                    text(
-                        "SELECT * FROM (SELECT o.id, o.title, o.score, o.score_band, cp.name AS counterparty, 1 - (e.vector <=> CAST(:v AS vector)) AS sim "
-                        "FROM embedding e JOIN opportunity o ON o.id = e.entity_id LEFT JOIN organization cp ON cp.id = o.counterparty_id "
-                        "WHERE e.org_id = :org AND e.entity_type = 'opportunity' AND (:demo OR NOT o.is_demo) AND o.status IN ('active','watchlist') "
-                        "ORDER BY e.vector <=> CAST(:v AS vector) LIMIT 5) x WHERE x.sim >= :min_sim"
-                    ),
-                    # nearest neighbours always exist; only genuinely similar text counts as related (else: refuse)
-                    {"org": org, "v": vec, "demo": include_demo, "min_sim": MIN_SIMILARITY},
-                )
-            )
-            .mappings()
-            .all()
-        )  # fmt: skip
-        seen = {r["id"] for r in found}
-        found += [{k: v for k, v in dict(r).items() if k != "sim"} for r in more if r["id"] not in seen]
+        q_emb = embeddings.embed(q)
+        more = await search_opportunity_embeddings(
+            s=s,
+            org_id=org,
+            q_vec=q_emb,
+            include_demo=include_demo,
+            limit=5 - len(found),
+            min_similarity=MIN_SIMILARITY,
+            exclude_ids={r["id"] for r in found},
+        )
+        found += [{k: v for k, v in item.items() if k != "similarity"} for item in more]
     return found[:5]
 
 
@@ -132,16 +128,32 @@ async def ask(principal: Principal, question: str, opportunity_id: str | None = 
     q = question.strip()[:2000]
     intents = [k for k, rx in INTENTS.items() if rx.search(q)]
     async with session_scope() as s:
-        run_id = str(
-            (
-                await s.execute(
-                    text("INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
-                         "VALUES (:org, 'copilot', 'copilot', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:i AS jsonb)) RETURNING id"),
-                    {"org": get_settings().org_id, "opp": opportunity_id, "by": principal.sub,
-                     "i": json.dumps({"question": q, "page": page, "intents": intents})},
-                )
-            ).scalar_one()
-        )  # fmt: skip
+        if is_mysql_session(s):
+            run_id = str(uuid.uuid4())
+            await s.execute(
+                text(
+                    "INSERT INTO agent_run (id, org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
+                    "VALUES (:id, :org, 'copilot', 'copilot', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:i AS JSON))"
+                ),
+                {
+                    "id": run_id,
+                    "org": get_settings().org_id,
+                    "opp": opportunity_id,
+                    "by": principal.sub,
+                    "i": json.dumps({"question": q, "page": page, "intents": intents}),
+                },
+            )
+        else:
+            run_id = str(
+                (
+                    await s.execute(
+                        text("INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
+                             "VALUES (:org, 'copilot', 'copilot', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:i AS jsonb)) RETURNING id"),
+                        {"org": get_settings().org_id, "opp": opportunity_id, "by": principal.sub,
+                         "i": json.dumps({"question": q, "page": page, "intents": intents})},
+                    )
+                ).scalar_one()
+            )  # fmt: skip
     yield {"type": "start", "run_id": run_id, "intents": intents}
     pack: dict[str, Any] = {}
     facts: list[dict[str, Any]] = []
@@ -217,9 +229,10 @@ async def ask(principal: Principal, question: str, opportunity_id: str | None = 
         if not claims:
             all_gaps = all_gaps or [f"No record in the knowledge graph supports an answer to: “{q[:160]}”"]
         answer = " ".join(c["text"] for c in claims) if claims else REFUSAL
+        json_type = "JSON" if is_mysql_session(s) else "jsonb"
         await s.execute(
-            text("UPDATE agent_run SET status = 'succeeded', finished_at = now(), mode = :m, tokens_in = :ti, tokens_out = :to, cost_usd = :c, "
-                 "model_tier = :tier, output = CAST(:o AS jsonb) WHERE id = :id"),
+            text(f"UPDATE agent_run SET status = 'succeeded', finished_at = now(), mode = :m, tokens_in = :ti, tokens_out = :to, cost_usd = :c, "
+                 f"model_tier = :tier, output = CAST(:o AS {json_type}) WHERE id = :id"),
             {"m": mode, "ti": meta["tokens_in"], "to": meta["tokens_out"], "c": meta["cost_usd"], "tier": "mid" if mode == "llm" else "none",
              "id": run_id, "o": json.dumps({"evidence_pack": pack, "claims": claims, "gaps": all_gaps, "answer": answer}, default=str)},
         )  # fmt: skip
@@ -273,11 +286,16 @@ async def _slip(s: Any, ctx: ToolContext, opp: dict[str, Any], delay: int, pack:
 async def _deadlines(
     s: Any, ctx: ToolContext, include_demo: bool, pack: dict[str, Any], facts: list[dict[str, Any]]
 ) -> None:
+    deadline_filter = (
+        "deadline BETWEEN now() AND DATE_ADD(now(), INTERVAL 31 DAY)"
+        if is_mysql_session(s)
+        else "deadline BETWEEN now() AND now() + interval '31 days'"
+    )
     rows = (
         (
             await s.execute(
-                text("SELECT id, title, deadline, amount_max, currency FROM opportunity WHERE org_id = :org AND status = 'active' "
-                     "AND deadline BETWEEN now() AND now() + interval '31 days' AND (:demo OR NOT is_demo) ORDER BY deadline LIMIT 6"),
+                text(f"SELECT id, title, deadline, amount_max, currency FROM opportunity WHERE org_id = :org AND status = 'active' "
+                     f"AND {deadline_filter} AND (:demo OR NOT is_demo) ORDER BY deadline LIMIT 6"),
                 {"org": get_settings().org_id, "demo": include_demo},
             )
         )

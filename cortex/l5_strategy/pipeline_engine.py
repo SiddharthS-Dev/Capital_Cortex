@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.l4_reasoning.score_service import reference
 from cortex.l5_strategy.forecast_engine import Inflow, assumptions, month_start
 from platform_core.config import get_settings
+from platform_core.db.compat import in_clause, is_mysql_session
 
 ACTIVE = "o.status IN ('active','watchlist') AND o.pipeline_stage <> 'lost'"
 
@@ -33,39 +34,83 @@ _MID = (
 
 
 async def weighted_pipeline(s: AsyncSession, include_demo: bool = True) -> dict[str, Any]:
-    """Aggregated in SQL (one pass, grouping sets): the 1M-node load test showed row-by-row Python taking 25 s."""
+    """Aggregated in SQL (one pass, grouping sets or UNION ALL): the 1M-node load test showed row-by-row Python taking 25 s."""
     probs = reference()["stage_probability"]
-    q = text(
-        "WITH p AS (SELECT * FROM unnest(CAST(:stages AS text[]), CAST(:probs AS float8[])) AS t(stage, prob)), "
-        f"o AS (SELECT COALESCE(o.class::text, 'unclassified') AS cls, o.pipeline_stage::text AS stage, "
-        "COALESCE(o.geography[1], 'unknown') AS geo, COALESCE(to_char(o.deadline, 'YYYY-MM'), 'no_deadline') AS mon, "
-        f"NULLIF(o.currency, '') AS ccy, ({_MID})::float8 AS mid FROM opportunity o "
-        f"WHERE o.org_id = :org AND {ACTIVE} AND (:demo OR NOT o.is_demo)) "
-        "SELECT GROUPING(cls, stage, geo, mon) AS g, cls, stage, geo, mon, ccy, "
-        "sum(o.mid * COALESCE(p.prob, 0)) AS w, count(*) AS n FROM o LEFT JOIN p USING (stage) "
-        "WHERE o.mid IS NOT NULL AND o.ccy IS NOT NULL "
-        "GROUP BY GROUPING SETS ((ccy), (ccy, cls), (ccy, stage), (ccy, geo), (ccy, mon))"
-    )
-    params = {
-        "org": get_settings().org_id,
-        "demo": include_demo,
-        "stages": list(probs),
-        "probs": [float(v) for v in probs.values()],
-    }
-    rows = (await s.execute(q, params)).mappings().all()
-    # GROUPING bitmask over (cls, stage, geo, mon): the one grouped column has its bit clear
     dims = {0b0111: ("class", "cls"), 0b1011: ("stage", "stage"), 0b1101: ("geo", "geo"), 0b1110: ("month", "mon")}
     splits: dict[str, dict[str, dict[str, float]]] = {k: {} for k in ("class", "stage", "geo", "month")}
     totals: dict[str, float] = {}
     counted = 0
-    for r in rows:
-        w = round(float(r["w"] or 0), 2)
-        if r["g"] == 0b1111:
-            totals[r["ccy"]] = w
+    params: dict[str, Any] = {
+        "org": get_settings().org_id,
+        "demo": include_demo,
+    }
+
+    if is_mysql_session(s):
+        case_prob = (
+            "CASE o.pipeline_stage "
+            + " ".join(f"WHEN '{st}' THEN {float(pr)}" for st, pr in probs.items())
+            + " ELSE 0 END"
+        )
+        # PERF-2: ONE scan grouped at the finest grain, rolled up per dimension here. MySQL inlines a CTE into each
+        # UNION ALL branch, so the previous five-branch form read the table five times, plus once more for the
+        # excluded count (EXPLAIN ANALYZE, 200k rows: 23.5 s). Group sums are exact DECIMALs (the probability
+        # literals are exact-value literals), summed exactly as Decimal and rounded exactly as before.
+        q = text(
+            "SELECT COALESCE(o.class, 'unclassified') AS cls, o.pipeline_stage AS stage, "
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.geography, '$[0]')), 'unknown') AS geo, "
+            "COALESCE(DATE_FORMAT(o.deadline, '%Y-%m'), 'no_deadline') AS mon, NULLIF(o.currency, '') AS ccy, "
+            f"(({_MID}) IS NULL) AS no_mid, sum(({_MID}) * ({case_prob})) AS w, count(*) AS n FROM opportunity o "
+            f"WHERE o.org_id = :org AND {ACTIVE} AND (:demo OR NOT o.is_demo) GROUP BY cls, stage, geo, mon, ccy, no_mid"
+        )
+        rows = (await s.execute(q, params)).mappings().all()
+        tot_exact: dict[str, Any] = {}
+        split_exact: dict[str, dict[str, dict[str, Any]]] = {k: {} for k in splits}
+        missing_my = 0
+        for r in rows:
+            if r["no_mid"] or r["ccy"] is None:
+                missing_my += int(r["n"])
+                continue
+            ccy, w = r["ccy"], r["w"] or 0
+            tot_exact[ccy] = tot_exact.get(ccy, 0) + w
             counted += int(r["n"])
-        else:
-            dim, col = dims[r["g"]]
-            splits[dim].setdefault(r[col], {})[r["ccy"]] = w
+            for dim, key in (("class", r["cls"]), ("stage", r["stage"]), ("geo", r["geo"]), ("month", r["mon"])):
+                cell = split_exact[dim].setdefault(key, {})
+                cell[ccy] = cell.get(ccy, 0) + w
+        totals = {c: round(float(v), 2) for c, v in tot_exact.items()}
+        for dim, vals in split_exact.items():
+            for key, by_ccy in vals.items():
+                splits[dim][key] = {c: round(float(v), 2) for c, v in by_ccy.items()}
+        return {
+            "total_by_currency": totals,
+            "splits": splits,
+            "counted": counted,
+            "excluded_without_amount": missing_my,
+            "method": "Σ amount_mid × stage probability (config/scoring/reference.yaml#stage_probability)",
+        }
+    else:
+        q = text(
+            "WITH p AS (SELECT * FROM unnest(CAST(:stages AS text[]), CAST(:probs AS float8[])) AS t(stage, prob)), "
+            f"o AS (SELECT COALESCE(o.class::text, 'unclassified') AS cls, o.pipeline_stage::text AS stage, "
+            "COALESCE(o.geography[1], 'unknown') AS geo, COALESCE(to_char(o.deadline, 'YYYY-MM'), 'no_deadline') AS mon, "
+            f"NULLIF(o.currency, '') AS ccy, ({_MID})::float8 AS mid FROM opportunity o "
+            f"WHERE o.org_id = :org AND {ACTIVE} AND (:demo OR NOT o.is_demo)) "
+            "SELECT GROUPING(cls, stage, geo, mon) AS g, cls, stage, geo, mon, ccy, "
+            "sum(o.mid * COALESCE(p.prob, 0)) AS w, count(*) AS n FROM o LEFT JOIN p USING (stage) "
+            "WHERE o.mid IS NOT NULL AND o.ccy IS NOT NULL "
+            "GROUP BY GROUPING SETS ((ccy), (ccy, cls), (ccy, stage), (ccy, geo), (ccy, mon))"
+        )
+        params["stages"] = list(probs)
+        params["probs"] = [float(v) for v in probs.values()]
+        rows = (await s.execute(q, params)).mappings().all()
+        for r in rows:
+            w = round(float(r["w"] or 0), 2)
+            if r["g"] == 0b1111:
+                totals[r["ccy"]] = w
+                counted += int(r["n"])
+            else:
+                dim, col = dims[r["g"]]
+                splits[dim].setdefault(r[col], {})[r["ccy"]] = w
+
     missing = (
         await s.execute(
             text(
@@ -89,20 +134,22 @@ async def expected_inflows(s: AsyncSession, currency: str, include_demo: bool = 
     a = assumptions()
     probs = reference()["stage_probability"]
     lag = a["decision_lag_months"]
-    rows = (
-        (
-            await s.execute(
-                text(
-                    "SELECT o.id, o.title, o.class::text AS class, o.pipeline_stage::text AS stage, o.deadline, o.amount_min, "
-                    f"o.amount_max FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy "
-                    "AND o.pipeline_stage::text = ANY(:stages) AND (:demo OR NOT o.is_demo)"
-                ),
-                {"org": get_settings().org_id, "ccy": currency, "stages": a["inflow_stages"], "demo": include_demo},
-            )
+    params: dict[str, Any] = {"org": get_settings().org_id, "ccy": currency, "demo": include_demo}
+    if is_mysql_session(s):
+        stage_clause = in_clause("o.pipeline_stage", "stages", a["inflow_stages"], params)
+        sql = (
+            "SELECT o.id, o.title, o.class AS class, o.pipeline_stage AS stage, o.deadline, o.amount_min, "
+            f"o.amount_max FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy "
+            f"AND {stage_clause} AND (:demo OR NOT o.is_demo)"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        params["stages"] = a["inflow_stages"]
+        sql = (
+            "SELECT o.id, o.title, o.class::text AS class, o.pipeline_stage::text AS stage, o.deadline, o.amount_min, "
+            f"o.amount_max FROM opportunity o WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy "
+            "AND o.pipeline_stage::text = ANY(:stages) AND (:demo OR NOT o.is_demo)"
+        )
+    rows = (await s.execute(text(sql), params)).mappings().all()
     out = []
     today = date.today()
     for r in rows:
@@ -126,32 +173,44 @@ async def grouped_inflows(s: AsyncSession, currency: str, include_demo: bool = T
     probs = reference()["stage_probability"]
     lag = a["decision_lag_months"]
     classes = [c for c in lag if c != "default"]
-    rows = (
-        (
-            await s.execute(
-                text(
-                    "WITH l AS (SELECT * FROM unnest(CAST(:classes AS text[]), CAST(:lags AS int[])) AS t(cls, lag)) "
-                    "SELECT (date_trunc('month', GREATEST(COALESCE(o.deadline::date, current_date), current_date)) "
-                    "+ make_interval(months => COALESCE(l.lag, :dlag)))::date AS month, o.class::text AS class, "
-                    f"o.pipeline_stage::text AS stage, sum(({_MID})::float8) AS amount, count(*) AS n "
-                    "FROM opportunity o LEFT JOIN l ON l.cls = o.class::text "
-                    f"WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy AND o.pipeline_stage::text = ANY(:stages) "
-                    f"AND (:demo OR NOT o.is_demo) AND ({_MID}) IS NOT NULL GROUP BY 1, 2, 3"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "ccy": currency,
-                    "stages": a["inflow_stages"],
-                    "demo": include_demo,
-                    "classes": classes,
-                    "lags": [int(lag[c]) for c in classes],
-                    "dlag": int(lag["default"]),
-                },
-            )
+    params: dict[str, Any] = {
+        "org": get_settings().org_id,
+        "ccy": currency,
+        "demo": include_demo,
+    }
+    if is_mysql_session(s):
+        stage_clause = in_clause("o.pipeline_stage", "stages", a["inflow_stages"], params)
+        lag_cases = " ".join(f"WHEN o.class = '{c}' THEN {int(lag[c])}" for c in classes)
+        lag_expr = f"CASE {lag_cases} ELSE {int(lag['default'])} END"
+        month_expr = (
+            "DATE_ADD(STR_TO_DATE(DATE_FORMAT(GREATEST(COALESCE(DATE(o.deadline), CURRENT_DATE), CURRENT_DATE), '%Y-%m-01'), '%Y-%m-%d'), "
+            f"INTERVAL {lag_expr} MONTH)"
         )
-        .mappings()
-        .all()
-    )
+        sql = (
+            f"SELECT {month_expr} AS month, o.class AS class, o.pipeline_stage AS stage, "
+            f"sum({_MID}) AS amount, count(*) AS n FROM opportunity o "
+            f"WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy AND {stage_clause} "
+            f"AND (:demo OR NOT o.is_demo) AND ({_MID}) IS NOT NULL GROUP BY 1, 2, 3"
+        )
+    else:
+        params.update(
+            {
+                "stages": a["inflow_stages"],
+                "classes": classes,
+                "lags": [int(lag[c]) for c in classes],
+                "dlag": int(lag["default"]),
+            }
+        )
+        sql = (
+            "WITH l AS (SELECT * FROM unnest(CAST(:classes AS text[]), CAST(:lags AS int[])) AS t(cls, lag)) "
+            "SELECT (date_trunc('month', GREATEST(COALESCE(o.deadline::date, current_date), current_date)) "
+            "+ make_interval(months => COALESCE(l.lag, :dlag)))::date AS month, o.class::text AS class, "
+            f"o.pipeline_stage::text AS stage, sum(({_MID})::float8) AS amount, count(*) AS n "
+            "FROM opportunity o LEFT JOIN l ON l.cls = o.class::text "
+            f"WHERE o.org_id = :org AND {ACTIVE} AND o.currency = :ccy AND o.pipeline_stage::text = ANY(:stages) "
+            f"AND (:demo OR NOT o.is_demo) AND ({_MID}) IS NOT NULL GROUP BY 1, 2, 3"
+        )
+    rows = (await s.execute(text(sql), params)).mappings().all()
     return [
         Inflow(
             r["month"],
