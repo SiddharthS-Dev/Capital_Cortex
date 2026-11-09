@@ -6,6 +6,14 @@
   "registrationAllowed": false,
   "resetPasswordAllowed": true,
   "bruteForceProtected": true,
+  "failureFactor": 10,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "permanentLockout": false,
+  "eventsEnabled": true,
+  "eventsExpiration": 2592000,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": false,
   "accessTokenLifespan": 900,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
@@ -141,7 +149,7 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "secret": "dev-api-secret-change-me"
+      "secret": "${API_CLIENT_SECRET}"
     },
     {
       "clientId": "cortex-worker",
@@ -151,7 +159,7 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "secret": "dev-worker-secret-change-me",
+      "secret": "${WORKER_CLIENT_SECRET}",
       "protocolMappers": [
         {
           "name": "audience-cortex-api",
@@ -174,7 +182,7 @@
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "secret": "dev-ingestion-secret-change-me",
+      "secret": "${INGESTION_CLIENT_SECRET}",
       "protocolMappers": [
         {
           "name": "audience-cortex-api",
@@ -205,13 +213,11 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
-      "requiredActions": [
-        "CONFIGURE_TOTP"
-      ]
+      "requiredActions": []
     },
     {
       "username": "dev-analyst",
@@ -226,7 +232,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
@@ -245,7 +251,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
@@ -269,13 +275,11 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
-      "requiredActions": [
-        "CONFIGURE_TOTP"
-      ]
+      "requiredActions": []
     },
     {
       "username": "dev-legal",
@@ -291,16 +295,16 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
-      "requiredActions": [
-        "CONFIGURE_TOTP"
-      ],
+      "requiredActions": [],
       "attributes": {
         "cortex_grants": [
-          "compliance:review"
+          "compliance:review",
+          "dataroom:approve",
+          "legal_hold:write"
         ]
       }
     },
@@ -317,13 +321,11 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
         }
       ],
-      "requiredActions": [
-        "CONFIGURE_TOTP"
-      ]
+      "requiredActions": []
     },
     {
       "username": "smoke-auditor",
@@ -338,14 +340,8 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Cortex!dev-2026",
+          "value": "${SMOKE_USER_PASSWORD}",
           "temporary": false
-        },
-        {
-          "type": "otp",
-          "userLabel": "smoke-seeded (dev only)",
-          "secretData": "{\"value\": \"cortex-dev-smoke-totp-secret\"}",
-          "credentialData": "{\"subType\": \"totp\", \"digits\": 6, \"counter\": 0, \"period\": 30, \"algorithm\": \"HmacSHA1\"}"
         }
       ],
       "requiredActions": []
