@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -27,6 +29,42 @@ class RobotsDisallowed(Exception):
     permanent = True
 
 
+class UnsafeURL(Exception):
+    """A source URL (or a redirect / next-page link) that must not be fetched: SSRF protection."""
+
+    permanent = True
+
+
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+
+
+async def check_public_url(url: str) -> None:
+    """Refuse non-http(s) URLs and hosts that are, or resolve to, private/loopback/link-local/reserved addresses, so a
+    configured source, a redirect or a scraped next-page link can't reach internal services. A name that doesn't resolve
+    is left to fail in the request itself."""
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise UnsafeURL(f"only absolute http(s) URLs can be fetched: {url!r}")
+    host = u.hostname.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        raise UnsafeURL(f"refusing to fetch a local address: {url}")
+    try:
+        addrs = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, u.port or 443, type=socket.SOCK_STREAM)
+        except OSError:
+            return
+        addrs = [ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos]  # type: ignore[union-attr]
+    if any(_blocked_ip(a) for a in addrs):
+        raise UnsafeURL(f"refusing to fetch a private or internal address: {url}")
+
+
+async def _guard_request(request: httpx.Request) -> None:  # httpx event hook: runs for every hop, redirects included
+    await check_public_url(str(request.url))
+
+
 @dataclass
 class FetchContext:
     """Per-run fetch state: one HTTP client, rate limiting and robots.txt cache."""
@@ -48,7 +86,11 @@ class FetchContext:
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=self.timeout, headers={"User-Agent": USER_AGENT}, follow_redirects=True
+                timeout=self.timeout,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+                max_redirects=5,
+                event_hooks={"request": [_guard_request]},
             )
         return self._client
 
