@@ -1,0 +1,77 @@
+# Capital Cortex — Isolated MySQL 8.4 Community Test Stack
+# Created for Phase 2 Verification. Completely isolated from the shared Postgres stack.
+# Project name isolation guarantees zero interference with other containers or volumes.
+#
+# Secrets have no committed fallback: MYSQL_TEST_ROOT_PASSWORD, MYSQL_TEST_PASSWORD and KEYCLOAK_ADMIN(_PASSWORD)
+# must be set in .env (`--env-file .env`), or compose stops. The healthcheck reads the root password from the
+# container environment (MYSQL_PWD), never from its command line.
+# --log-bin-trust-function-creators=1 lets the application account create the schema's triggers without SUPER
+# (binary logging is on), so `cortex` needs only schema-level grants: see infra/mysql/least_privilege.sql.
+name: capital-cortex-mysql-test
+
+services:
+  mysql-test:
+    image: mysql:8.4
+    container_name: capital-cortex-mysql-test
+    restart: "no"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=100
+      - --default-time-zone=+00:00
+      - --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_ROOT_PASSWORD:?set MYSQL_TEST_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_TEST_DATABASE:-cortex}
+      MYSQL_USER: ${MYSQL_TEST_USER:-cortex}
+      MYSQL_PASSWORD: ${MYSQL_TEST_PASSWORD:?set MYSQL_TEST_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${MYSQL_TEST_PORT:-53306}:3306"
+    volumes:
+      - capital-cortex_mysql_test_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  keycloak-test:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: capital-cortex-keycloak-test
+    restart: "no"
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: mysql
+      KC_DB_URL: jdbc:mysql://mysql-test:3306/keycloak?characterEncoding=UTF-8&serverTimezone=UTC
+      KC_DB_USERNAME: ${MYSQL_TEST_USER:-cortex}
+      KC_DB_PASSWORD: ${MYSQL_TEST_PASSWORD:?set MYSQL_TEST_PASSWORD in .env}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      # Resolved by the realm import's ${VAR} placeholders (infra/keycloak/generate_realm.py); no committed value.
+      SMOKE_USER_PASSWORD: ${SMOKE_USER_PASSWORD:?set SMOKE_USER_PASSWORD in .env}
+      API_CLIENT_SECRET: ${API_CLIENT_SECRET:?set API_CLIENT_SECRET in .env}
+      WORKER_CLIENT_SECRET: ${WORKER_CLIENT_SECRET:?set WORKER_CLIENT_SECRET in .env}
+      INGESTION_CLIENT_SECRET: ${INGESTION_CLIENT_SECRET:?set INGESTION_CLIENT_SECRET in .env}
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_TEST_PORT:-58480}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_TEST_PORT:-58480}:8080"
+    volumes:
+      - ./keycloak/realm-cortex.json:/opt/keycloak/data/import/realm-cortex.json:ro
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+volumes:
+  capital-cortex_mysql_test_data:
+    name: capital-cortex_mysql_test_data

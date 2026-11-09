@@ -1,0 +1,28 @@
+# Capital Cortex — isolated production-stack test (project `capital-cortex-stacktest`), committed version of the
+# override first kept outside the repository (OPS-2). Same project name and therefore the same named volumes
+# (capital-cortex-stacktest_mysqldata, which holds the 2026-10-31 stack-test evidence: cortex, keycloak,
+# keycloak_fresh, keycloak_import_check). Nothing here deletes or resets data.
+#
+# Use it only on top of the hardened MySQL overlay, with a git-ignored env file that sets every required secret:
+#
+#   docker compose -p capital-cortex-stacktest --env-file <git-ignored stacktest.env> \
+#     -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml -f infra/docker-compose.mysql-stacktest.yml up -d
+#
+# The MySQL port then binds to 127.0.0.1 (MYSQL_BIND_ADDRESS default in docker-compose.mysql.yml), set MYSQL_PORT=13306
+# in that env file to keep the historical port. No secret belongs in this file.
+services:
+  api: {image: "capital-cortex/api:mysql-stacktest"}      # own tag, so capital-cortex/api:dev is never replaced
+  worker: {image: "capital-cortex/api:mysql-stacktest"}
+  migrate: {image: "capital-cortex/api:mysql-stacktest"}
+  keycloak:
+    environment:
+      # The first Keycloak start was interrupted by a MySQL recreate and left `keycloak` half-migrated (B14); the
+      # stack test used a fresh database instead. Kept for reproducibility.
+      KC_DB_URL: "jdbc:mysql://mysql:3306/keycloak_fresh?characterEncoding=UTF-8&serverTimezone=UTC"
+
+# Pin the data volume: without this, the base file's project name resolves `mysqldata` to capital-cortex_mysqldata
+# and a recreate would start MySQL on an EMPTY volume. external: true makes compose fail instead of creating one.
+volumes:
+  mysqldata:
+    name: capital-cortex-stacktest_mysqldata
+    external: true

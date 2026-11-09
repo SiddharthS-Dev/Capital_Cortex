@@ -1,0 +1,15 @@
+# Incident restore only: run `mysql` on a restored data volume instead of
+# `mysqldata`, leaving the damaged volume untouched as evidence.
+# Usage:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml -f infra/docker-compose.mysql-restore.yml \
+#     --env-file .env up -d --wait mysql
+services:
+  mysql:
+    volumes:
+      - mysqldata_restored:/var/lib/mysql
+
+volumes:
+  mysqldata_restored:
+    external: true
+    name: ${RESTORED_MYSQLDATA_VOLUME:-capital-cortex_mysqldata_restored}
+
