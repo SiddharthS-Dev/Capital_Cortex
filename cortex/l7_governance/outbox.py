@@ -26,7 +26,7 @@ import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 from sqlalchemy import text
@@ -38,6 +38,7 @@ from cortex.l7_governance.policy_engine import evaluate_release, governance_conf
 from platform_core import objectstore, secrets
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db import is_mysql_session
 from platform_core.errors import NotFound, Problem, ServiceUnavailable
 from platform_core.signing import ApprovalTokenSigner, InvalidApprovalToken, SigningKeyMissing, content_hash
 
@@ -95,15 +96,27 @@ async def _activate_share_link(s: AsyncSession, row: dict[str, Any]) -> str:
     """Share links are minted at release: the approved payload never contains the secret token."""
     link_id = row["payload"].get("share_link_id")
     token = secrets_mod.token_urlsafe(32)
-    res = await s.execute(
-        text(
-            "UPDATE share_link SET status = 'active', token_hash = :h, expires_at = now() + make_interval(days => expires_in_days) "
-            "WHERE id = CAST(:id AS uuid) AND status = 'pending_approval' RETURNING expires_at"
-        ),
-        {"h": hashlib.sha256(token.encode()).hexdigest(), "id": link_id},
-    )
-    if res.scalar() is None:
-        raise ReleaseBlocked("the share link is no longer pending", ["share_link_not_pending"])
+    mysql = is_mysql_session(s)
+    if mysql:
+        res = await s.execute(
+            text(
+                "UPDATE share_link SET status = 'active', token_hash = :h, expires_at = DATE_ADD(NOW(), INTERVAL expires_in_days DAY) "
+                "WHERE id = :id AND status = 'pending_approval'"
+            ),
+            {"h": hashlib.sha256(token.encode()).hexdigest(), "id": link_id},
+        )
+        if getattr(res, "rowcount", 0) == 0:
+            raise ReleaseBlocked("the share link is no longer pending", ["share_link_not_pending"])
+    else:
+        res = await s.execute(
+            text(
+                "UPDATE share_link SET status = 'active', token_hash = :h, expires_at = now() + make_interval(days => expires_in_days) "
+                "WHERE id = CAST(:id AS uuid) AND status = 'pending_approval' RETURNING expires_at"
+            ),
+            {"h": hashlib.sha256(token.encode()).hexdigest(), "id": link_id},
+        )
+        if res.scalar() is None:
+            raise ReleaseBlocked("the share link is no longer pending", ["share_link_not_pending"])
     return f"{get_settings().public_base_url.rstrip('/')}/v1/share/{token}"
 
 
@@ -137,7 +150,7 @@ async def _deliver(row: dict[str, Any], s: AsyncSession | None = None) -> dict[s
     if channel == "webhook":
         url = payload.get("url") or ""
         allow = [str(p) for p in governance_config().get("webhook_allowlist") or []]
-        if not any(url.startswith(p) for p in allow):
+        if not webhook_destination_allowed(url, allow):
             raise ReleaseBlocked(f"webhook destination not on the allowlist: {url}", ["webhook_not_allowlisted"])
         try:
             async with httpx.AsyncClient(timeout=20) as c:
@@ -184,6 +197,16 @@ async def verify_release(s: AsyncSession, row: dict[str, Any]) -> tuple[dict[str
         raise ReleaseBlocked("the approval is no longer valid", ["approval_invalid"])
     if a["token_used_at"] is not None:
         raise ReleaseBlocked("this approval token was already used", ["token_reused"])
+    if isinstance(row.get("payload"), str):
+        try:
+            row["payload"] = json.loads(row["payload"])
+        except ValueError:
+            pass
+    if isinstance(row.get("flags"), str):
+        try:
+            row["flags"] = json.loads(row["flags"])
+        except ValueError:
+            pass
     digest = content_hash(row["payload"])  # re-hash: never trust the stored hash
     try:
         signer = ApprovalTokenSigner.from_settings()
@@ -214,10 +237,16 @@ async def verify_release(s: AsyncSession, row: dict[str, Any]) -> tuple[dict[str
 
 
 async def release(s: AsyncSession, actor: Principal | str, outbox_id: str) -> dict[str, Any]:
+    mysql = is_mysql_session(s)
+    sel_sql = (
+        "SELECT * FROM outbox WHERE id = :id AND org_id = :org FOR UPDATE"
+        if mysql
+        else "SELECT * FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"
+    )
     found = (
         (
             await s.execute(
-                text("SELECT * FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"),
+                text(sel_sql),
                 {"id": outbox_id, "org": get_settings().org_id},
             )
         )
@@ -227,6 +256,16 @@ async def release(s: AsyncSession, actor: Principal | str, outbox_id: str) -> di
     if found is None:
         raise NotFound("outbox item not found")
     row: dict[str, Any] = dict(found)
+    if isinstance(row.get("payload"), str):
+        try:
+            row["payload"] = json.loads(row["payload"])
+        except ValueError:
+            pass
+    if isinstance(row.get("flags"), str):
+        try:
+            row["flags"] = json.loads(row["flags"])
+        except ValueError:
+            pass
     if row["status"] == "sent":
         return {"id": outbox_id, "status": "sent", "already": True}
     try:
@@ -251,10 +290,11 @@ async def release(s: AsyncSession, actor: Principal | str, outbox_id: str) -> di
             "attempts": attempts,
             "retryable": attempts < MAX_DELIVERY_ATTEMPTS,
         }
+    deliv_cast = "CAST(:d AS JSON)" if mysql else "CAST(:d AS jsonb)"
     await s.execute(
         text(
-            "UPDATE outbox SET status = 'sent', sent_at = now(), error = NULL, attempts = attempts + 1, "
-            "delivery = CAST(:d AS jsonb) WHERE id = :id"
+            f"UPDATE outbox SET status = 'sent', sent_at = now(), error = NULL, attempts = attempts + 1, "
+            f"delivery = {deliv_cast} WHERE id = :id"
         ),
         {"d": json.dumps(delivery), "id": row["id"]},
     )
@@ -273,3 +313,31 @@ async def release(s: AsyncSession, actor: Principal | str, outbox_id: str) -> di
         },
     )
     return {"id": outbox_id, "status": "sent", "delivery": delivery}
+
+
+def webhook_destination_allowed(url: str, allowlist: list[str]) -> bool:
+    """Exact https scheme, host and port against an allow-list entry, with the URL's path inside the entry's path.
+
+    A plain string prefix would let ``https://hooks.corp.com`` approve ``https://hooks.corp.com.evil.net/x`` or
+    ``https://hooks.corp.com@evil.net/``; URLs carrying credentials are never allowed."""
+    try:
+        u = urlsplit(url)
+        port = u.port or 443
+    except ValueError:
+        return False
+    if u.scheme != "https" or not u.hostname or u.username or u.password:
+        return False
+    for entry in allowlist:
+        try:
+            a = urlsplit(str(entry))
+            entry_port = a.port or 443
+        except ValueError:
+            continue
+        if a.scheme != "https" or not a.hostname or a.username or a.password:
+            continue
+        if u.hostname != a.hostname or port != entry_port:
+            continue
+        base = a.path.rstrip("/")
+        if not base or u.path == base or u.path.startswith(base + "/"):
+            return True
+    return False

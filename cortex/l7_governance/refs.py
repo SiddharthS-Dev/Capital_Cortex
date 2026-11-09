@@ -11,6 +11,7 @@ fails the citation check even though the record exists (§6 L7).
 
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -24,6 +25,8 @@ from cortex.l7_governance.citation_checker import REF_RE, Resolved
 from platform_core.auth.principal import Principal
 from platform_core.auth.rbac import get_rbac
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
+from platform_core.jsonutil import row as row_fn
 
 # kind → (table, permission). Only these tables are resolvable (whitelist; the table name is never user input).
 TABLE_KINDS: dict[str, tuple[str, str]] = {
@@ -106,15 +109,29 @@ class DBRefResolver:
                         out = Resolved(ref, val if isinstance(val, dict) else {"value": val, "field": fld}, "config")
             elif kind in TABLE_KINDS and _UUID.match(rid):
                 table, _ = TABLE_KINDS[kind]
-                row = (
-                    await self.s.execute(
-                        text(
-                            f"SELECT to_jsonb(t) - CAST(:drop AS text[]) FROM {table} t "
-                            "WHERE t.id = CAST(:id AS uuid) AND t.org_id = :org"
-                        ),
-                        {"id": rid, "org": get_settings().org_id, "drop": list(DROP_COLUMNS)},
+                if is_mysql_session(self.s):
+                    tbl_escaped = f"`{table}`" if table == "signal" else table
+                    res = (
+                        (
+                            await self.s.execute(
+                                text(f"SELECT * FROM {tbl_escaped} t WHERE t.id = :id AND t.org_id = :org"),
+                                {"id": rid, "org": get_settings().org_id},
+                            )
+                        )
+                        .mappings()
+                        .first()
                     )
-                ).scalar()
+                    row = {k: v for k, v in row_fn(res).items() if k not in DROP_COLUMNS} if res is not None else None
+                else:
+                    row = (
+                        await self.s.execute(
+                            text(
+                                f"SELECT to_jsonb(t) - CAST(:drop AS text[]) FROM {table} t "
+                                "WHERE t.id = CAST(:id AS uuid) AND t.org_id = :org"
+                            ),
+                            {"id": rid, "org": get_settings().org_id, "drop": list(DROP_COLUMNS)},
+                        )
+                    ).scalar()
                 if row is not None:
                     if fld:
                         val = _field(row, fld)
@@ -133,14 +150,29 @@ class DBRefResolver:
         run_id, _, key = rid.partition(":")
         rec = self.tool_pack.get(f"{run_id}:{key}")
         if rec is None and _UUID.match(run_id):
-            rec = (
-                await self.s.execute(
-                    text(
-                        "SELECT output -> 'evidence_pack' -> :k FROM agent_run WHERE id = CAST(:id AS uuid) AND org_id = :org"
-                    ),
-                    {"k": key, "id": run_id, "org": get_settings().org_id},
-                )
-            ).scalar()
+            if is_mysql_session(self.s):
+                rec = (
+                    await self.s.execute(
+                        text(
+                            "SELECT JSON_EXTRACT(output, CONCAT('$.evidence_pack.', JSON_QUOTE(:k))) FROM agent_run WHERE id = :id AND org_id = :org"
+                        ),
+                        {"k": key, "id": run_id, "org": get_settings().org_id},
+                    )
+                ).scalar()
+                if isinstance(rec, str):
+                    try:
+                        rec = json.loads(rec)
+                    except ValueError:
+                        pass
+            else:
+                rec = (
+                    await self.s.execute(
+                        text(
+                            "SELECT output -> 'evidence_pack' -> :k FROM agent_run WHERE id = CAST(:id AS uuid) AND org_id = :org"
+                        ),
+                        {"k": key, "id": run_id, "org": get_settings().org_id},
+                    )
+                ).scalar()
         if rec is None:
             return None
         val = _field(rec, fld) if fld else rec
