@@ -12,6 +12,7 @@ Graph: (self Organization)-[:KNOWS {warmth}]->(Contact)-[:PART_OF]->(Organizatio
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,6 +24,7 @@ from cortex.l3_memory.warmth import Touch, relationships_config, warmth
 from cortex.l7_governance import audit_service
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db.compat import insert_or_skip_duplicate, is_mysql_session
 from platform_core.errors import NotFound, Problem
 
 KINDS = ("meeting", "intro", "email_sent", "email_reply", "call", "note")
@@ -57,12 +59,13 @@ async def _self_org(s: AsyncSession) -> dict[str, Any] | None:
 
 
 async def _contact(s: AsyncSession, contact_id: str) -> dict[str, Any]:
+    id_cond = "c.id = :id" if is_mysql_session(s) else "c.id = CAST(:id AS uuid)"
     r = (
         (
             await s.execute(
                 text(
-                    "SELECT c.*, o.name AS organization_name FROM contact c LEFT JOIN organization o ON o.id = c.organization_id "
-                    "WHERE c.id = CAST(:id AS uuid) AND c.org_id = :org"
+                    f"SELECT c.*, o.name AS organization_name FROM contact c LEFT JOIN organization o ON o.id = c.organization_id "
+                    f"WHERE {id_cond} AND c.org_id = :org"
                 ),
                 {"id": contact_id, "org": get_settings().org_id},
             )
@@ -89,39 +92,61 @@ async def create_contact(
     is_demo: bool = False,
 ) -> dict[str, Any]:
     src = source_ref or manual_ref(actor)
+    org_id_cond = "id = :id" if is_mysql_session(s) else "id = CAST(:id AS uuid)"
     if organization_id:
         ok = (
             await s.execute(
-                text("SELECT 1 FROM organization WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT 1 FROM organization WHERE {org_id_cond} AND org_id = :org"),
                 {"id": organization_id, "org": get_settings().org_id},
             )
         ).scalar()
         if not ok:
             raise NotFound("organization not found")
-    cid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO contact (org_id, organization_id, name, role, emails, consent_basis, source_ref, is_demo) "
-                    "VALUES (:org, :o, :n, :r, :e, :cb, CAST(:src AS jsonb), :demo) RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "o": organization_id,
-                    "n": name.strip(),
-                    "r": role,
-                    "e": [e.strip().lower() for e in emails if e.strip()],
-                    "cb": consent_basis,
-                    "src": json.dumps(src),
-                    "demo": is_demo,
-                },
-            )
-        ).scalar_one()
-    )
+    email_list = [e.strip().lower() for e in emails if e.strip()]
+    if is_mysql_session(s):
+        cid = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO contact (id, org_id, organization_id, name, role, emails, consent_basis, source_ref, is_demo) "
+                "VALUES (:id, :org, :o, :n, :r, CAST(:e AS JSON), :cb, CAST(:src AS JSON), :demo)"
+            ),
+            {
+                "id": cid,
+                "org": get_settings().org_id,
+                "o": organization_id,
+                "n": name.strip(),
+                "r": role,
+                "e": json.dumps(email_list),
+                "cb": consent_basis,
+                "src": json.dumps(src),
+                "demo": is_demo,
+            },
+        )
+    else:
+        cid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO contact (org_id, organization_id, name, role, emails, consent_basis, source_ref, is_demo) "
+                        "VALUES (:org, :o, :n, :r, :e, :cb, CAST(:src AS jsonb), :demo) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "o": organization_id,
+                        "n": name.strip(),
+                        "r": role,
+                        "e": email_list,
+                        "cb": consent_basis,
+                        "src": json.dumps(src),
+                        "demo": is_demo,
+                    },
+                )
+            ).scalar_one()
+        )
     await node(s, "Contact", "contact", cid, name, src, {"role": role or ""}, is_demo)
     if organization_id:
         org_name = (
-            await s.execute(text("SELECT name FROM organization WHERE id = CAST(:id AS uuid)"), {"id": organization_id})
+            await s.execute(text(f"SELECT name FROM organization WHERE {org_id_cond}"), {"id": organization_id})
         ).scalar()
         await link(
             s,
@@ -164,54 +189,83 @@ async def log_interaction(
         raise Problem(422, "No subject", "an interaction needs a contact or an organisation", "validation")
     cfg = relationships_config()
     src = source_ref or manual_ref(actor)
-    row = (
-        await s.execute(
+    params = {
+        "org": get_settings().org_id,
+        "c": contact_id,
+        "o": org_id,
+        "opp": opportunity_id,
+        "m": meeting_id,
+        "k": kind,
+        "d": direction,
+        "at": occurred_at,
+        "sm": (summary or "")[:4000] or None,
+        "w": float(cfg.get("weights", {}).get(kind, 0.0)),
+        "by": _actor(actor),
+        "ext": external_id,
+        "src": json.dumps(src, default=str),
+        "demo": is_demo,
+    }
+    if is_mysql_session(s):
+        iid = str(uuid.uuid4())
+        params["id"] = iid
+        res = await insert_or_skip_duplicate(
+            s,
             text(
-                "INSERT INTO interaction (org_id, contact_id, organization_id, opportunity_id, meeting_id, kind, direction, "
-                "occurred_at, summary, weight, recorded_by, external_id, source_ref, is_demo) VALUES (:org, :c, :o, :opp, "
-                ":m, :k, :d, :at, :sm, :w, :by, :ext, CAST(:src AS jsonb), :demo) "
-                "ON CONFLICT (org_id, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id"
+                "INSERT INTO interaction (id, org_id, contact_id, organization_id, opportunity_id, meeting_id, kind, direction, "
+                "occurred_at, summary, weight, recorded_by, external_id, source_ref, is_demo) VALUES (:id, :org, :c, :o, :opp, "
+                ":m, :k, :d, :at, :sm, :w, :by, :ext, CAST(:src AS JSON), :demo)"
             ),
-            {
-                "org": get_settings().org_id,
-                "c": contact_id,
-                "o": org_id,
-                "opp": opportunity_id,
-                "m": meeting_id,
-                "k": kind,
-                "d": direction,
-                "at": occurred_at,
-                "sm": (summary or "")[:4000] or None,
-                "w": float(cfg.get("weights", {}).get(kind, 0.0)),
-                "by": _actor(actor),
-                "ext": external_id,
-                "src": json.dumps(src, default=str),
-                "demo": is_demo,
-            },
+            params,
         )
-    ).scalar()
-    if row is None:  # an adapter re-read the same message
-        return {"id": None, "duplicate": True}
-    iid = str(row)
+        if res.rowcount == 0:
+            return {"id": None, "duplicate": True}
+    else:
+        row = (
+            await s.execute(
+                text(
+                    "INSERT INTO interaction (org_id, contact_id, organization_id, opportunity_id, meeting_id, kind, direction, "
+                    "occurred_at, summary, weight, recorded_by, external_id, source_ref, is_demo) VALUES (:org, :c, :o, :opp, "
+                    ":m, :k, :d, :at, :sm, :w, :by, :ext, CAST(:src AS jsonb), :demo) "
+                    "ON CONFLICT (org_id, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id"
+                ),
+                params,
+            )
+        ).scalar()
+        if row is None:  # an adapter re-read the same message
+            return {"id": None, "duplicate": True}
+        iid = str(row)
     if kind == "intro" and introduced_by and contact_id and c:
         intro = await _contact(s, introduced_by)
-        await s.execute(
-            text(
-                "INSERT INTO relationship (org_id, from_type, from_id, to_type, to_id, type, last_touch_at, history, source_ref, is_demo) "
-                "VALUES (:org, 'contact', :f, 'contact', :t, 'introduced_by', :at, CAST(:h AS jsonb), CAST(:src AS jsonb), :demo) "
-                "ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET last_touch_at = GREATEST(relationship.last_touch_at, EXCLUDED.last_touch_at), "
-                "history = relationship.history || EXCLUDED.history"
-            ),
-            {
-                "org": get_settings().org_id,
-                "f": contact_id,
-                "t": introduced_by,
-                "at": occurred_at,
-                "h": json.dumps([{"interaction_id": iid, "at": occurred_at.isoformat()}]),
-                "src": json.dumps(src, default=str),
-                "demo": is_demo,
-            },
-        )
+        rel_params = {
+            "org": get_settings().org_id,
+            "f": contact_id,
+            "t": introduced_by,
+            "at": occurred_at,
+            "h": json.dumps([{"interaction_id": iid, "at": occurred_at.isoformat()}]),
+            "src": json.dumps(src, default=str),
+            "demo": is_demo,
+        }
+        if is_mysql_session(s):
+            rel_params["id"] = str(uuid.uuid4())
+            await s.execute(
+                text(
+                    "INSERT INTO relationship (id, org_id, from_type, from_id, to_type, to_id, type, last_touch_at, history, source_ref, is_demo) "
+                    "VALUES (:id, :org, 'contact', :f, 'contact', :t, 'introduced_by', :at, CAST(:h AS JSON), CAST(:src AS JSON), :demo) "
+                    "ON DUPLICATE KEY UPDATE last_touch_at = GREATEST(COALESCE(last_touch_at, VALUES(last_touch_at)), VALUES(last_touch_at)), "
+                    "history = JSON_MERGE_PRESERVE(COALESCE(history, JSON_ARRAY()), VALUES(history))"
+                ),
+                rel_params,
+            )
+        else:
+            await s.execute(
+                text(
+                    "INSERT INTO relationship (org_id, from_type, from_id, to_type, to_id, type, last_touch_at, history, source_ref, is_demo) "
+                    "VALUES (:org, 'contact', :f, 'contact', :t, 'introduced_by', :at, CAST(:h AS jsonb), CAST(:src AS jsonb), :demo) "
+                    "ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET last_touch_at = GREATEST(relationship.last_touch_at, EXCLUDED.last_touch_at), "
+                    "history = relationship.history || EXCLUDED.history"
+                ),
+                rel_params,
+            )
         await link(
             s,
             ("Contact", "contact", introduced_by, intro["name"]),
@@ -234,13 +288,14 @@ async def log_interaction(
 
 
 async def contact_touches(s: AsyncSession, contact_id: str) -> list[Touch]:
+    id_cond = "contact_id = :c" if is_mysql_session(s) else "contact_id = CAST(:c AS uuid)"
     rows = (
         await s.execute(
-            text("SELECT kind, occurred_at FROM interaction WHERE contact_id = CAST(:c AS uuid) ORDER BY occurred_at"),
+            text(f"SELECT kind, occurred_at FROM interaction WHERE {id_cond} ORDER BY occurred_at"),
             {"c": contact_id},
         )
     ).all()
-    return [Touch(r.kind, r.occurred_at) for r in rows]
+    return [Touch(r.kind, r.occurred_at if r.occurred_at.tzinfo else r.occurred_at.replace(tzinfo=UTC)) for r in rows]
 
 
 async def recompute_contact(s: AsyncSession, contact_id: str, rescore: bool = True) -> float | None:
@@ -259,23 +314,36 @@ async def recompute_contact(s: AsyncSession, contact_id: str, rescore: bool = Tr
         "interactions": len(touches),
         "computed_at": now.isoformat(),
     }
-    await s.execute(
-        text(
-            "INSERT INTO relationship (org_id, from_type, from_id, to_type, to_id, type, strength, last_touch_at, history, source_ref, is_demo) "
-            "VALUES (:org, 'contact', :c, 'organization', :o, 'met', :st, :t, '[]'::jsonb, CAST(:src AS jsonb), :demo) "
-            "ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET strength = EXCLUDED.strength, "
-            "last_touch_at = EXCLUDED.last_touch_at, source_ref = EXCLUDED.source_ref"
-        ),
-        {
-            "org": get_settings().org_id,
-            "c": contact_id,
-            "o": c["organization_id"],
-            "st": w,
-            "t": last,
-            "src": json.dumps(src),
-            "demo": c["is_demo"],
-        },
-    )
+    rel_params = {
+        "org": get_settings().org_id,
+        "c": contact_id,
+        "o": c["organization_id"],
+        "st": w,
+        "t": last,
+        "src": json.dumps(src),
+        "demo": c["is_demo"],
+    }
+    if is_mysql_session(s):
+        rel_params["id"] = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO relationship (id, org_id, from_type, from_id, to_type, to_id, type, strength, last_touch_at, history, source_ref, is_demo) "
+                "VALUES (:id, :org, 'contact', :c, 'organization', :o, 'met', :st, :t, CAST('[]' AS JSON), CAST(:src AS JSON), :demo) "
+                "ON DUPLICATE KEY UPDATE strength = VALUES(strength), "
+                "last_touch_at = VALUES(last_touch_at), source_ref = VALUES(source_ref)"
+            ),
+            rel_params,
+        )
+    else:
+        await s.execute(
+            text(
+                "INSERT INTO relationship (org_id, from_type, from_id, to_type, to_id, type, strength, last_touch_at, history, source_ref, is_demo) "
+                "VALUES (:org, 'contact', :c, 'organization', :o, 'met', :st, :t, '[]'::jsonb, CAST(:src AS jsonb), :demo) "
+                "ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET strength = EXCLUDED.strength, "
+                "last_touch_at = EXCLUDED.last_touch_at, source_ref = EXCLUDED.source_ref"
+            ),
+            rel_params,
+        )
     me = await _self_org(s)
     if me and w is not None:
         await link(
@@ -341,27 +409,48 @@ async def log_meeting(
     for cm in commitments:
         if not str(cm.get("text") or "").strip():
             raise Problem(422, "Empty commitment", "each commitment needs text", "validation")
-    mid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO meeting (org_id, contact_ids, opportunity_id, occurred_at, summary, commitments, next_steps, source_ref, is_demo) "
-                    "VALUES (:org, CAST(:c AS uuid[]), :opp, :at, :sm, CAST(:cm AS jsonb), :ns, CAST(:src AS jsonb), :demo) RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "c": contact_ids,
-                    "opp": opportunity_id,
-                    "at": occurred_at,
-                    "sm": summary,
-                    "cm": json.dumps(commitments, default=str),
-                    "ns": next_steps,
-                    "src": json.dumps(src, default=str),
-                    "demo": is_demo,
-                },
-            )
-        ).scalar_one()
-    )
+    if is_mysql_session(s):
+        mid = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO meeting (id, org_id, contact_ids, opportunity_id, occurred_at, summary, commitments, next_steps, source_ref, is_demo) "
+                "VALUES (:id, :org, CAST(:c AS JSON), :opp, :at, :sm, CAST(:cm AS JSON), :ns, CAST(:src AS JSON), :demo)"
+            ),
+            {
+                "id": mid,
+                "org": get_settings().org_id,
+                "c": json.dumps(contact_ids),
+                "opp": opportunity_id,
+                "at": occurred_at,
+                "sm": summary,
+                "cm": json.dumps(commitments, default=str),
+                "ns": next_steps,
+                "src": json.dumps(src, default=str),
+                "demo": is_demo,
+            },
+        )
+    else:
+        mid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO meeting (org_id, contact_ids, opportunity_id, occurred_at, summary, commitments, next_steps, source_ref, is_demo) "
+                        "VALUES (:org, CAST(:c AS uuid[]), :opp, :at, :sm, CAST(:cm AS jsonb), :ns, CAST(:src AS jsonb), :demo) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "c": contact_ids,
+                        "opp": opportunity_id,
+                        "at": occurred_at,
+                        "sm": summary,
+                        "cm": json.dumps(commitments, default=str),
+                        "ns": next_steps,
+                        "src": json.dumps(src, default=str),
+                        "demo": is_demo,
+                    },
+                )
+            ).scalar_one()
+        )
     await node(
         s,
         "Meeting",
@@ -397,8 +486,9 @@ async def log_meeting(
             is_demo=is_demo,
         )
     if opportunity_id:
+        opp_id_cond = "id = :id" if is_mysql_session(s) else "id = CAST(:id AS uuid)"
         title = (
-            await s.execute(text("SELECT title FROM opportunity WHERE id = CAST(:id AS uuid)"), {"id": opportunity_id})
+            await s.execute(text(f"SELECT title FROM opportunity WHERE {opp_id_cond}"), {"id": opportunity_id})
         ).scalar()
         if title is None:
             raise NotFound("opportunity not found")
@@ -473,32 +563,45 @@ async def create_milestone(
     if kind not in ("deadline", "follow_up", "commitment_expiry", "submission"):
         raise Problem(422, "Invalid kind", "unknown milestone kind", "validation")
     src = source_ref or manual_ref(actor)
-    mid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO milestone (org_id, opportunity_id, kind, title, due_at, owner_id, status, contact_id, organization_id, "
-                    "meeting_id, description, created_by, source_ref, is_demo) VALUES (:org, :opp, :k, :t, :due, :own, 'open', :c, :o, "
-                    ":m, :d, :by, CAST(:src AS jsonb), :demo) RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "opp": opportunity_id,
-                    "k": kind,
-                    "t": title,
-                    "due": due_at,
-                    "own": owner_id or (None if isinstance(actor, str) else actor.sub),
-                    "c": contact_id,
-                    "o": organization_id,
-                    "m": meeting_id,
-                    "d": description,
-                    "by": _actor(actor),
-                    "src": json.dumps(src, default=str),
-                    "demo": is_demo,
-                },
-            )
-        ).scalar_one()
-    )
+    params = {
+        "org": get_settings().org_id,
+        "opp": opportunity_id,
+        "k": kind,
+        "t": title,
+        "due": due_at,
+        "own": owner_id or (None if isinstance(actor, str) else actor.sub),
+        "c": contact_id,
+        "o": organization_id,
+        "m": meeting_id,
+        "d": description,
+        "by": _actor(actor),
+        "src": json.dumps(src, default=str),
+        "demo": is_demo,
+    }
+    if is_mysql_session(s):
+        mid = str(uuid.uuid4())
+        params["id"] = mid
+        await s.execute(
+            text(
+                "INSERT INTO milestone (id, org_id, opportunity_id, kind, title, due_at, owner_id, status, contact_id, organization_id, "
+                "meeting_id, description, created_by, source_ref, is_demo) VALUES (:id, :org, :opp, :k, :t, :due, :own, 'open', :c, :o, "
+                ":m, :d, :by, CAST(:src AS JSON), :demo)"
+            ),
+            params,
+        )
+    else:
+        mid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO milestone (org_id, opportunity_id, kind, title, due_at, owner_id, status, contact_id, organization_id, "
+                        "meeting_id, description, created_by, source_ref, is_demo) VALUES (:org, :opp, :k, :t, :due, :own, 'open', :c, :o, "
+                        ":m, :d, :by, CAST(:src AS jsonb), :demo) RETURNING id"
+                    ),
+                    params,
+                )
+            ).scalar_one()
+        )
     await audit_service.record(
         s, actor, "milestone.created", f"milestone:{mid}", {"kind": kind, "due_at": due_at.isoformat()}
     )
@@ -508,16 +611,33 @@ async def create_milestone(
 async def update_milestone(s: AsyncSession, actor: Principal, milestone_id: str, status: str) -> dict[str, Any]:
     if status not in ("open", "done", "cancelled"):
         raise Problem(422, "Invalid status", "status must be open, done or cancelled", "validation")
-    n = (
+    if is_mysql_session(s):
         await s.execute(
             text(
                 "UPDATE milestone SET status = :st, completed_at = CASE WHEN :st = 'done' THEN now() ELSE NULL END "
-                "WHERE id = CAST(:id AS uuid) AND org_id = :org RETURNING id"
+                "WHERE id = :id AND org_id = :org"
             ),
             {"st": status, "id": milestone_id, "org": get_settings().org_id},
         )
-    ).scalar()
-    if n is None:
-        raise NotFound("milestone not found")
+        exists = (
+            await s.execute(
+                text("SELECT 1 FROM milestone WHERE id = :id AND org_id = :org"),
+                {"id": milestone_id, "org": get_settings().org_id},
+            )
+        ).scalar()
+        if not exists:
+            raise NotFound("milestone not found")
+    else:
+        n = (
+            await s.execute(
+                text(
+                    "UPDATE milestone SET status = :st, completed_at = CASE WHEN :st = 'done' THEN now() ELSE NULL END "
+                    "WHERE id = CAST(:id AS uuid) AND org_id = :org RETURNING id"
+                ),
+                {"st": status, "id": milestone_id, "org": get_settings().org_id},
+            )
+        ).scalar()
+        if n is None:
+            raise NotFound("milestone not found")
     await audit_service.record(s, actor, "milestone.updated", f"milestone:{milestone_id}", {"status": status})
     return {"id": milestone_id, "status": status}
