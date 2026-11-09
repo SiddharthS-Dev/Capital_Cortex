@@ -83,14 +83,18 @@ export function AgentCouncil() {
 
         <Tabs.Content value="council" className="space-y-4 pt-4">
           <div className="grid gap-4 xl:grid-cols-[22rem_1fr]">
-            {canRun ? (
-              <Composer agents={data.agents} opportunityId={opportunityId}
-                onOpportunity={(id) => setParam("opportunity", id)} onStarted={(id) => setParam("run", id)} />
-            ) : (
-              <Card><CardContent className="pt-4 text-xs text-muted-foreground">
-                Your role can view council runs but not start them (requires <code className="font-mono">agent:run</code>). Ask an administrator if you need to convene the council.
-              </CardContent></Card>
-            )}
+            {/* min-w-0: without it the grid item's min-width is its content, so truncated result titles widened the
+                picker past the 22rem column, under the run panel */}
+            <div className="min-w-0" data-testid="council-composer-column">
+              {canRun ? (
+                <Composer agents={data.agents} opportunityId={opportunityId}
+                  onOpportunity={(id) => setParam("opportunity", id)} onStarted={(id) => setParam("run", id)} />
+              ) : (
+                <Card><CardContent className="pt-4 text-xs text-muted-foreground">
+                  Your role can view council runs but not start them (requires <code className="font-mono">agent:run</code>). Ask an administrator if you need to convene the council.
+                </CardContent></Card>
+              )}
+            </div>
             <div className="min-w-0">
               {runId ? (
                 <LiveRun key={runId} runId={runId} onClose={() => setParam("run", null)} />

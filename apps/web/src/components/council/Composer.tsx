@@ -154,7 +154,9 @@ export function Composer({ agents, opportunityId, onOpportunity, onStarted }: {
       </CardHeader>
       <CardContent>
         <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (canSubmit) run.mutate(); }} aria-label="Run agent task">
-          <fieldset className="space-y-1">
+          {/* min-w-0 overrides the browser's fieldset min-width: min-content, which let long result titles widen the
+              picker past its 22rem column (under the run panel) */}
+          <fieldset className="min-w-0 space-y-1">
             <legend className="text-xs font-medium">Opportunity</legend>
             <OpportunityPicker value={opportunityId} onChange={onOpportunity} />
           </fieldset>
