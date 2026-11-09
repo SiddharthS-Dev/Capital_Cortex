@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     config_dir: Path = REPO_ROOT / "config"
 
     # --- data ---
-    database_url: str = "postgresql+psycopg://cortex:cortex-dev-pw@localhost:55432/cortex"
+    # MySQL 8.4 is the primary database. The default is the local isolated dev server
+    # (infra/docker-compose.mysql-test.yml); staging/prod must set DATABASE_URL explicitly (see _explicit_database).
+    # This code is MySQL-only. PostgreSQL rollback means redeploying release f2c447a (docs/CORTEX_MYSQL_ROLLBACK_RUNBOOK.md).
+    # No password in the default: local runs pass credentials via DATABASE_URL (CORTEX_MYSQL_DEMO_START.ps1, compose).
+    database_url: str = "mysql+asyncmy://cortex@127.0.0.1:53306/cortex"
     redis_url: str = "redis://localhost:56379/0"
     object_store: str = Field(
         default="http://minio:9000",
@@ -97,6 +101,14 @@ class Settings(BaseSettings):
 
     # --- web ---
     cors_origins: list[str] = ["http://localhost:5373", "http://localhost:3300"]
+    # Request bodies over these sizes get 413 before a handler reads them (platform_core/security.py).
+    # Multipart covers the data room's 50 MB per-file cap plus form overhead.
+    max_request_bytes: int = 5 * 1024 * 1024
+    max_multipart_bytes: int = 55 * 1024 * 1024
+    # Per-principal limits on costly routes (copilot, exports, uploads, share links). Off only for load tests.
+    rate_limit_enabled: bool = True
+    # Sent only when ENV is staging/prod (TLS-terminated); never on the plain-HTTP local stack.
+    hsts_max_age_seconds: int = 31536000
 
     @field_validator("llm_router", "feature_budgets", mode="before")
     @classmethod
@@ -110,6 +122,13 @@ class Settings(BaseSettings):
                 return json.loads(Path(v[1:]).read_text(encoding="utf-8"))
             return json.loads(v)
         return v
+
+    @model_validator(mode="after")
+    def _explicit_database(self) -> Settings:
+        # Outside dev/test a missing DATABASE_URL must fail, never fall back to a default database.
+        if self.env.lower() in ("staging", "prod", "production") and "database_url" not in self.model_fields_set:
+            raise ValueError(f"DATABASE_URL must be set explicitly when ENV={self.env}")
+        return self
 
     @property
     def jwks_url(self) -> str:
