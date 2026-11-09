@@ -14,7 +14,8 @@ from cortex.l7_governance import audit_service
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, in_clause, is_mysql_session
+from platform_core.jsonutil import as_utc
 
 router = APIRouter(prefix="/v1/calendar", tags=["calendar"])
 
@@ -24,38 +25,83 @@ async def _events(
 ) -> list[dict[str, Any]]:
     org = get_settings().org_id
     out: list[dict[str, Any]] = []
-    for r in (
-        await s.execute(
-            text(
-                "SELECT o.id, o.title, o.class::text AS class, o.deadline, o.score_band, o.pipeline_stage::text AS stage, o.url, o.is_demo, "
-                "cp.name AS counterparty FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id WHERE o.org_id = :org "
-                "AND o.status IN ('active','watchlist') AND o.deadline BETWEEN :a AND :b AND (:demo OR NOT o.is_demo) "
-                "AND (CAST(:cls AS text[]) IS NULL OR o.class::text = ANY(:cls)) ORDER BY o.deadline LIMIT 2000"
-            ),
-            {"org": org, "a": start, "b": end, "demo": include_demo, "cls": classes},
+    is_my = is_mysql_session(s)
+    if is_my:
+        where_opp = [
+            "o.org_id = :org",
+            "o.status IN ('active','watchlist')",
+            "o.deadline BETWEEN :a AND :b",
+            "(:demo OR NOT o.is_demo)",
+        ]
+        prm_opp: dict[str, Any] = {"org": org, "a": start, "b": end, "demo": include_demo}
+        if classes:
+            where_opp.append(in_clause("o.class", "cls", classes, prm_opp))
+        sql_opp = (
+            "SELECT o.id, o.title, CAST(o.class AS CHAR) AS class, o.deadline, o.score_band, CAST(o.pipeline_stage AS CHAR) AS stage, o.url, o.is_demo, "
+            "cp.name AS counterparty FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
+            f"WHERE {' AND '.join(where_opp)} ORDER BY o.deadline LIMIT 2000"
         )
-    ).mappings():
+        opp_rows = (await s.execute(text(sql_opp), prm_opp)).mappings()
+    else:
+        opp_rows = (
+            await s.execute(
+                text(
+                    "SELECT o.id, o.title, o.class::text AS class, o.deadline, o.score_band, o.pipeline_stage::text AS stage, o.url, o.is_demo, "
+                    "cp.name AS counterparty FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id WHERE o.org_id = :org "
+                    "AND o.status IN ('active','watchlist') AND o.deadline BETWEEN :a AND :b AND (:demo OR NOT o.is_demo) "
+                    "AND (CAST(:cls AS text[]) IS NULL OR o.class::text = ANY(:cls)) ORDER BY o.deadline LIMIT 2000"
+                ),
+                {"org": org, "a": start, "b": end, "demo": include_demo, "cls": classes},
+            )
+        ).mappings()
+
+    for r in opp_rows:
         out.append({
-            "id": f"deadline:{r['id']}", "type": "deadline", "title": r["title"], "start": r["deadline"].isoformat(),
+            "id": f"deadline:{r['id']}", "type": "deadline", "title": r["title"], "start": as_utc(r["deadline"]).isoformat(),
             "class": r["class"], "band": r["score_band"], "stage": r["stage"], "opportunity_id": str(r["id"]),
-            "counterparty": r["counterparty"], "url": r["url"], "is_demo": r["is_demo"], "ref": f"opportunity:{r['id']}#deadline",
+            "counterparty": r["counterparty"], "url": r["url"], "is_demo": bool(r["is_demo"]), "ref": f"opportunity:{r['id']}#deadline",
         })  # fmt: skip
-    for r in (
-        await s.execute(
-            text(
-                "SELECT m.id, m.kind, m.title, m.due_at, m.status, m.opportunity_id, m.is_demo, o.class::text AS class, c.name AS contact "
-                "FROM milestone m LEFT JOIN opportunity o ON o.id = m.opportunity_id LEFT JOIN contact c ON c.id = m.contact_id "
-                "WHERE m.org_id = :org AND m.status IN ('open','done') AND m.due_at BETWEEN :a AND :b AND (:demo OR NOT m.is_demo) "
-                "AND (CAST(:cls AS text[]) IS NULL OR o.class::text = ANY(:cls) OR m.opportunity_id IS NULL) ORDER BY m.due_at LIMIT 2000"
-            ),
-            {"org": org, "a": start, "b": end, "demo": include_demo, "cls": classes},
+
+    if is_my:
+        where_m = [
+            "m.org_id = :org",
+            "m.status IN ('open','done')",
+            "m.due_at BETWEEN :a AND :b",
+            "(:demo OR NOT m.is_demo)",
+        ]
+        prm_m: dict[str, Any] = {"org": org, "a": start, "b": end, "demo": include_demo}
+        if classes:
+            c_in = in_clause("o.class", "cls", classes, prm_m)
+            where_m.append(f"({c_in} OR m.opportunity_id IS NULL)")
+        sql_m = (
+            "SELECT m.id, m.kind, m.title, m.due_at, m.status, m.opportunity_id, m.is_demo, CAST(o.class AS CHAR) AS class, c.name AS contact "
+            "FROM milestone m LEFT JOIN opportunity o ON o.id = m.opportunity_id LEFT JOIN contact c ON c.id = m.contact_id "
+            f"WHERE {' AND '.join(where_m)} ORDER BY m.due_at LIMIT 2000"
         )
-    ).mappings():
+        m_rows = (await s.execute(text(sql_m), prm_m)).mappings()
+    else:
+        m_rows = (
+            await s.execute(
+                text(
+                    "SELECT m.id, m.kind, m.title, m.due_at, m.status, m.opportunity_id, m.is_demo, o.class::text AS class, c.name AS contact "
+                    "FROM milestone m LEFT JOIN opportunity o ON o.id = m.opportunity_id LEFT JOIN contact c ON c.id = m.contact_id "
+                    "WHERE m.org_id = :org AND m.status IN ('open','done') AND m.due_at BETWEEN :a AND :b AND (:demo OR NOT m.is_demo) "
+                    "AND (CAST(:cls AS text[]) IS NULL OR o.class::text = ANY(:cls) OR m.opportunity_id IS NULL) ORDER BY m.due_at LIMIT 2000"
+                ),
+                {"org": org, "a": start, "b": end, "demo": include_demo, "cls": classes},
+            )
+        ).mappings()
+
+    now_utc = datetime.now(UTC)
+    for r in m_rows:
+        due = r["due_at"]
+        if hasattr(due, "tzinfo") and due.tzinfo is None:
+            due = due.replace(tzinfo=UTC)
         out.append({
-            "id": f"milestone:{r['id']}", "type": r["kind"], "title": r["title"], "start": r["due_at"].isoformat(),
+            "id": f"milestone:{r['id']}", "type": r["kind"], "title": r["title"], "start": due.isoformat(),
             "class": r["class"], "status": r["status"], "opportunity_id": str(r["opportunity_id"]) if r["opportunity_id"] else None,
-            "contact": r["contact"], "is_demo": r["is_demo"], "ref": f"milestone:{r['id']}",
-            "overdue": r["status"] == "open" and r["due_at"] < datetime.now(UTC),
+            "contact": r["contact"], "is_demo": bool(r["is_demo"]), "ref": f"milestone:{r['id']}",
+            "overdue": r["status"] == "open" and due < now_utc,
         })  # fmt: skip
     return out
 

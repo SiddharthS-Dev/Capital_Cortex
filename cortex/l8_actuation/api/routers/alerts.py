@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from typing import Any, Literal
 
@@ -18,7 +19,7 @@ from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, in_clause, insert_or_skip_duplicate, is_mysql_session
 from platform_core.errors import NotFound, Problem
 
 router = APIRouter(prefix="/v1", tags=["alerts"])
@@ -37,31 +38,43 @@ async def list_alerts(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     org = get_settings().org_id
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT a.id, a.kind, a.severity, a.subject_type, a.subject_id, a.message, a.status, a.assigned_to, a.snoozed_until, "
-                    "a.acked_by, a.acked_at, a.drill, a.due_at, a.created_at, a.is_demo, a.source_ref, r.name AS rule_name, "
-                    "(SELECT array_agg(DISTINCT d.channel || ':' || d.status) FROM alert_delivery d WHERE d.alert_id = a.id) AS deliveries "
-                    "FROM alert a LEFT JOIN alert_rule r ON r.id = a.rule_id WHERE a.org_id = :org AND a.status = ANY(:st) "
-                    "AND (CAST(:sev AS text[]) IS NULL OR a.severity = ANY(:sev)) AND (CAST(:k AS text[]) IS NULL OR a.kind = ANY(:k)) "
-                    "AND (:demo OR NOT a.is_demo) ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, "
-                    "a.created_at DESC LIMIT :n"
-                ),
-                {
-                    "org": org,
-                    "st": status or ["open", "acked", "snoozed"],
-                    "sev": severity,
-                    "k": kind,
-                    "demo": include_demo,
-                    "n": limit,
-                },
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["a.org_id = :org"]
+        prm: dict[str, Any] = {"org": org, "demo": include_demo, "n": limit}
+        st = status or ["open", "acked", "snoozed"]
+        where.append(in_clause("a.status", "st", st, prm))
+        if severity:
+            where.append(in_clause("a.severity", "sev", severity, prm))
+        if kind:
+            where.append(in_clause("a.kind", "k", kind, prm))
+        where.append("(:demo OR NOT a.is_demo)")
+        sql = (
+            "SELECT a.id, a.kind, a.severity, a.subject_type, a.subject_id, a.message, a.status, a.assigned_to, a.snoozed_until, "
+            "a.acked_by, a.acked_at, a.drill, a.due_at, a.created_at, a.is_demo, a.source_ref, r.name AS rule_name, "
+            "(SELECT JSON_ARRAYAGG(CONCAT(d.channel, ':', d.status)) FROM (SELECT DISTINCT channel, status, alert_id FROM alert_delivery) d WHERE d.alert_id = a.id) AS deliveries "
+            f"FROM alert a LEFT JOIN alert_rule r ON r.id = a.rule_id WHERE {' AND '.join(where)} "
+            "ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, a.created_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        sql = (
+            "SELECT a.id, a.kind, a.severity, a.subject_type, a.subject_id, a.message, a.status, a.assigned_to, a.snoozed_until, "
+            "a.acked_by, a.acked_at, a.drill, a.due_at, a.created_at, a.is_demo, a.source_ref, r.name AS rule_name, "
+            "(SELECT array_agg(DISTINCT d.channel || ':' || d.status) FROM alert_delivery d WHERE d.alert_id = a.id) AS deliveries "
+            "FROM alert a LEFT JOIN alert_rule r ON r.id = a.rule_id WHERE a.org_id = :org AND a.status = ANY(:st) "
+            "AND (CAST(:sev AS text[]) IS NULL OR a.severity = ANY(:sev)) AND (CAST(:k AS text[]) IS NULL OR a.kind = ANY(:k)) "
+            "AND (:demo OR NOT a.is_demo) ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, "
+            "a.created_at DESC LIMIT :n"
+        )
+        prm = {
+            "org": org,
+            "st": status or ["open", "acked", "snoozed"],
+            "sev": severity,
+            "k": kind,
+            "demo": include_demo,
+            "n": limit,
+        }
+    rows = (await session.execute(text(sql), prm)).mappings().all()
     counts = {
         r[0]: r[1]
         for r in (
@@ -89,16 +102,43 @@ async def create_alert(
     p: Principal = Depends(authorize("alert:write", "alert")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    aid = (
+    is_my = is_mysql_session(session)
+    if is_my:
+        aid = str(uuid.uuid4())
         await session.execute(
             text(
-                "INSERT INTO alert (org_id, kind, severity, subject_type, subject_id, message, source_ref) VALUES "
-                "(:org, 'custom', :sev, :st, :sid, :m, CAST(:src AS jsonb)) RETURNING id"
+                "INSERT INTO alert (id, org_id, kind, severity, subject_type, subject_id, message, source_ref) VALUES "
+                "(:id, :org, 'custom', :sev, :st, :sid, :m, :src)"
             ),
-            {"org": get_settings().org_id, "sev": body.severity, "st": body.subject_type, "sid": body.subject_id, "m": body.message,
-             "src": json.dumps({"kind": "manual_entry", "entered_by": p.username or p.sub})},
+            {
+                "id": aid,
+                "org": get_settings().org_id,
+                "sev": body.severity,
+                "st": body.subject_type,
+                "sid": body.subject_id,
+                "m": body.message,
+                "src": json.dumps({"kind": "manual_entry", "entered_by": p.username or p.sub}),
+            },
         )
-    ).scalar_one()  # fmt: skip
+    else:
+        aid = str(
+            (
+                await session.execute(
+                    text(
+                        "INSERT INTO alert (org_id, kind, severity, subject_type, subject_id, message, source_ref) VALUES "
+                        "(:org, 'custom', :sev, :st, :sid, :m, CAST(:src AS jsonb)) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "sev": body.severity,
+                        "st": body.subject_type,
+                        "sid": body.subject_id,
+                        "m": body.message,
+                        "src": json.dumps({"kind": "manual_entry", "entered_by": p.username or p.sub}),
+                    },
+                )
+            ).scalar_one()
+        )
     await audit_service.record(session, p, "alert.created", f"alert:{aid}", body.model_dump())
     await publish_event({"type": "alert.created", "count": 1, "ids": [str(aid)]})
     return {"id": str(aid)}
@@ -112,14 +152,30 @@ class AlertAction(BaseModel):
 async def _update(
     session: AsyncSession, p: Principal, id: str, sets: str, prm: dict[str, Any], action: str
 ) -> dict[str, Any]:
-    n = (
+    is_my = is_mysql_session(session)
+    if is_my:
+        exists = (
+            await session.execute(
+                text("SELECT status FROM alert WHERE id = :id AND org_id = :org"),
+                {"id": id, "org": get_settings().org_id},
+            )
+        ).scalar()
+        if exists is None:
+            raise NotFound("alert not found")
         await session.execute(
-            text(f"UPDATE alert SET {sets} WHERE id = CAST(:id AS uuid) AND org_id = :org RETURNING status"),
+            text(f"UPDATE alert SET {sets} WHERE id = :id AND org_id = :org"),
             {**prm, "id": id, "org": get_settings().org_id},
         )
-    ).scalar()
-    if n is None:
-        raise NotFound("alert not found")
+        n = (await session.execute(text("SELECT status FROM alert WHERE id = :id"), {"id": id})).scalar()
+    else:
+        n = (
+            await session.execute(
+                text(f"UPDATE alert SET {sets} WHERE id = CAST(:id AS uuid) AND org_id = :org RETURNING status"),
+                {**prm, "id": id, "org": get_settings().org_id},
+            )
+        ).scalar()
+        if n is None:
+            raise NotFound("alert not found")
     await audit_service.record(
         session, p, f"alert.{action}", f"alert:{id}", {k: v for k, v in prm.items() if k != "by"}
     )
@@ -218,18 +274,54 @@ async def create_rule(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     engine.validate_rule(body.kind, body.rule_expr)
-    rid = (
-        await session.execute(
+    is_my = is_mysql_session(session)
+    if is_my:
+        new_id = uuid.uuid4()
+        ch_val = json.dumps(list(body.channels))
+        res = await insert_or_skip_duplicate(
+            session,
             text(
-                "INSERT INTO alert_rule (org_id, name, kind, rule_expr, severity, channels, enabled, description, created_by) VALUES "
-                "(:org, :n, :k, CAST(:e AS jsonb), :sev, :ch, :en, :d, :by) ON CONFLICT (org_id, name) DO NOTHING RETURNING id"
+                "INSERT INTO alert_rule (id, org_id, name, kind, rule_expr, severity, channels, enabled, description, created_by) VALUES "
+                "(:id, :org, :n, :k, CAST(:e AS JSON), :sev, CAST(:ch AS JSON), :en, :d, :by)"
             ),
-            {"org": get_settings().org_id, "n": body.name, "k": body.kind, "e": json.dumps(body.rule_expr), "sev": body.severity,
-             "ch": list(body.channels), "en": body.enabled, "d": body.description, "by": p.sub},
+            {
+                "id": str(new_id),
+                "org": get_settings().org_id,
+                "n": body.name,
+                "k": body.kind,
+                "e": json.dumps(body.rule_expr),
+                "sev": body.severity,
+                "ch": ch_val,
+                "en": body.enabled,
+                "d": body.description,
+                "by": p.sub,
+            },
         )
-    ).scalar()  # fmt: skip
-    if rid is None:
-        raise Problem(409, "Rule exists", "a rule with this name already exists", "conflict")
+        if res.rowcount == 0:
+            raise Problem(409, "Rule exists", "a rule with this name already exists", "conflict")
+        rid = new_id
+    else:
+        rid = (  # type: ignore[assignment]
+            await session.execute(
+                text(
+                    "INSERT INTO alert_rule (org_id, name, kind, rule_expr, severity, channels, enabled, description, created_by) VALUES "
+                    "(:org, :n, :k, CAST(:e AS jsonb), :sev, :ch, :en, :d, :by) ON CONFLICT (org_id, name) DO NOTHING RETURNING id"
+                ),
+                {
+                    "org": get_settings().org_id,
+                    "n": body.name,
+                    "k": body.kind,
+                    "e": json.dumps(body.rule_expr),
+                    "sev": body.severity,
+                    "ch": list(body.channels),
+                    "en": body.enabled,
+                    "d": body.description,
+                    "by": p.sub,
+                },
+            )
+        ).scalar()
+        if rid is None:
+            raise Problem(409, "Rule exists", "a rule with this name already exists", "conflict")
     await audit_service.record(session, p, "alert_rule.created", f"alert_rule:{rid}", body.model_dump())
     return {"id": str(rid)}
 
@@ -246,8 +338,10 @@ async def patch_rule(
     id: str, body: RulePatch, p: Principal = Depends(authorize("alert:write", "alert_rule")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:  # fmt: skip
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     cur = (
-        (await session.execute(text("SELECT kind FROM alert_rule WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+        (await session.execute(text(f"SELECT kind FROM alert_rule WHERE id = {id_clause} AND org_id = :org"),
                                {"id": id, "org": get_settings().org_id}))
         .mappings()
         .first()
@@ -256,13 +350,33 @@ async def patch_rule(
         raise NotFound("rule not found")
     if body.rule_expr is not None:
         engine.validate_rule(cur["kind"], body.rule_expr)
-    await session.execute(
-        text(
-            "UPDATE alert_rule SET rule_expr = COALESCE(CAST(:e AS jsonb), rule_expr), severity = COALESCE(:sev, severity), "
-            "channels = COALESCE(CAST(:ch AS text[]), channels), enabled = COALESCE(:en, enabled) WHERE id = CAST(:id AS uuid)"
-        ),
-        {"e": json.dumps(body.rule_expr) if body.rule_expr is not None else None, "sev": body.severity,
-         "ch": list(body.channels) if body.channels else None, "en": body.enabled, "id": id},
-    )  # fmt: skip
+    if is_my:
+        await session.execute(
+            text(
+                "UPDATE alert_rule SET rule_expr = COALESCE(CAST(:e AS JSON), rule_expr), severity = COALESCE(:sev, severity), "
+                "channels = COALESCE(CAST(:ch AS JSON), channels), enabled = COALESCE(:en, enabled) WHERE id = :id"
+            ),
+            {
+                "e": json.dumps(body.rule_expr) if body.rule_expr is not None else None,
+                "sev": body.severity,
+                "ch": json.dumps(list(body.channels)) if body.channels is not None else None,
+                "en": body.enabled,
+                "id": id,
+            },
+        )
+    else:
+        await session.execute(
+            text(
+                "UPDATE alert_rule SET rule_expr = COALESCE(CAST(:e AS jsonb), rule_expr), severity = COALESCE(:sev, severity), "
+                "channels = COALESCE(CAST(:ch AS text[]), channels), enabled = COALESCE(:en, enabled) WHERE id = CAST(:id AS uuid)"
+            ),
+            {
+                "e": json.dumps(body.rule_expr) if body.rule_expr is not None else None,
+                "sev": body.severity,
+                "ch": list(body.channels) if body.channels else None,
+                "en": body.enabled,
+                "id": id,
+            },
+        )  # fmt: skip
     await audit_service.record(session, p, "alert_rule.updated", f"alert_rule:{id}", body.model_dump(exclude_none=True))
     return {"id": id, "updated": list(body.model_dump(exclude_none=True))}
