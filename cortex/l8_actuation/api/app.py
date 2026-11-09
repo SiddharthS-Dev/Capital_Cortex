@@ -41,11 +41,12 @@ from cortex.l8_actuation.api.routers import (
 from platform_core import __version__
 from platform_core.bus import get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_engine
+from platform_core.db import get_engine, verify_mysql_session
 from platform_core.errors import COMMON_ERROR_RESPONSES, ServiceUnavailable, install_problem_handlers
 from platform_core.idempotency import IdempotencyMiddleware
 from platform_core.observability.metrics import HTTP_LATENCY, start_metrics_server
 from platform_core.observability.otel import setup_otel
+from platform_core.security import BodySizeLimitMiddleware, RequestIdMiddleware, install_log_redaction
 
 
 @asynccontextmanager
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from platform_core.db import session_scope
 
         extensions.verify()  # an enabled extension without an implementation stops start-up
+        await verify_mysql_session(get_engine())  # a non-UTC session would silently skew SQL-generated times
         try:
             async with session_scope() as sess:
                 await settings_service.load_all(sess)  # Admin overrides (router, budgets, governance, taxonomy)
@@ -71,8 +73,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     s = get_settings()
+    install_log_redaction()  # before OTel, so exported log records are redacted too
     if s.env != "test":
         setup_otel(s)
+    prod = s.env.lower() in ("prod", "production")
+    tls = s.env.lower() in ("staging", "prod", "production")
     app = FastAPI(
         title="Inspironics Capital Cortex API",
         version=__version__,
@@ -80,8 +85,9 @@ def create_app() -> FastAPI:
             "OCIF capital intelligence platform. All /v1 endpoints need an OIDC bearer token. Errors are "
             "RFC-7807. Endpoints marked [Phase n] return 501 until that phase ships."
         ),
-        openapi_url="/v1/openapi.json",
-        docs_url="/v1/docs",
+        # Interactive docs are a dev/staging aid; production serves neither them nor the schema.
+        openapi_url=None if prod else "/v1/openapi.json",
+        docs_url=None if prod else "/v1/docs",
         redoc_url=None,
         lifespan=lifespan,
     )
@@ -94,8 +100,12 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "traceparent"],
-        expose_headers=["X-Trace-Id"],
+        expose_headers=["X-Trace-Id", "X-Request-ID"],
     )
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=s.max_request_bytes, max_multipart_bytes=s.max_multipart_bytes
+    )
+    app.add_middleware(RequestIdMiddleware)  # outermost: every response, 413s and CORS preflights included, gets an id
 
     @app.middleware("http")
     async def _metrics_and_headers(request: Request, call_next) -> Response:
@@ -111,6 +121,12 @@ def create_app() -> FastAPI:
         response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+        if not request.url.path.startswith("/v1/docs"):  # Swagger UI loads scripts; JSON responses need nothing
+            response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+        if tls:
+            response.headers.setdefault(
+                "Strict-Transport-Security", f"max-age={s.hsts_max_age_seconds}; includeSubDomains"
+            )
         from platform_core.errors import current_trace_id
 
         tid = current_trace_id()

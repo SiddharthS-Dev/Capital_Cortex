@@ -115,6 +115,11 @@ def problem_body(
     tid = current_trace_id()
     if tid:
         body["trace_id"] = tid
+    from platform_core.security import current_request_id  # late: security imports this module
+
+    rid = current_request_id()
+    if rid:
+        body["request_id"] = rid
     body.update(extra)
     return body
 
