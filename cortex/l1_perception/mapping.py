@@ -5,7 +5,7 @@ A mapping entry is one of:
   ["a.b", "c.d"]                  first path that yields a non-empty value
   {"template": "https://x/{id}"}  format string over the payload's top-level keys
   {"value": "USD"}                a literal (recorded as a source default in field_sources)
-  {"paths": [...], "transform": "date" | "number" | "html" | "list" | "upper"}
+  {"paths": [...], "transform": "date" | "next_date" | "number" | "html" | "list" | "upper"}
 """
 
 from __future__ import annotations
@@ -79,6 +79,15 @@ def to_date(v: Any) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
+def next_date(v: Any) -> datetime | None:
+    """For sources with several cut-off dates: the earliest one still ahead, else the latest (the call has closed)."""
+    dates = [d for d in (to_date(x) for x in (v if isinstance(v, list) else [v])) if d is not None]
+    if not dates:
+        return None
+    upcoming = [d for d in dates if d >= datetime.now(UTC)]
+    return min(upcoming) if upcoming else max(dates)
+
+
 def to_number(v: Any) -> Decimal | None:
     if _empty(v):
         return None
@@ -90,6 +99,7 @@ def to_number(v: Any) -> Decimal | None:
 
 TRANSFORMS = {
     "date": to_date,
+    "next_date": next_date,
     "number": to_number,
     "html": lambda v: strip_html(str(v)) if not _empty(v) else None,
     "upper": lambda v: str(v).upper() if not _empty(v) else None,
