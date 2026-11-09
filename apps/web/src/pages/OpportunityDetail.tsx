@@ -15,7 +15,7 @@ import { api, ApiError } from "@/lib/api";
 import { amountRange, CLASS_LABELS, CLASSES, date, dateTime, FACTOR_LABELS, label, relativeDeadline, STAGE_LABELS, STAGES } from "@/lib/format";
 import { usePermission } from "@/lib/queries";
 import type { GraphData, OpportunityDetail as Detail } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, safeHttpUrl } from "@/lib/utils";
 
 function Gauge({ score, band }: { score: number | null; band: string | null }) {
   const option = useMemo(() => ({
@@ -131,7 +131,7 @@ export function OpportunityDetail() {
               <span>{o.counterparty_name ?? "Unknown counterparty"}{o.counterparty_country ? ` · ${o.counterparty_country}` : ""}</span>
               <span className="tabular-nums">{amountRange(o.amount_min, o.amount_max, o.currency)}</span>
               <span className="inline-flex items-center gap-1"><CalendarClock className="size-4" aria-hidden />{date(o.deadline)} · {relativeDeadline(o.deadline)}</span>
-              {o.url && <a href={o.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary">Source listing <ExternalLink className="size-3" /></a>}
+              {safeHttpUrl(o.url) && <a href={safeHttpUrl(o.url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary">Source listing <ExternalLink className="size-3" /></a>}
             </div>
             {o.factors?.band_reason && <p className="text-sm">{o.factors.band_reason}</p>}
           </div>
