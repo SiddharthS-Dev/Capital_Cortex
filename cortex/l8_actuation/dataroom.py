@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import uuid
 import zipfile
 from datetime import UTC, datetime
 from typing import Any
@@ -23,8 +24,9 @@ from platform_core import objectstore
 from platform_core.auth.principal import Principal
 from platform_core.auth.rbac import get_rbac
 from platform_core.config import get_settings
+from platform_core.db.compat import in_clause, is_mysql_session
 from platform_core.errors import Forbidden, NotFound, Problem
-from platform_core.jsonutil import row
+from platform_core.jsonutil import json_obj, row
 
 BUCKET = "cortex-dataroom"
 MAX_BYTES = 50 * 1024 * 1024
@@ -39,14 +41,22 @@ def _clean_folder(folder: str) -> str:
 async def log_access(s: AsyncSession, actor: Principal | str, action: str, document_id: str | None = None,
                      package_id: str | None = None, share_link_id: str | None = None, detail: dict[str, Any] | None = None) -> None:  # fmt: skip
     who = actor if isinstance(actor, str) else f"user:{actor.sub}"
+    cast_det = "CAST(:det AS JSON)" if is_mysql_session(s) else "CAST(:det AS jsonb)"
     await s.execute(
         text(
-            "INSERT INTO document_access (org_id, document_id, package_id, share_link_id, actor, action, detail) VALUES "
-            "(:org, :d, :p, :sl, :a, :act, CAST(:det AS jsonb))"
+            f"INSERT INTO document_access (org_id, document_id, package_id, share_link_id, actor, action, detail) VALUES "
+            f"(:org, :d, :p, :sl, :a, :act, {cast_det})"
         ),
-        {"org": get_settings().org_id, "d": document_id, "p": package_id, "sl": share_link_id, "a": who, "act": action,
-         "det": json.dumps(detail or {})},
-    )  # fmt: skip
+        {
+            "org": get_settings().org_id,
+            "d": document_id,
+            "p": package_id,
+            "sl": share_link_id,
+            "a": who,
+            "act": action,
+            "det": json.dumps(detail or {}),
+        },
+    )
 
 
 def _can_read(actor: Principal, classification: str) -> bool:
@@ -84,27 +94,85 @@ async def upload(
     checksum = hashlib.sha256(data).hexdigest()
     if prev:
         await s.execute(text("UPDATE document SET is_latest = false WHERE id = :id"), {"id": prev["id"]})
-    did = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO document (org_id, kind, title, storage_key, version, previous_version_id, approved_repo, checksum, "
-                    "classification, dd_tags, folder, filename, content_type, size_bytes, uploaded_by, opportunity_id, legal_hold, "
-                    "source_ref, is_demo) VALUES (:org, :k, :t, 'pending', :v, :prev, false, :c, :cls, :tags, :f, :fn, :ct, :n, :by, "
-                    ":opp, :lh, CAST(:src AS jsonb), :demo) RETURNING id"
+    is_my = is_mysql_session(s)
+    if is_my:
+        did = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO document (id, org_id, kind, title, storage_key, version, previous_version_id, approved_repo, checksum, "
+                "classification, dd_tags, folder, filename, content_type, size_bytes, uploaded_by, opportunity_id, legal_hold, "
+                "source_ref, is_demo) VALUES (:id, :org, :k, :t, 'pending', :v, :prev, false, :c, :cls, CAST(:tags AS JSON), :f, :fn, :ct, :n, :by, "
+                ":opp, :lh, CAST(:src AS JSON), :demo)"
+            ),
+            {
+                "id": did,
+                "org": org,
+                "k": kind,
+                "t": title,
+                "v": version,
+                "prev": prev["id"] if prev else None,
+                "c": checksum,
+                "cls": classification,
+                "tags": json.dumps([t.strip().lower() for t in dd_tags if t.strip()]),
+                "f": folder,
+                "fn": filename,
+                "ct": content_type,
+                "n": len(data),
+                "by": actor.sub,
+                "opp": opportunity_id,
+                "lh": bool(prev and prev["legal_hold"]),
+                "src": json.dumps(
+                    source_ref
+                    or {
+                        "kind": "upload",
+                        "uploaded_by": actor.username or actor.sub,
+                        "filename": filename,
+                        "at": datetime.now(UTC).isoformat(),
+                    }
                 ),
-                {
-                    "org": org, "k": kind, "t": title, "v": version, "prev": prev["id"] if prev else None, "c": checksum,
-                    "cls": classification, "tags": [t.strip().lower() for t in dd_tags if t.strip()], "f": folder,
-                    "fn": filename, "ct": content_type, "n": len(data), "by": actor.sub, "opp": opportunity_id,
-                    "lh": bool(prev and prev["legal_hold"]),
-                    "src": json.dumps(source_ref or {"kind": "upload", "uploaded_by": actor.username or actor.sub,
-                                                     "filename": filename, "at": datetime.now(UTC).isoformat()}),
-                    "demo": is_demo,
-                },
-            )
-        ).scalar_one()
-    )  # fmt: skip
+                "demo": is_demo,
+            },
+        )
+    else:
+        did = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO document (org_id, kind, title, storage_key, version, previous_version_id, approved_repo, checksum, "
+                        "classification, dd_tags, folder, filename, content_type, size_bytes, uploaded_by, opportunity_id, legal_hold, "
+                        "source_ref, is_demo) VALUES (:org, :k, :t, 'pending', :v, :prev, false, :c, :cls, :tags, :f, :fn, :ct, :n, :by, "
+                        ":opp, :lh, CAST(:src AS jsonb), :demo) RETURNING id"
+                    ),
+                    {
+                        "org": org,
+                        "k": kind,
+                        "t": title,
+                        "v": version,
+                        "prev": prev["id"] if prev else None,
+                        "c": checksum,
+                        "cls": classification,
+                        "tags": [t.strip().lower() for t in dd_tags if t.strip()],
+                        "f": folder,
+                        "fn": filename,
+                        "ct": content_type,
+                        "n": len(data),
+                        "by": actor.sub,
+                        "opp": opportunity_id,
+                        "lh": bool(prev and prev["legal_hold"]),
+                        "src": json.dumps(
+                            source_ref
+                            or {
+                                "kind": "upload",
+                                "uploaded_by": actor.username or actor.sub,
+                                "filename": filename,
+                                "at": datetime.now(UTC).isoformat(),
+                            }
+                        ),
+                        "demo": is_demo,
+                    },
+                )
+            ).scalar_one()
+        )
     key = f"docs/{did}/v{version}/{_SAFE.sub('_', filename)[:120]}"
     await objectstore.put_bytes(BUCKET, key, data, content_type or "application/octet-stream")
     await s.execute(text("UPDATE document SET storage_key = :k WHERE id = :id"), {"k": key, "id": did})
@@ -150,10 +218,11 @@ async def ingest_object(s: AsyncSession, signal_id: str, raw: dict[str, Any], re
 
 
 async def get_document(s: AsyncSession, actor: Principal, did: str) -> dict[str, Any]:
+    id_clause = ":id" if is_mysql_session(s) else "CAST(:id AS uuid)"
     r = (
         (
             await s.execute(
-                text("SELECT * FROM document WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM document WHERE id = {id_clause} AND org_id = :org"),
                 {"id": did, "org": get_settings().org_id},
             )
         )
@@ -189,12 +258,16 @@ async def set_approved(s: AsyncSession, actor: Principal, did: str, approved: bo
 
 async def checklist(s: AsyncSession, demo: bool | None = None) -> dict[str, Any]:
     items = yaml.safe_load((get_settings().config_dir / "dd_checklist.yaml").read_text(encoding="utf-8"))["items"]
+    is_my = is_mysql_session(s)
+    demo_clause = (
+        "(:demo IS NULL OR is_demo = :demo)" if is_my else "(CAST(:demo AS boolean) IS NULL OR is_demo = :demo)"
+    )
     docs = (
         (
             await s.execute(
                 text(
                     "SELECT id, title, version, checksum, approved_repo, dd_tags, folder, classification FROM document "
-                    "WHERE org_id = :org AND is_latest AND (CAST(:demo AS boolean) IS NULL OR is_demo = :demo)"
+                    f"WHERE org_id = :org AND is_latest AND {demo_clause}"
                 ),
                 {"org": get_settings().org_id, "demo": demo},
             )
@@ -202,10 +275,11 @@ async def checklist(s: AsyncSession, demo: bool | None = None) -> dict[str, Any]
         .mappings()
         .all()
     )
+    docs_parsed = [row(d) for d in docs]
     out = []
     for it in items:
-        matched = [row(d) for d in docs if set(d["dd_tags"] or []) & set(it["tags"])]
-        approved = [d for d in matched if d["approved_repo"]]
+        matched = [d for d in docs_parsed if set(d.get("dd_tags") or []) & set(it["tags"])]
+        approved = [d for d in matched if d.get("approved_repo")]
         status = "covered" if approved else ("pending_approval" if matched else "missing")
         out.append({**it, "documents": matched, "status": status})
     return {"items": out, "covered": sum(1 for i in out if i["status"] == "covered"), "total": len(out)}
@@ -219,16 +293,24 @@ async def assemble(s: AsyncSession, actor: Principal, name: str, document_ids: l
         document_ids = list(dict.fromkeys(d["id"] for i in cl["items"] for d in i["documents"] if d["approved_repo"]))
     if not document_ids:
         raise Problem(422, "Nothing to package", "no approved documents selected", "validation")
-    docs = (
-        (
-            await s.execute(
-                text("SELECT * FROM document WHERE org_id = :org AND id = ANY(CAST(:ids AS uuid[]))"),
-                {"org": org, "ids": document_ids},
-            )
+    is_my = is_mysql_session(s)
+    if is_my:
+        prm = {"org": org}
+        id_clause = in_clause("id", "doc_id", document_ids, prm)
+        docs = (
+            (await s.execute(text(f"SELECT * FROM document WHERE org_id = :org AND {id_clause}"), prm)).mappings().all()
         )
-        .mappings()
-        .all()
-    )
+    else:
+        docs = (
+            (
+                await s.execute(
+                    text("SELECT * FROM document WHERE org_id = :org AND id = ANY(CAST(:ids AS uuid[]))"),
+                    {"org": org, "ids": document_ids},
+                )
+            )
+            .mappings()
+            .all()
+        )
     found = {str(d["id"]) for d in docs}
     missing = [i for i in document_ids if i not in found]
     unapproved = [str(d["id"]) for d in docs if not d["approved_repo"]]
@@ -250,23 +332,53 @@ async def assemble(s: AsyncSession, actor: Principal, name: str, document_ids: l
             arc = f"{d['folder'].strip('/') + '/' if d['folder'] != '/' else ''}{d['filename'] or d['title']}"
             z.writestr(arc, data)
             manifest_files.append({"path": arc, "document_id": str(d["id"]), "title": d["title"], "version": d["version"],
-                                   "sha256": sha, "size": len(data), "classification": d["classification"], "dd_tags": list(d["dd_tags"])})  # fmt: skip
+                                   "sha256": sha, "size": len(data), "classification": d["classification"], "dd_tags": json_obj(d["dd_tags"], [])})  # fmt: skip
         manifest = {"name": name, "created_at": datetime.now(UTC).isoformat(), "created_by": actor.username or actor.sub,
                     "files": manifest_files, "algorithm": "sha256"}  # fmt: skip
         z.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
     blob = buf.getvalue()
-    pid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO dataroom_package (org_id, name, opportunity_id, document_ids, manifest, storage_key, checksum, size_bytes, "
-                    "created_by, is_demo) VALUES (:org, :n, :opp, CAST(:ids AS uuid[]), CAST(:m AS jsonb), 'pending', :c, :sz, :by, :demo) RETURNING id"
-                ),
-                {"org": org, "n": name, "opp": opportunity_id, "ids": [str(d["id"]) for d in docs], "m": json.dumps(manifest),
-                 "c": hashlib.sha256(blob).hexdigest(), "sz": len(blob), "by": actor.sub, "demo": all(d["is_demo"] for d in docs)},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    if is_my:
+        pid = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO dataroom_package (id, org_id, name, opportunity_id, document_ids, manifest, storage_key, checksum, size_bytes, "
+                "created_by, is_demo) VALUES (:id, :org, :n, :opp, CAST(:ids AS JSON), CAST(:m AS JSON), 'pending', :c, :sz, :by, :demo)"
+            ),
+            {
+                "id": pid,
+                "org": org,
+                "n": name,
+                "opp": opportunity_id,
+                "ids": json.dumps([str(d["id"]) for d in docs]),
+                "m": json.dumps(manifest),
+                "c": hashlib.sha256(blob).hexdigest(),
+                "sz": len(blob),
+                "by": actor.sub,
+                "demo": all(d["is_demo"] for d in docs),
+            },
+        )
+    else:
+        pid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO dataroom_package (org_id, name, opportunity_id, document_ids, manifest, storage_key, checksum, size_bytes, "
+                        "created_by, is_demo) VALUES (:org, :n, :opp, CAST(:ids AS uuid[]), CAST(:m AS jsonb), 'pending', :c, :sz, :by, :demo) RETURNING id"
+                    ),
+                    {
+                        "org": org,
+                        "n": name,
+                        "opp": opportunity_id,
+                        "ids": [str(d["id"]) for d in docs],
+                        "m": json.dumps(manifest),
+                        "c": hashlib.sha256(blob).hexdigest(),
+                        "sz": len(blob),
+                        "by": actor.sub,
+                        "demo": all(d["is_demo"] for d in docs),
+                    },
+                )
+            ).scalar_one()
+        )
     key = f"packages/{pid}.zip"
     await objectstore.put_bytes(BUCKET, key, blob, "application/zip")
     await s.execute(text("UPDATE dataroom_package SET storage_key = :k WHERE id = :id"), {"k": key, "id": pid})
@@ -278,10 +390,11 @@ async def assemble(s: AsyncSession, actor: Principal, name: str, document_ids: l
 
 
 async def package(s: AsyncSession, pid: str) -> dict[str, Any]:
+    cast_id = ":id" if is_mysql_session(s) else "CAST(:id AS uuid)"
     r = (
         (
             await s.execute(
-                text("SELECT * FROM dataroom_package WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM dataroom_package WHERE id = {cast_id} AND org_id = :org"),
                 {"id": pid, "org": get_settings().org_id},
             )
         )
@@ -290,26 +403,67 @@ async def package(s: AsyncSession, pid: str) -> dict[str, Any]:
     )
     if r is None:
         raise NotFound("package not found")
-    return dict(r)
+    d = dict(r)
+    if isinstance(d.get("manifest"), str):
+        d["manifest"] = json.loads(d["manifest"])
+    if isinstance(d.get("document_ids"), str):
+        d["document_ids"] = json.loads(d["document_ids"])
+    return d
+
+
+def assert_package_clearance(actor: Principal, pkg: dict[str, Any]) -> None:
+    """A package is as sensitive as its most restricted document: a reader below that clearance can't see its manifest,
+    download it or request a share link for it. A file without a recorded classification counts as restricted."""
+    for f in (pkg.get("manifest") or {}).get("files", []):
+        if not _can_read(actor, f.get("classification") or "restricted"):
+            raise Forbidden("The package contains a document above your clearance",
+                            reasons=["classification_exceeds_clearance"])  # fmt: skip
 
 
 async def request_share(
     s: AsyncSession, actor: Principal, pid: str, recipient: str, expires_in_days: int, message: str | None
 ) -> dict[str, Any]:
     pkg = await package(s, pid)
-    sid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO share_link (org_id, package_id, recipient, token_hash, status, expires_in_days, created_by, is_demo) VALUES "
-                    "(:org, :p, :r, :h, 'pending_approval', :d, :by, :demo) RETURNING id"
-                ),
-                # placeholder hash (never a usable token) until release mints the real one
-                {"org": get_settings().org_id, "p": pid, "r": recipient.lower(), "h": hashlib.sha256(f"pending:{pid}:{recipient}:{datetime.now(UTC)}".encode()).hexdigest(),
-                 "d": expires_in_days, "by": actor.sub, "demo": pkg["is_demo"]},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    assert_package_clearance(actor, pkg)
+    if is_mysql_session(s):
+        sid = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO share_link (id, org_id, package_id, recipient, token_hash, status, expires_in_days, created_by, is_demo) VALUES "
+                "(:id, :org, :p, :r, :h, 'pending_approval', :d, :by, :demo)"
+            ),
+            {
+                "id": sid,
+                "org": get_settings().org_id,
+                "p": pid,
+                "r": recipient.lower(),
+                "h": hashlib.sha256(f"pending:{pid}:{recipient}:{datetime.now(UTC)}".encode()).hexdigest(),
+                "d": expires_in_days,
+                "by": actor.sub,
+                "demo": pkg["is_demo"],
+            },
+        )
+    else:
+        sid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO share_link (org_id, package_id, recipient, token_hash, status, expires_in_days, created_by, is_demo) VALUES "
+                        "(:org, :p, :r, :h, 'pending_approval', :d, :by, :demo) RETURNING id"
+                    ),
+                    # placeholder hash (never a usable token) until release mints the real one
+                    {
+                        "org": get_settings().org_id,
+                        "p": pid,
+                        "r": recipient.lower(),
+                        "h": hashlib.sha256(f"pending:{pid}:{recipient}:{datetime.now(UTC)}".encode()).hexdigest(),
+                        "d": expires_in_days,
+                        "by": actor.sub,
+                        "demo": pkg["is_demo"],
+                    },
+                )
+            ).scalar_one()
+        )
     body = (
         f"{message.strip() + chr(10) + chr(10) if message else ''}You have been given access to the data-room package "
         f"“{pkg['name']}” ({len(pkg['manifest']['files'])} files, SHA-256 manifest included).\n\n"
@@ -348,7 +502,10 @@ async def open_share(s: AsyncSession, token: str) -> tuple[bytes, dict[str, Any]
     )
     if r is None or r["status"] != "active":
         raise NotFound("link not found")
-    if r["expires_at"] < datetime.now(UTC):
+    exp = r["expires_at"]
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    if exp < datetime.now(UTC):
         await s.execute(text("UPDATE share_link SET status = 'expired' WHERE id = :id"), {"id": r["id"]})
         raise Problem(410, "Link expired", "this data-room link has expired", "gone")
     pkg = await package(s, str(r["package_id"]))
