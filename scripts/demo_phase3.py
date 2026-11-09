@@ -25,10 +25,9 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "infra" / "keycloak"))
 from demo_phase2 import env_value, step  # noqa: E402
 from devtoken import token  # noqa: E402
-from generate_realm import DEV_PASSWORD  # noqa: E402
+from smoke import setting  # noqa: E402 - dev password from the environment or .env, never committed
 
 API = os.environ.get("API", "http://localhost:8300")
 MAILPIT = os.environ.get("MAILPIT", "http://localhost:8383")
@@ -37,7 +36,7 @@ OUT = ROOT / "docs" / "samples"
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    ha = {"Authorization": f"Bearer {token('dev-analyst', DEV_PASSWORD)}"}
+    ha = {"Authorization": f"Bearer {token('dev-analyst', setting('SMOKE_USER_PASSWORD'))}"}
     c = httpx.Client(base_url=API, timeout=180)
     high = c.get("/v1/opportunities?band=high&limit=50&facets=false&sort=score", headers=ha).json()["items"]
     opp = next((o for o in high if o["class"] not in ("convertible",)), high[0] if high else None)

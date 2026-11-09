@@ -189,15 +189,14 @@ def sample_ids() -> dict[str, Any]:
 
 def get_token() -> str:
     sys.path.insert(0, str(ROOT / "scripts"))
-    sys.path.insert(0, str(ROOT / "infra" / "keycloak"))
     from devtoken import token
 
     user = setting("LOAD_TEST_USER", "dev-analyst")
     pw = setting("LOAD_TEST_PASSWORD", "")
     if not pw:
-        from generate_realm import DEV_PASSWORD
+        import smoke  # dev password from the environment or .env, never committed
 
-        pw = DEV_PASSWORD
+        pw = smoke.setting("SMOKE_USER_PASSWORD")
     return token(user, pw)
 
 

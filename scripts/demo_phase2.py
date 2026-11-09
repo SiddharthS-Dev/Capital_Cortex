@@ -20,9 +20,8 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "infra" / "keycloak"))
 from devtoken import token  # noqa: E402
-from generate_realm import DEV_PASSWORD  # noqa: E402
+from smoke import setting  # noqa: E402 - dev password from the environment or .env, never committed
 
 API = os.environ.get("API", "http://localhost:8300")
 MAILPIT = os.environ.get("MAILPIT", "http://localhost:8383")
@@ -42,7 +41,7 @@ def step(msg: str, ok: bool, detail: str = "") -> None:
 
 
 def main() -> None:
-    analyst = token("dev-analyst", DEV_PASSWORD)
+    analyst = token("dev-analyst", setting("SMOKE_USER_PASSWORD"))
     ha = {"Authorization": f"Bearer {analyst}"}
     c = httpx.Client(base_url=API, timeout=60)
     opp = sys.argv[1] if len(sys.argv) > 1 else None
