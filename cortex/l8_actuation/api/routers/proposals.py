@@ -18,8 +18,9 @@ from cortex.l8_actuation.proposal_builder import packages
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, in_clause, is_mysql_session
 from platform_core.errors import Problem
+from platform_core.security import content_disposition, rate_limit
 
 router = APIRouter(prefix="/v1/proposals", tags=["proposals"])
 PackageType = Literal["vc_pitch", "grant", "debt_facility", "esg_memo"]
@@ -44,23 +45,41 @@ async def list_proposals(
     _: Principal = Depends(authorize("proposal:read", "proposal")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT p.id, p.title, p.package_type, p.status, p.version, p.mode, p.artefacts, p.opportunity_id, op.title AS opportunity_title, "
-                    "p.created_at, p.updated_at, p.created_by, p.is_demo, p.compliance ->> 'status' AS compliance_status, "
-                    "(SELECT count(*) FROM jsonb_array_elements(p.gaps) g WHERE NOT (g ->> 'waived')::boolean) AS open_gaps "
-                    "FROM proposal p JOIN opportunity op ON op.id = p.opportunity_id WHERE p.org_id = :org "
-                    "AND (CAST(:opp AS uuid) IS NULL OR p.opportunity_id = CAST(:opp AS uuid)) AND (CAST(:st AS text[]) IS NULL OR p.status = ANY(:st)) "
-                    "ORDER BY p.updated_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "opp": opportunity_id, "st": status, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["p.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if opportunity_id:
+            where.append("p.opportunity_id = :opp")
+            prm["opp"] = opportunity_id
+        if status:
+            where.append(in_clause("p.status", "st", status, prm))
+        sql = (
+            "SELECT p.id, p.title, p.package_type, p.status, p.version, p.mode, p.artefacts, p.opportunity_id, op.title AS opportunity_title, "
+            "p.created_at, p.updated_at, p.created_by, p.is_demo, p.compliance ->> '$.status' AS compliance_status, "
+            "(SELECT count(*) FROM JSON_TABLE(p.gaps, '$[*]' COLUMNS (waived VARCHAR(10) PATH '$.waived')) jt WHERE jt.waived IS NULL OR jt.waived = 'false' OR jt.waived = '0') AS open_gaps "
+            f"FROM proposal p JOIN opportunity op ON op.id = p.opportunity_id WHERE {' AND '.join(where)} "
+            "ORDER BY p.updated_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+        rows = (await session.execute(text(sql), prm)).mappings().all()
+    else:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT p.id, p.title, p.package_type, p.status, p.version, p.mode, p.artefacts, p.opportunity_id, op.title AS opportunity_title, "
+                        "p.created_at, p.updated_at, p.created_by, p.is_demo, p.compliance ->> 'status' AS compliance_status, "
+                        "(SELECT count(*) FROM jsonb_array_elements(p.gaps) g WHERE NOT (g ->> 'waived')::boolean) AS open_gaps "
+                        "FROM proposal p JOIN opportunity op ON op.id = p.opportunity_id WHERE p.org_id = :org "
+                        "AND (CAST(:opp AS uuid) IS NULL OR p.opportunity_id = CAST(:opp AS uuid)) AND (CAST(:st AS text[]) IS NULL OR p.status = ANY(:st)) "
+                        "ORDER BY p.updated_at DESC LIMIT :n"
+                    ),
+                    {"org": get_settings().org_id, "opp": opportunity_id, "st": status, "n": limit},
+                )
+            )
+            .mappings()
+            .all()
+        )
     return {"items": [row(r) for r in rows]}
 
 
@@ -71,7 +90,12 @@ class CreateIn(BaseModel):
     title: str | None = Field(None, max_length=300)
 
 
-@router.post("", status_code=201, summary="Create a package: evidence run → cited sections → gaps")
+@router.post(
+    "",
+    status_code=201,
+    dependencies=[Depends(rate_limit("proposal_create", 10))],
+    summary="Create a package: evidence run → cited sections → gaps",
+)
 async def create(
     body: CreateIn,
     p: Principal = Depends(authorize("proposal:write", "proposal")),
@@ -97,7 +121,11 @@ async def get_version(id: str, version: int, _: Principal = Depends(authorize("p
     return await svc.version(session, id, version)
 
 
-@router.post("/{id}/generate", summary="Regenerate all sections from current evidence (new version)")
+@router.post(
+    "/{id}/generate",
+    dependencies=[Depends(rate_limit("proposal_generate", 10))],
+    summary="Regenerate all sections from current evidence (new version)",
+)
 async def generate(
     id: str,
     p: Principal = Depends(authorize("proposal:write", "proposal")),
@@ -148,7 +176,11 @@ async def waive(id: str, key: str, gap_id: str, body: WaiverIn,
     return await svc.waive(session, p, id, key, gap_id, body.reason)
 
 
-@router.get("/{id}/export", summary="Export an artefact: docx | pptx | xlsx | pdf (stored with its checksum; audited)")
+@router.get(
+    "/{id}/export",
+    dependencies=[Depends(rate_limit("proposal_export", 20))],
+    summary="Export an artefact: docx | pptx | xlsx | pdf (stored with its checksum; audited)",
+)
 async def export(
     id: str,
     fmt: Literal["docx", "pptx", "xlsx", "pdf"],
@@ -161,7 +193,7 @@ async def export(
     except RuntimeError as e:
         raise Problem(503, "Format unavailable", str(e), "service-unavailable") from e
     return Response(data, media_type=ag.CONTENT_TYPES[fmt],
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Content-SHA256": stored["sha256"]})  # fmt: skip
+                    headers={"Content-Disposition": content_disposition(filename, f"proposal.{fmt}"), "X-Content-SHA256": stored["sha256"]})  # fmt: skip
 
 
 @router.get("/{id}/preview", summary="HTML preview of an artefact's text (same content as the exports)")
