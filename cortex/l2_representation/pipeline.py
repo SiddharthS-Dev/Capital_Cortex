@@ -20,8 +20,10 @@ from cortex.l2_representation.typer import type_signal
 from cortex.l4_reasoning.score_service import score_opportunity
 from platform_core import embeddings
 from platform_core.bus import get_bus
+from platform_core.config import get_settings
 from platform_core.db import session_scope
-from platform_core.db.vector import to_pgvector
+from platform_core.db.compat import is_mysql_session
+from platform_core.db.vector import publish_vector_change, to_blob, to_pgvector
 
 log = logging.getLogger(__name__)
 EVENTS = "cortex.events"
@@ -33,12 +35,13 @@ async def publish_event(event: dict[str, Any]) -> None:
 
 async def process_signal(signal_id: str) -> dict[str, Any]:
     async with session_scope() as s:
+        sig_tbl = "`signal`" if is_mysql_session(s) else "signal"
         row = (
             (
                 await s.execute(
                     text(
-                        "SELECT sg.id, sg.normalized, sg.source_ref, sg.is_demo, sg.raw, s.kind AS source_kind, "
-                        "s.adapter_key, s.config FROM signal sg JOIN source s ON s.id = sg.source_id WHERE sg.id = :id"
+                        f"SELECT sg.id, sg.normalized, sg.source_ref, sg.is_demo, sg.raw, s.kind AS source_kind, "
+                        f"s.adapter_key, s.config FROM {sig_tbl} sg JOIN source s ON s.id = sg.source_id WHERE sg.id = :id"
                     ),
                     {"id": signal_id},
                 )
@@ -46,24 +49,27 @@ async def process_signal(signal_id: str) -> dict[str, Any]:
             .mappings()
             .one()
         )
+        raw = json.loads(row["raw"]) if isinstance(row["raw"], str) else (row["raw"] or {})
+        cfg = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] or {})
+        sref = json.loads(row["source_ref"]) if isinstance(row["source_ref"], str) else (row["source_ref"] or {})
+        norm = json.loads(row["normalized"]) if isinstance(row["normalized"], str) else (row["normalized"] or {})
+
         if row["source_kind"] == "dataroom":
             from cortex.l8_actuation.dataroom import ingest_object
 
-            out = await ingest_object(s, signal_id, row["raw"] or {}, (row["config"] or {}).get("request") or {})
+            out = await ingest_object(s, signal_id, raw, (cfg).get("request") or {})
             return {"type": "document.ingested", **out}
         if row["source_kind"] in ("mailbox", "calendar"):
             # relationship signals feed L3 memory, not the opportunity pipeline (FR-04)
             from cortex.l3_memory.interaction_ingest import ingest
 
-            cfg_req = ((row["config"] or {}).get("request") or {}) if isinstance(row["config"], dict) else {}
-            out = await ingest(
-                s, signal_id, row["raw"] or {}, row["adapter_key"], list(cfg_req.get("self_addresses") or [])
-            )
+            cfg_req = ((cfg).get("request") or {}) if isinstance(cfg, dict) else {}
+            out = await ingest(s, signal_id, raw, row["adapter_key"], list(cfg_req.get("self_addresses") or []))
             await publish_event(
                 {"type": "relationship.updated", "source_id": row["adapter_key"], "count": out.get("interactions", 0)}
             )
             return {"type": "interaction.ingested", **out}
-        sig = Signal(**row["normalized"])
+        sig = Signal(**norm)
         cls = await classify(sig)
         tags = type_signal(sig)
         counterparty_id = None
@@ -86,7 +92,7 @@ async def process_signal(signal_id: str) -> dict[str, Any]:
         opp_id, created = await write_opportunity(
             s,
             signal_id=signal_id,
-            signal_ref=row["source_ref"],
+            signal_ref=sref,
             sig=sig,
             cls=cls,
             tags=tags,
@@ -94,25 +100,37 @@ async def process_signal(signal_id: str) -> dict[str, Any]:
             counterparty_name=sig.counterparty_name,
             is_demo=row["is_demo"],
         )
+
         # retrievable text only (§5.3): title + description
         body = f"{sig.title}\n{sig.description or ''}"
-        await s.execute(
-            text(
+        if is_mysql_session(s):
+            embed_sql = (
+                "INSERT INTO embedding (org_id, entity_id, entity_type, model, dim, text_hash, vector, is_demo) "
+                "VALUES ((SELECT org_id FROM `signal` WHERE id = :sid), :eid, 'opportunity', :model, 1024, md5(:body), "
+                ":vec, :demo) ON DUPLICATE KEY UPDATE vector = VALUES(vector), text_hash = VALUES(text_hash)"
+            )
+            vec = to_blob(embeddings.embed(body))
+        else:  # PostgreSQL rollback build (RB-1): pgvector column, ON CONFLICT on the unique key
+            embed_sql = (
                 "INSERT INTO embedding (org_id, entity_id, entity_type, model, dim, text_hash, vector, is_demo) "
                 "VALUES ((SELECT org_id FROM signal WHERE id = :sid), :eid, 'opportunity', :model, 1024, md5(:body), "
                 "CAST(:vec AS vector), :demo) ON CONFLICT (org_id, entity_id, model, chunk_index) "
                 "DO UPDATE SET vector = EXCLUDED.vector, text_hash = EXCLUDED.text_hash"
-            ),
+            )
+            vec = to_pgvector(embeddings.embed(body))  # type: ignore[assignment]
+        await s.execute(
+            text(embed_sql),
             {
                 "sid": signal_id,
                 "eid": opp_id,
                 "model": embeddings.MODEL,
                 "body": body,
-                "vec": to_pgvector(embeddings.embed(body)),
+                "vec": vec,
                 "demo": row["is_demo"],
             },
         )
         scored = await score_opportunity(s, opp_id)
+    await publish_vector_change(get_settings().org_id)  # after the commit, so a rebuild cannot miss this row
     event = {
         "type": "opportunity.created" if created else "opportunity.updated",
         "opportunity_id": opp_id,

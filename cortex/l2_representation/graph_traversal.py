@@ -1,13 +1,7 @@
-"""Bounded CKG traversal in SQL over AGE's own label tables (R3 load fix, docs/LOAD_TEST.md §4.1/§4.3).
+"""Bounded graph traversal in SQL over relational entity and relationship_edge tables (MySQL 8.4).
 
-Two Cypher shapes don't scale on AGE:
-- an undirected hop ``(n)-[r]-(m)`` compiles to an OR join that no index can serve, so every vertex is scanned;
-- variable-length patterns ``[*1..k]`` copy the whole graph into each backend's memory on first use.
-
-The helpers here walk ``ckg._ag_label_edge`` and ``ckg._ag_label_vertex`` (the parents every label table inherits
-from) by graph id. Each hop is an index scan on ``start_id``/``end_id`` (migration 0005), and the paths search is a
-bidirectional BFS with a frontier cap. It is the same graph, read in the same transaction: results match the
-Cypher templates, only bounded.
+The helpers here walk `relationship_edge` and `entity` by entity ID. Each hop is an index scan on
+`from_entity`/`to_entity`, and the paths search is a bidirectional BFS with a frontier cap.
 """
 
 from __future__ import annotations
@@ -18,71 +12,90 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from platform_core.db import age
+from platform_core.config import get_settings
 
 FRONTIER_CAP = 20_000  # edges fetched per BFS level; beyond it the search reports truncated=True
 
 
 async def find(s: AsyncSession, ids: list[str]) -> dict[str, str]:
-    """Domain id (the vertex ``id`` property) → AGE graph id, via the per-label GIN properties indexes."""
-    await age.prepare(s)
+    """Domain id (the vertex ``id`` property / ref_id) -> entity internal id."""
+    if not ids:
+        return {}
     out: dict[str, str] = {}
     for i in ids:
-        gid = (
+        row = (
             await s.execute(
-                text(
-                    "SELECT id::text FROM ckg._ag_label_vertex WHERE properties @> CAST(:p AS ag_catalog.agtype) LIMIT 1"
-                ),
-                {"p": json.dumps({"id": i})},
+                text("SELECT id FROM entity WHERE org_id = :org AND (ref_id = :id OR id = :id) LIMIT 1"),
+                {"org": get_settings().org_id, "id": i},
             )
-        ).scalar()
-        if gid:
-            out[i] = gid
+        ).scalar_one_or_none()
+        if row:
+            out[i] = str(row)
     return out
 
 
 async def _edges(s: AsyncSession, frontier: set[str], cap: int) -> list[tuple[str, str, str]]:
-    rows = await s.execute(
-        text(
-            "(SELECT id::text, start_id::text, end_id::text FROM ckg._ag_label_edge WHERE start_id = ANY(CAST(:ids AS text[])::ag_catalog.graphid[])) "
-            "UNION ALL (SELECT id::text, start_id::text, end_id::text FROM ckg._ag_label_edge WHERE end_id = ANY(CAST(:ids AS text[])::ag_catalog.graphid[])) "
-            "LIMIT :cap"
-        ),
-        {"ids": sorted(frontier), "cap": cap},
+    if not frontier:
+        return []
+    f_list = sorted(frontier)
+    params: dict[str, Any] = {f"id_{idx}": fid for idx, fid in enumerate(f_list)}
+    params["cap"] = cap
+    params["org"] = get_settings().org_id
+    placeholders = ", ".join(f":id_{idx}" for idx in range(len(f_list)))
+    query = (
+        f"(SELECT id, from_entity, to_entity FROM relationship_edge WHERE org_id = :org AND from_entity IN ({placeholders})) "
+        f"UNION ALL "
+        f"(SELECT id, from_entity, to_entity FROM relationship_edge WHERE org_id = :org AND to_entity IN ({placeholders})) "
+        f"LIMIT :cap"
     )
-    return [(r[0], r[1], r[2]) for r in rows.all()]
+    rows = await s.execute(text(query), params)
+    return [(str(r[0]), str(r[1]), str(r[2])) for r in rows.all()]
 
 
 async def materialise(s: AsyncSession, vids: set[str], eids: set[str]) -> dict[str, Any]:
-    """Graph ids → the API's {nodes, edges} shape (node id = the domain id property)."""
+    """Graph ids -> the API's {nodes, edges} shape (node id = domain id / ref_id)."""
     nodes: dict[str, dict[str, Any]] = {}
     if vids:
-        for r in (
-            await s.execute(
-                text(
-                    "SELECT v.id::text AS gid, c.relname AS label, ag_catalog.agtype_out(v.properties)::text AS props FROM ckg._ag_label_vertex v "
-                    "JOIN pg_class c ON c.oid = v.tableoid WHERE v.id = ANY(CAST(:ids AS text[])::ag_catalog.graphid[])"
-                ),
-                {"ids": sorted(vids)},
-            )
-        ).mappings():
-            props = age.decode_agtype(r["props"]) or {}
-            nodes[r["gid"]] = {"id": props.get("id", r["gid"]), "label": r["label"], "properties": props}
+        v_list = sorted(vids)
+        params: dict[str, Any] = {f"v_{idx}": vid for idx, vid in enumerate(v_list)}
+        params["org"] = get_settings().org_id
+        placeholders = ", ".join(f":v_{idx}" for idx in range(len(v_list)))
+        q_nodes = f"SELECT id, entity_type AS label, ref_id, label AS name, attrs FROM entity WHERE org_id = :org AND id IN ({placeholders})"
+        for r in (await s.execute(text(q_nodes), params)).mappings():
+            gid = str(r["id"])
+            attrs = r["attrs"]
+            props = json.loads(attrs) if isinstance(attrs, str) else (attrs or {})
+            if "name" not in props and r["name"]:
+                props["name"] = r["name"]
+            domain_id = r["ref_id"] or gid
+            props["id"] = domain_id
+            nodes[gid] = {"id": domain_id, "label": r["label"], "properties": props}
+
     edges = []
     if eids:
-        for r in (
-            await s.execute(
-                text(
-                    "SELECT e.id::text AS gid, c.relname AS type, e.start_id::text AS a, e.end_id::text AS b, "
-                    "ag_catalog.agtype_out(e.properties)::text AS props FROM ckg._ag_label_edge e JOIN pg_class c ON c.oid = e.tableoid "
-                    "WHERE e.id = ANY(CAST(:ids AS text[])::ag_catalog.graphid[])"
-                ),
-                {"ids": sorted(eids)},
-            )
-        ).mappings():
-            if r["a"] in nodes and r["b"] in nodes:
-                edges.append({"id": r["gid"], "type": r["type"], "source": nodes[r["a"]]["id"],
-                              "target": nodes[r["b"]]["id"], "properties": age.decode_agtype(r["props"]) or {}})  # fmt: skip
+        e_list = sorted(eids)
+        params = {f"e_{idx}": eid for idx, eid in enumerate(e_list)}
+        params["org"] = get_settings().org_id
+        placeholders = ", ".join(f":e_{idx}" for idx in range(len(e_list)))
+        q_edges = (
+            f"SELECT id, type, from_entity AS a, to_entity AS b, source_ref "
+            f"FROM relationship_edge WHERE org_id = :org AND id IN ({placeholders})"
+        )
+        for r in (await s.execute(text(q_edges), params)).mappings():
+            a = str(r["a"])
+            b = str(r["b"])
+            if a in nodes and b in nodes:
+                sref = r["source_ref"]
+                props = json.loads(sref) if isinstance(sref, str) else (sref or {})
+                edges.append(
+                    {
+                        "id": str(r["id"]),
+                        "type": r["type"],
+                        "source": nodes[a]["id"],
+                        "target": nodes[b]["id"],
+                        "properties": props,
+                    }
+                )
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
@@ -105,7 +118,7 @@ async def neighbourhood(s: AsyncSession, node_id: str, depth: int, limit: int) -
 
 
 async def paths(s: AsyncSession, a_id: str, b_id: str, max_hops: int, limit: int) -> dict[str, Any]:
-    """Shortest undirected paths a → b (≤ max_hops) by bidirectional BFS; one path per meeting vertex."""
+    """Shortest undirected paths a -> b (<= max_hops) by bidirectional BFS; one path per meeting vertex."""
     g = await find(s, [a_id, b_id])
     a, b = g.get(a_id), g.get(b_id)
     if not a or not b or a == b:
