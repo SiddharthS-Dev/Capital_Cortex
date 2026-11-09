@@ -10,3 +10,5 @@ apps/web/test-results
 .hypothesis
 docs/screenshots
 .env
+.env.*
+!.env.example
