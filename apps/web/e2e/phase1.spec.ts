@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { login } from "./helpers";
 
-const SHOTS = "../../docs/screenshots";
+// Untracked test artefacts (git-ignored apps/web/test-results/): E2E runs never overwrite the committed documentation
+// screenshots. Refresh docs/screenshots deliberately with E2E_SCREENSHOT_DIR=../../docs/screenshots.
+const SHOTS = process.env.E2E_SCREENSHOT_DIR ?? "test-results/screenshots";
 
 test.describe("Phase 1: live discovery, scoring, graph, forecast", () => {
   test.beforeEach(({ page }) => {

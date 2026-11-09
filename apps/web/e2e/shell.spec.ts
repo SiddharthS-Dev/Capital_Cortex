@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { login, SMOKE_TOTP_SECRET } from "./helpers";
+import { login, smokeTotpSecret } from "./helpers";
 
-const SHOTS = "../../docs/screenshots";
+// Untracked test artefacts (git-ignored apps/web/test-results/): E2E runs never overwrite the committed documentation
+// screenshots. Refresh docs/screenshots deliberately with E2E_SCREENSHOT_DIR=../../docs/screenshots.
+const SHOTS = process.env.E2E_SCREENSHOT_DIR ?? "test-results/screenshots";
 
 test.describe("Phase 0 shell", () => {
   test.beforeEach(({ page }) => {
@@ -12,7 +14,7 @@ test.describe("Phase 0 shell", () => {
   });
 
   test("auditor: MFA login → role-aware nav → audit chain verifies", async ({ page }) => {
-    await login(page, "smoke-auditor", SMOKE_TOTP_SECRET);
+    await login(page, "smoke-auditor", smokeTotpSecret());
     await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
 
     // Role-aware navigation: auditors see Audit, but not Admin, Alerts or Relationships (hidden, not disabled)

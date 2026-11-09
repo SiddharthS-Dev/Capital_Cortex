@@ -16,8 +16,10 @@ section.
    make test-e2e     # Playwright: MFA login in a browser, role-aware nav, ⌘K, chain verify, dark theme
    ```
 3. **Log in with MFA (by hand)**
-   Open http://localhost:3300 and sign in as `smoke-auditor` / `Cortex!dev-2026` (TOTP pre-enrolled; get the
-   current code with `python -c "import sys; sys.path.insert(0,'scripts'); import smoke; print(smoke.totp(smoke.TOTP_SECRET.encode()))"`). Privileged dev users (`dev-admin`, `dev-approver`, `dev-legal`,
+   Open http://localhost:3300 and sign in as `smoke-auditor` with the dev password from `SMOKE_USER_PASSWORD` in
+   `.env` (TOTP pre-enrolled when the realm was generated with `SMOKE_TOTP_SECRET`; get the current code with
+   `python -c "import sys; sys.path.insert(0,'scripts'); import smoke; print(smoke.totp(smoke.setting('SMOKE_TOTP_SECRET').encode()))"`).
+   Privileged dev users (`dev-admin`, `dev-approver`, `dev-legal`,
    `dev-executive`) are asked to enrol an authenticator app at first login. `dev-analyst` signs in with a
    password only (MFA is optional for analysts, R5).
 4. **Role-aware shell:** compare the navigation of `dev-analyst` (pipeline screens, no Audit/Admin) and
