@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -18,7 +19,7 @@ from cortex.l8_actuation.api.routers.opportunities import enqueue_rescore_all
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session, order_by_nulls
 from platform_core.errors import NotFound, Problem
 
 router = APIRouter(prefix="/v1/scoring", tags=["scoring"])
@@ -72,7 +73,21 @@ async def list_profiles(
         .mappings()
         .all()
     )
-    return {"items": [row(r) for r in rows], "registered_factors": sorted(REGISTRY)}
+    items = []
+    for r in rows:
+        d = row(r)
+        if isinstance(d.get("factors"), str):
+            try:
+                d["factors"] = json.loads(d["factors"])
+            except ValueError:
+                pass
+        if isinstance(d.get("thresholds"), str):
+            try:
+                d["thresholds"] = json.loads(d["thresholds"])
+            except ValueError:
+                pass
+        items.append(d)
+    return {"items": items, "registered_factors": sorted(REGISTRY)}
 
 
 @router.post("/profiles", status_code=201, summary="Create a new profile version (inactive)")
@@ -89,13 +104,16 @@ async def create_profile(
             {"org": org, "n": body.name},
         )
     ).scalar_one()
-    rid = (
+    is_my = is_mysql_session(session)
+    if is_my:
+        rid = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO scoring_profile (org_id, name, version, weights, thresholds, factors_enabled, active, created_by) "
-                "VALUES (:org, :n, :v, CAST(:w AS jsonb), CAST(:t AS jsonb), CAST(:f AS jsonb), false, :by) RETURNING id"
+                "INSERT INTO scoring_profile (id, org_id, name, version, weights, thresholds, factors_enabled, active, created_by) "
+                "VALUES (:id, :org, :n, :v, CAST(:w AS JSON), CAST(:t AS JSON), CAST(:f AS JSON), false, :by)"
             ),
             {
+                "id": str(rid),
                 "org": org,
                 "n": body.name,
                 "v": version,
@@ -105,7 +123,24 @@ async def create_profile(
                 "by": p.username,
             },
         )
-    ).scalar_one()
+    else:
+        rid = (
+            await session.execute(
+                text(
+                    "INSERT INTO scoring_profile (org_id, name, version, weights, thresholds, factors_enabled, active, created_by) "
+                    "VALUES (:org, :n, :v, CAST(:w AS jsonb), CAST(:t AS jsonb), CAST(:f AS jsonb), false, :by) RETURNING id"
+                ),
+                {
+                    "org": org,
+                    "n": body.name,
+                    "v": version,
+                    "w": json.dumps({k: v.model_dump() for k, v in body.factors.items()}),
+                    "t": body.thresholds.model_dump_json(),
+                    "f": json.dumps({k: v.weight > 0 for k, v in body.factors.items()}),
+                    "by": p.username,
+                },
+            )
+        ).scalar_one()
     await audit_service.record(
         session, p, "scoring.profile.create", f"scoring_profile:{rid}", {"name": body.name, "version": version}
     )
@@ -119,9 +154,11 @@ async def activate(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     org = get_settings().org_id
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     exists = (
         await session.execute(
-            text("SELECT name, version FROM scoring_profile WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+            text(f"SELECT name, version FROM scoring_profile WHERE id = {id_clause} AND org_id = :org"),
             {"id": id, "org": org},
         )
     ).first()
@@ -130,7 +167,7 @@ async def activate(
     await session.execute(
         text("UPDATE scoring_profile SET active = false WHERE org_id = :org AND active"), {"org": org}
     )
-    await session.execute(text("UPDATE scoring_profile SET active = true WHERE id = CAST(:id AS uuid)"), {"id": id})
+    await session.execute(text(f"UPDATE scoring_profile SET active = true WHERE id = {id_clause}"), {"id": id})
     await audit_service.record(
         session,
         p,
@@ -156,14 +193,24 @@ async def preview(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     spec = {"factors": {k: v.model_dump() for k, v in body.factors.items()}, "thresholds": body.thresholds.model_dump()}
+    is_my = is_mysql_session(session)
+    if is_my:
+        order_col = order_by_nulls("o.score", asc=False, nulls_last=True)
+        sql = (
+            "SELECT o.id, o.title, CAST(o.class AS CHAR) AS class, o.score, o.score_band, o.factors, o.is_demo FROM opportunity o "
+            "WHERE o.org_id = :org AND o.status IN ('active','watchlist') AND o.factors IS NOT NULL "
+            f"AND (:demo OR NOT o.is_demo) ORDER BY {order_col} LIMIT 2000"
+        )
+    else:
+        sql = (
+            "SELECT o.id, o.title, o.class::text AS class, o.score, o.score_band, o.factors, o.is_demo FROM opportunity o "
+            "WHERE o.org_id = :org AND o.status IN ('active','watchlist') AND o.factors IS NOT NULL "
+            "AND (:demo OR NOT o.is_demo) ORDER BY o.score DESC NULLS LAST LIMIT 2000"
+        )
     rows = (
         (
             await session.execute(
-                text(
-                    "SELECT o.id, o.title, o.class::text AS class, o.score, o.score_band, o.factors, o.is_demo FROM opportunity o "
-                    "WHERE o.org_id = :org AND o.status IN ('active','watchlist') AND o.factors IS NOT NULL "
-                    "AND (:demo OR NOT o.is_demo) ORDER BY o.score DESC NULLS LAST LIMIT 2000"
-                ),
+                text(sql),
                 {"org": get_settings().org_id, "demo": body.include_demo},
             )
         )
@@ -173,11 +220,18 @@ async def preview(
     current_rank = {str(r["id"]): i + 1 for i, r in enumerate(rows)}
     scored = []
     for r in rows:
-        stored = (r["factors"] or {}).get("factors", {})
+        factors_doc = r["factors"]
+        if isinstance(factors_doc, str):
+            try:
+                factors_doc = json.loads(factors_doc)
+            except Exception:
+                factors_doc = {}
+        stored = (factors_doc or {}).get("factors", {})
         results = {
             n: FactorResult(e.get("value"), e.get("method", ""), e.get("evidence", []), e.get("gap"), e.get("gate"))
             for n, e in stored.items()
         }
+
         c = combine(results, spec)
         scored.append((c, r))
     scored.sort(key=lambda t: (t[0].score is None, -(t[0].score or 0)))
