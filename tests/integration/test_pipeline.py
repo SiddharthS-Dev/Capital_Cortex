@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import fakeredis.aioredis
 import pytest
@@ -12,6 +13,7 @@ from cortex.l1_perception.models import Signal
 from cortex.l2_representation.pipeline import process_signal
 from platform_core.bus import streams
 from platform_core.db import age, session_scope
+from platform_core.db.compat import is_mysql_session
 
 pytestmark = pytest.mark.integration
 
@@ -25,32 +27,45 @@ async def bus(engine):
 
 async def _signal(sig: Signal, source_key: str = "it_source") -> str:
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
         src = (
             await s.execute(
-                text(
-                    "INSERT INTO source (name, kind, adapter_key, adapter, terms_note) VALUES (:k, 'api', :k, 'json_api', 't') "
-                    "ON CONFLICT (org_id, adapter_key) DO UPDATE SET name = EXCLUDED.name RETURNING id"
-                ),
+                text("SELECT id FROM source WHERE adapter_key = :k"),
                 {"k": source_key},
             )
-        ).scalar_one()
-        return str(
-            (
-                await s.execute(
-                    text(
-                        "INSERT INTO signal (source_id, external_id, raw, normalized, content_hash, source_ref) VALUES "
-                        "(:src, :ext, '{}'::jsonb, CAST(:n AS jsonb), :h, CAST(:ref AS jsonb)) RETURNING id"
-                    ),
-                    {
-                        "src": src,
-                        "ext": sig.external_id,
-                        "n": sig.model_dump_json(),
-                        "h": sig.content_hash(),
-                        "ref": json.dumps({"kind": "signal_source", "source_id": str(src)}),
-                    },
-                )
-            ).scalar_one()
+        ).scalar_one_or_none()
+        if not src:
+            src = str(uuid.uuid4())
+            await s.execute(
+                text(
+                    "INSERT INTO source (id, name, kind, adapter_key, adapter, terms_note) "
+                    "VALUES (:id, :k, 'api', :k, 'json_api', 't')"
+                ),
+                {"id": src, "k": source_key},
+            )
+        else:
+            src = str(src)
+
+        sig_id = str(uuid.uuid4())
+        sig_tbl = "`signal`" if is_my else "signal"
+        json_type = "JSON" if is_my else "jsonb"
+        empty_obj = "CAST('{}' AS JSON)" if is_my else "'{}'::jsonb"
+
+        await s.execute(
+            text(
+                f"INSERT INTO {sig_tbl} (id, source_id, external_id, raw, normalized, content_hash, source_ref) VALUES "
+                f"(:id, :src, :ext, {empty_obj}, CAST(:n AS {json_type}), :h, CAST(:ref AS {json_type}))"
+            ),
+            {
+                "id": sig_id,
+                "src": src,
+                "ext": sig.external_id,
+                "n": sig.model_dump_json(),
+                "h": sig.content_hash(),
+                "ref": json.dumps({"kind": "signal_source", "source_id": str(src)}),
+            },
         )
+        return sig_id
 
 
 def grant(title="Research grant: AI for clean energy storage", ext="it-1", deadline="2027-03-01T00:00:00Z"):
@@ -79,20 +94,62 @@ async def test_signal_becomes_scored_opportunity_in_graph(engine, bus):
     assert event["type"] == "opportunity.created" and event["class"] == "grant"
     opp_id = event["opportunity_id"]
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
         o = (await s.execute(text("SELECT * FROM opportunity WHERE id = :id"), {"id": opp_id})).mappings().one()
-        assert o["external_key"] == "it_source:it-1" and o["source_ref"]["signal_id"] == sid
+        sref = json.loads(o["source_ref"]) if isinstance(o["source_ref"], str) else o["source_ref"]
+        factors = json.loads(o["factors"]) if isinstance(o["factors"], str) else o["factors"]
+        sectors = json.loads(o["sectors"]) if isinstance(o["sectors"], str) else o["sectors"]
+        assert o["external_key"] == "it_source:it-1" and sref["signal_id"] == sid
         assert o["score_band"] == "insufficient_evidence"  # no organisation profile yet: gaps, never imputed
-        assert o["factors"]["factors"]["geography"]["gap"]
-        assert "ai_data" in o["sectors"]
+        assert factors["factors"]["geography"]["gap"]
+        assert "ai_data" in sectors
         # graph: Opportunity -DERIVED_FROM-> Signal, Organization -OFFERS-> Opportunity
-        rows = await age.cypher(
-            s, "ckg", "MATCH (o:Opportunity {id: $id})-[:DERIVED_FROM]->(sg:Signal) RETURN sg.id", {"id": opp_id}
-        )
-        assert rows == [{"result": sid}]
-        rows = await age.cypher(
-            s, "ckg", "MATCH (org:Organization)-[:OFFERS]->(o:Opportunity {id: $id}) RETURN org.name", {"id": opp_id}
-        )
-        assert rows == [{"result": "U.S. National Science Foundation"}]
+        if is_my:
+            # Query relational mirror graph
+            derived_rows = (
+                (
+                    await s.execute(
+                        text(
+                            "SELECT e2.ref_id AS result FROM relationship_edge re "
+                            "JOIN entity e1 ON e1.id = re.from_entity "
+                            "JOIN entity e2 ON e2.id = re.to_entity "
+                            "WHERE e1.ref_id = :id AND re.type = 'DERIVED_FROM'"
+                        ),
+                        {"id": opp_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            assert [dict(r) for r in derived_rows] == [{"result": sid}]
+            offers_rows = (
+                (
+                    await s.execute(
+                        text(
+                            "SELECT e1.label AS result FROM relationship_edge re "
+                            "JOIN entity e1 ON e1.id = re.from_entity "
+                            "JOIN entity e2 ON e2.id = re.to_entity "
+                            "WHERE e2.ref_id = :id AND re.type = 'OFFERS'"
+                        ),
+                        {"id": opp_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            assert [dict(r) for r in offers_rows] == [{"result": "U.S. National Science Foundation"}]
+        else:
+            rows = await age.cypher(
+                s, "ckg", "MATCH (o:Opportunity {id: $id})-[:DERIVED_FROM]->(sg:Signal) RETURN sg.id", {"id": opp_id}
+            )
+            assert rows == [{"result": sid}]
+            rows = await age.cypher(
+                s,
+                "ckg",
+                "MATCH (org:Organization)-[:OFFERS]->(o:Opportunity {id: $id}) RETURN org.name",
+                {"id": opp_id},
+            )
+            assert rows == [{"result": "U.S. National Science Foundation"}]
         emb = (await s.execute(text("SELECT count(*) FROM embedding WHERE entity_id = :id"), {"id": opp_id})).scalar()
         assert emb == 1
 
@@ -107,10 +164,12 @@ async def test_revised_listing_updates_same_opportunity_and_keeps_human_class(en
     second = await process_signal(await _signal(grant(ext="it-2", deadline="2027-06-01T00:00:00Z")))
     assert second["opportunity_id"] == first["opportunity_id"] and second["type"] == "opportunity.updated"
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
+        cls_col = "class AS c" if is_my else "class::text AS c"
         o = (
             (
                 await s.execute(
-                    text("SELECT class::text AS c, class_source, deadline FROM opportunity WHERE id = :id"),
+                    text(f"SELECT {cls_col}, class_source, deadline FROM opportunity WHERE id = :id"),
                     {"id": first["opportunity_id"]},
                 )
             )
@@ -149,10 +208,13 @@ async def test_same_counterparty_resolves_to_one_organization(engine, bus):
 
 async def test_profile_enables_scoring(engine, bus):
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
+        json_type = "JSON" if is_my else "jsonb"
+        test_src = 'CAST(\'{"kind": "test"}\' AS JSON)' if is_my else '\'{"kind": "test"}\'::jsonb'
         await s.execute(
             text(
-                "INSERT INTO organization (name, normalized_name, kind, country, profile, source_ref) VALUES "
-                "('Inspironics', 'inspironics', 'self', 'US', CAST(:p AS jsonb), '{\"kind\": \"test\"}'::jsonb)"
+                f"INSERT INTO organization (name, normalized_name, kind, country, profile, source_ref) VALUES "
+                f"('Inspironics', 'inspironics', 'self', 'US', CAST(:p AS {json_type}), {test_src})"
             ),
             {
                 "p": json.dumps(
@@ -179,5 +241,6 @@ async def test_profile_enables_scoring(engine, bus):
             .mappings()
             .one()
         )
+        factors = json.loads(o["factors"]) if isinstance(o["factors"], str) else o["factors"]
         assert o["completeness"] >= 0.6 and o["score"] is not None and o["score_band"] != "insufficient_evidence"
-        assert o["factors"]["factors"]["geography"]["value"] == 1.0
+        assert factors["factors"]["geography"]["value"] == 1.0

@@ -8,6 +8,7 @@ forged token, self-approval, stale MFA.
 from __future__ import annotations
 
 import json
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -27,7 +28,7 @@ from platform_core.db import session_scope
 from platform_core.policy import opa
 
 pytestmark = pytest.mark.integration
-KEY = "integration-approval-signing-key-0123456789"
+KEY = secrets.token_urlsafe(32)  # per run: signing and verifying below use this same value
 
 
 @pytest.fixture
@@ -61,32 +62,38 @@ async def _seed_high_opportunity() -> dict[str, str]:
         "description": "Grid-scale energy storage research and batteries", "raise_target": {"min": 100000, "max": 400000, "currency": "USD"},
     }  # fmt: skip
     async with session_scope() as s:
+        is_my = s.bind.dialect.name == "mysql" if s.bind else False
+        json_t = "JSON" if is_my else "jsonb"
+        geo_col = "CAST('[\"US\"]' AS JSON)" if is_my else "ARRAY['US']"
+        stage_col = "CAST('[\"seed\"]' AS JSON)" if is_my else "ARRAY['seed']"
+        sec_col = "CAST('[\"energy_storage\"]' AS JSON)" if is_my else "ARRAY['energy_storage']"
+        esg_col = "CAST('[\"climate\"]' AS JSON)" if is_my else "ARRAY['climate']"
         # the session-scoped database is shared with other tests: there is one self-organisation, use it
         existing = (
             await s.execute(text("SELECT id FROM organization WHERE kind = 'self' AND NOT is_demo LIMIT 1"))
         ).scalar()
         if existing:
             ids["self"] = str(existing)
-            await s.execute(text("UPDATE organization SET profile = CAST(:p AS jsonb), country = 'US' WHERE id = :id"),
+            await s.execute(text(f"UPDATE organization SET profile = CAST(:p AS {json_t}), country = 'US' WHERE id = :id"),
                             {"p": json.dumps(profile), "id": existing})  # fmt: skip
         else:
             await s.execute(
-                text("INSERT INTO organization (id, name, normalized_name, kind, country, profile, source_ref) VALUES "
-                     "(:id, 'Inspironics Test', 'inspironics test', 'self', 'US', CAST(:p AS jsonb), CAST(:src AS jsonb))"),
+                text(f"INSERT INTO organization (id, name, normalized_name, kind, country, profile, source_ref) VALUES "
+                     f"(:id, 'Inspironics Test', 'inspironics test', 'self', 'US', CAST(:p AS {json_t}), CAST(:src AS {json_t}))"),
                 {"id": ids["self"], "p": json.dumps(profile), "src": src},
             )  # fmt: skip
         await s.execute(
-            text("INSERT INTO organization (id, name, normalized_name, kind, country, source_ref) VALUES "
-                 "(:id, 'Quorvane Foundation', 'quorvane foundation', 'counterparty', 'US', CAST(:src AS jsonb))"),
+            text(f"INSERT INTO organization (id, name, normalized_name, kind, country, source_ref) VALUES "
+                 f"(:id, 'Quorvane Foundation', 'quorvane foundation', 'counterparty', 'US', CAST(:src AS {json_t}))"),
             {"id": ids["cp"], "src": src},
         )  # fmt: skip
         await s.execute(
             text(
-                "INSERT INTO opportunity (id, title, description, class, class_source, classification_confidence, counterparty_id, "
-                "geography, stage_fit, sectors, esg_tags, amount_min, amount_max, currency, deadline, pipeline_stage, source_ref) VALUES "
-                "(:id, 'Clean energy storage research grant', 'Non-dilutive grant for grid energy storage research and batteries', "
-                "'grant', 'rule', 0.95, :cp, ARRAY['US'], ARRAY['seed'], ARRAY['energy_storage'], ARRAY['climate'], 100000, 400000, "
-                "'USD', :dl, 'qualified', CAST(:src AS jsonb))"
+                f"INSERT INTO opportunity (id, title, description, class, class_source, classification_confidence, counterparty_id, "
+                f"geography, stage_fit, sectors, esg_tags, amount_min, amount_max, currency, deadline, pipeline_stage, source_ref) VALUES "
+                f"(:id, 'Clean energy storage research grant', 'Non-dilutive grant for grid energy storage research and batteries', "
+                f"'grant', 'rule', 0.95, :cp, {geo_col}, {stage_col}, {sec_col}, {esg_col}, 100000, 400000, "
+                f"'USD', :dl, 'qualified', CAST(:src AS {json_t}))"
             ),
             {"id": ids["opp"], "cp": ids["cp"], "dl": now + timedelta(days=45), "src": src},
         )
