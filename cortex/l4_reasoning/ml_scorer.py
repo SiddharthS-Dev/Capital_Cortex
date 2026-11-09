@@ -22,6 +22,7 @@ import io
 import json
 import math
 import pickle
+import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -31,6 +32,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from platform_core.config import get_settings
+from platform_core.db.compat import in_clause, is_mysql_session
+from platform_core.jsonutil import json_obj
 
 CLASSES = [
     "venture_equity", "private_equity", "strategic_corporate", "grant", "government_program", "university_program",
@@ -84,35 +87,41 @@ def featurize(
     return x
 
 
-def _factor_values(factors_doc: dict[str, Any] | None) -> dict[str, float | None]:
-    fs = (factors_doc or {}).get("factors") or {}
+def _factor_values(factors_doc: dict[str, Any] | str | None) -> dict[str, float | None]:
+    if isinstance(factors_doc, str):
+        try:
+            factors_doc = json.loads(factors_doc)
+        except Exception:
+            factors_doc = {}
+    fs = (factors_doc or {}).get("factors") or {}  # type: ignore[union-attr]
     return {k: (v.get("value") if v.get("available") else None) for k, v in fs.items()}
 
 
 # ----------------------------------------------------------------------------- training data
 async def training_rows(s: AsyncSession, demo: bool) -> list[dict[str, Any]]:
     cfg = ml_config()
-    rows = (
-        (
-            await s.execute(
-                text(
-                    "SELECT oc.id AS outcome_id, oc.result, oc.label_source, oc.closed_at, o.id AS opportunity_id, o.class::text AS class, "
-                    "COALESCE(fh.factors, o.factors) AS factors, (fh.factors IS NOT NULL) AS decision_time, o.completeness, "
-                    "COALESCE(o.amount_max, o.amount_min) AS amount FROM outcome oc JOIN opportunity o ON o.id = oc.opportunity_id "
-                    "LEFT JOIN LATERAL (SELECT h.factors FROM factor_history h WHERE h.opportunity_id = o.id AND h.scored_at <= oc.closed_at "
-                    "ORDER BY h.scored_at DESC LIMIT 1) fh ON true WHERE oc.org_id = :org AND oc.is_demo = :demo "
-                    "AND oc.result = ANY(:res) AND o.factors IS NOT NULL ORDER BY oc.closed_at"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "demo": demo,
-                    "res": cfg["labels"]["positive"] + cfg["labels"]["negative"],
-                },
-            )
-        )
-        .mappings()
-        .all()
+    labels = cfg["labels"]["positive"] + cfg["labels"]["negative"]
+    params: dict[str, Any] = {
+        "org": get_settings().org_id,
+        "demo": demo,
+    }
+    if is_mysql_session(s):
+        cls_col = "o.class AS class"
+        res_filter = in_clause("oc.result", "res", labels, params)
+    else:
+        cls_col = "o.class::text AS class"
+        res_filter = "oc.result = ANY(:res)"
+        params["res"] = labels
+
+    sql = (
+        f"SELECT oc.id AS outcome_id, oc.result, oc.label_source, oc.closed_at, o.id AS opportunity_id, {cls_col}, "
+        "COALESCE(fh.factors, o.factors) AS factors, (fh.factors IS NOT NULL) AS decision_time, o.completeness, "
+        "COALESCE(o.amount_max, o.amount_min) AS amount FROM outcome oc JOIN opportunity o ON o.id = oc.opportunity_id "
+        "LEFT JOIN LATERAL (SELECT h.factors FROM factor_history h WHERE h.opportunity_id = o.id AND h.scored_at <= oc.closed_at "
+        f"ORDER BY h.scored_at DESC LIMIT 1) fh ON true WHERE oc.org_id = :org AND oc.is_demo = :demo "
+        f"AND {res_filter} AND o.factors IS NOT NULL ORDER BY oc.closed_at"
     )
+    rows = (await s.execute(text(sql), params)).mappings().all()
     for r in rows:  # I6: training uses realised outcomes only
         if r["label_source"] != "realised":
             raise AssertionError(f"outcome {r['outcome_id']} is not a realised label")
@@ -285,7 +294,7 @@ async def train(s: AsyncSession, trained_by: str, demo: bool) -> TrainResult:
         ref_label = f"{holdout['reference_label']} on the latest {holdout['n']} outcomes (holdout)"
     else:
         metrics_cmp = metrics
-        ref = active["metrics"] if active else baseline
+        ref = json_obj(active["metrics"], {}) if active else baseline  # JSON object; text on MySQL
         ref_label = f"active model v{active['version']}" if active else "the class-prior baseline"
     margin = cfg.get("promotion") or {}
     better_auc = ref.get("auc") is None or metrics_cmp["auc"] > float(ref["auc"]) + float(margin.get("auc_margin", 0))
@@ -307,34 +316,48 @@ async def train(s: AsyncSession, trained_by: str, demo: bool) -> TrainResult:
     )
     if promote and active:
         await s.execute(text("UPDATE ml_model SET status = 'retired' WHERE id = :id"), {"id": active["id"]})
-    mid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO ml_model (org_id, name, version, status, algorithm, features, metrics, trained_on_demo, n_samples, "
-                    "training_refs, artifact, artifact_sha256, trained_by, promoted_at, decision_reason, is_demo, label_source) VALUES "
-                    "(:org, :n, :v, :st, :algo, CAST(:f AS jsonb), CAST(:m AS jsonb), :d, :ns, CAST(:refs AS jsonb), :blob, :sha, "
-                    ":by, CASE WHEN :st = 'active' THEN now() END, :why, :d, 'realised') RETURNING id"
-                ),
-                {
-                    "org": org,
-                    "n": name,
-                    "v": version,
-                    "st": "active" if promote else "rejected",
-                    "algo": algo,
-                    "f": json.dumps(feature_names(cfg)),
-                    "m": json.dumps(metrics),
-                    "d": demo,
-                    "ns": len(y),
-                    "refs": json.dumps([f"outcome:{r['outcome_id']}" for r in rows]),
-                    "blob": blob,
-                    "sha": hashlib.sha256(blob).hexdigest(),
-                    "by": trained_by,
-                    "why": reason,
-                },
-            )
-        ).scalar_one()
-    )
+    params = {
+        "org": org,
+        "n": name,
+        "v": version,
+        "st": "active" if promote else "rejected",
+        "algo": algo,
+        "f": json.dumps(feature_names(cfg)),
+        "m": json.dumps(metrics),
+        "d": demo,
+        "ns": len(y),
+        "refs": json.dumps([f"outcome:{r['outcome_id']}" for r in rows]),
+        "blob": blob,
+        "sha": hashlib.sha256(blob).hexdigest(),
+        "by": trained_by,
+        "why": reason,
+    }
+    if is_mysql_session(s):
+        mid = str(uuid.uuid4())
+        params["id"] = mid
+        await s.execute(
+            text(
+                "INSERT INTO ml_model (id, org_id, name, version, status, algorithm, features, metrics, trained_on_demo, n_samples, "
+                "training_refs, artifact, artifact_sha256, trained_by, promoted_at, decision_reason, is_demo, label_source) VALUES "
+                "(:id, :org, :n, :v, :st, :algo, CAST(:f AS JSON), CAST(:m AS JSON), :d, :ns, CAST(:refs AS JSON), :blob, :sha, "
+                ":by, CASE WHEN :st = 'active' THEN now() END, :why, :d, 'realised')"
+            ),
+            params,
+        )
+    else:
+        mid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO ml_model (org_id, name, version, status, algorithm, features, metrics, trained_on_demo, n_samples, "
+                        "training_refs, artifact, artifact_sha256, trained_by, promoted_at, decision_reason, is_demo, label_source) VALUES "
+                        "(:org, :n, :v, :st, :algo, CAST(:f AS jsonb), CAST(:m AS jsonb), :d, :ns, CAST(:refs AS jsonb), :blob, :sha, "
+                        ":by, CASE WHEN :st = 'active' THEN now() END, :why, :d, 'realised') RETURNING id"
+                    ),
+                    params,
+                )
+            ).scalar_one()
+        )
     _model_cache.clear()
     return TrainResult(mid, version, "active" if promote else "rejected", algo, metrics, reason)
 
@@ -383,7 +406,8 @@ async def active_models(s: AsyncSession) -> dict[bool, ActiveModel]:
             if hashlib.sha256(blob).hexdigest() != r["artifact_sha256"]:
                 raise RuntimeError(f"ml_model {key} artifact checksum mismatch")
             _model_cache[key] = pickle.loads(blob)  # noqa: S301 - checksum-verified artifact written by train()
+        metrics = json.loads(r["metrics"]) if isinstance(r["metrics"], str) else r["metrics"]
         out[bool(r["trained_on_demo"])] = ActiveModel(
-            key, int(r["version"]), r["algorithm"], r["metrics"], bool(r["trained_on_demo"]), _model_cache[key]
+            key, int(r["version"]), r["algorithm"], metrics, bool(r["trained_on_demo"]), _model_cache[key]
         )
     return out

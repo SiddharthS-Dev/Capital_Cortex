@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -223,7 +224,14 @@ def timing(ctx: ScoringContext) -> FactorResult:
     deadline = ctx.opp.get("deadline")
     if deadline is None:
         return FactorResult(None, "piecewise days-to-deadline", gap="No deadline stated (rolling or unknown)")
-    days = (deadline - ctx.now).total_seconds() / 86400
+    if isinstance(deadline, str):
+        try:
+            deadline = datetime.fromisoformat(deadline)
+        except ValueError:
+            pass
+    if hasattr(deadline, "tzinfo") and deadline.tzinfo is None:  # MySQL DATETIME is naive UTC
+        deadline = deadline.replace(tzinfo=UTC)  # type: ignore[call-arg]
+    days = (deadline - ctx.now).total_seconds() / 86400  # type: ignore[operator]
     value = 0.0
     for step in ctx.reference["timing_curve"]:
         if days <= step["max_days"]:
