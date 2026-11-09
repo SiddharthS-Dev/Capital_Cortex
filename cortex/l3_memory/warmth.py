@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -31,8 +31,10 @@ def raw_sum(touches: Iterable[Touch], now: datetime, cfg: dict[str, Any] | None 
     horizon = float(cfg.get("horizon_days", 500))
     weights: dict[str, float] = cfg.get("weights", {})
     total = 0.0
+    now_dt = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     for t in touches:
-        days = (now - t.at).total_seconds() / 86400
+        t_at = t.at if t.at.tzinfo is not None else t.at.replace(tzinfo=UTC)
+        days = (now_dt - t_at).total_seconds() / 86400
         if days < 0 or days > horizon:  # future-dated or beyond the horizon: no contribution
             continue
         total += float(weights.get(t.kind, 0.0)) * math.exp(-days / tau)
@@ -59,7 +61,9 @@ def sparkline(
     """Warmth at the end of each of the last ``weeks`` weeks, oldest first."""
     cfg = cfg or relationships_config()
     n = int(weeks or cfg.get("sparkline_weeks", 12))
-    ts = list(touches)
+    # MySQL DATETIME values come back naive (stored as UTC); compare them as UTC, as raw_sum does.
+    ts = [t if t.at.tzinfo is not None else Touch(t.kind, t.at.replace(tzinfo=UTC)) for t in touches]
+    now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     out = []
     for i in range(n - 1, -1, -1):
         at = now - timedelta(weeks=i)

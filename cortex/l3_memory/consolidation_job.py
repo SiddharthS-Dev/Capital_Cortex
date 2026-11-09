@@ -16,17 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.l3_memory.memory_manager import put_warm
 from cortex.l3_memory.warmth import Touch, warmth
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
 
 MAX_REFS = 200
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 async def consolidate_organization(s: AsyncSession, organization_id: str, now: datetime | None = None) -> str | None:
     now = now or datetime.now(UTC)
     org = get_settings().org_id
+    is_my = is_mysql_session(s)
+    id_cond = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     o = (
         (
             await s.execute(
-                text("SELECT id, name, is_demo FROM organization WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT id, name, is_demo FROM organization WHERE {id_cond} AND org_id = :org"),
                 {"id": organization_id, "org": org},
             )
         )
@@ -35,12 +44,13 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
     )
     if o is None:
         return None
+    o_cond = "i.organization_id = :o" if is_my else "i.organization_id = CAST(:o AS uuid)"
     rows = (
         (
             await s.execute(
                 text(
                     "SELECT i.id, i.kind, i.occurred_at, i.contact_id, c.name AS contact_name FROM interaction i "
-                    "LEFT JOIN contact c ON c.id = i.contact_id WHERE i.organization_id = CAST(:o AS uuid) ORDER BY i.occurred_at"
+                    f"LEFT JOIN contact c ON c.id = i.contact_id WHERE {o_cond} ORDER BY i.occurred_at"
                 ),
                 {"o": organization_id},
             )
@@ -48,12 +58,13 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
         .mappings()
         .all()
     )
+    cp_cond = "op.counterparty_id = :o" if is_my else "op.counterparty_id = CAST(:o AS uuid)"
     outcomes = (
         (
             await s.execute(
                 text(
                     "SELECT oc.id, oc.result, oc.amount, oc.currency, oc.closed_at FROM outcome oc JOIN opportunity op "
-                    "ON op.id = oc.opportunity_id WHERE op.counterparty_id = CAST(:o AS uuid) ORDER BY oc.closed_at DESC"
+                    f"ON op.id = oc.opportunity_id WHERE {cp_cond} ORDER BY oc.closed_at DESC"
                 ),
                 {"o": organization_id},
             )
@@ -61,11 +72,12 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
         .mappings()
         .all()
     )
+    m_org_cond = "organization_id = :o" if is_my else "organization_id = CAST(:o AS uuid)"
     milestones = (
         (
             await s.execute(
                 text(
-                    "SELECT id, kind, title, due_at FROM milestone WHERE organization_id = CAST(:o AS uuid) AND status = 'open' "
+                    f"SELECT id, kind, title, due_at FROM milestone WHERE {m_org_cond} AND status = 'open' "
                     "ORDER BY due_at"
                 ),
                 {"o": organization_id},
@@ -83,7 +95,7 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
     for r in rows:
         if r["contact_id"]:
             e = per_contact.setdefault(str(r["contact_id"]), {"name": r["contact_name"], "touches": []})
-            e["touches"].append(Touch(r["kind"], r["occurred_at"]))
+            e["touches"].append(Touch(r["kind"], _as_utc(r["occurred_at"])))  # type: ignore[arg-type]
     contacts = sorted(
         (
             {
@@ -99,8 +111,8 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
         ),
         key=lambda c: -(c["warmth"] or 0),
     )
-    recent = [r for r in rows if r["occurred_at"] >= now - timedelta(days=90)]
-    overdue = [m for m in milestones if m["due_at"] < now]
+    recent = [r for r in rows if _as_utc(r["occurred_at"]) >= now - timedelta(days=90)]  # type: ignore[operator]
+    overdue = [m for m in milestones if _as_utc(m["due_at"]) < now]  # type: ignore[operator]
     top = contacts[0] if contacts else None
     trend = None
     if top and top["warmth"] is not None:
@@ -110,8 +122,9 @@ async def consolidate_organization(s: AsyncSession, organization_id: str, now: d
         "interactions_total": len(rows),
         "interactions_90d": len(recent),
         "by_kind": by_kind,
-        "first_touch": rows[0]["occurred_at"].isoformat() if rows else None,
-        "last_touch": rows[-1]["occurred_at"].isoformat() if rows else None,
+        # MySQL DATETIME comes back naive (UTC): carry the offset, as PostgreSQL timestamptz does
+        "first_touch": _as_utc(rows[0]["occurred_at"]).isoformat() if rows else None,  # type: ignore[union-attr]
+        "last_touch": _as_utc(rows[-1]["occurred_at"]).isoformat() if rows else None,  # type: ignore[union-attr]
         "contacts": contacts[:10],
         "open_milestones": len(milestones),
         "overdue_milestones": len(overdue),
