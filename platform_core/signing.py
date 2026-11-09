@@ -32,6 +32,16 @@ def canonical_json(obj: Any) -> str:
 
 def content_hash(obj: Any) -> str:
     """SHA-256 of the canonical JSON form. Key order and whitespace never change the hash."""
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            obj = json.loads(obj.decode("utf-8"))
+        except ValueError:
+            pass
+    elif isinstance(obj, str) and len(obj) >= 2 and obj[0] in ("{", "[") and obj[-1] in ("}", "]"):
+        try:
+            obj = json.loads(obj)
+        except ValueError:
+            pass
     return hashlib.sha256(canonical_json(obj).encode("utf-8")).hexdigest()
 
 

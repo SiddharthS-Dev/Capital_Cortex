@@ -29,6 +29,8 @@ def canonical_json(obj: Any) -> str:
 
 
 def _ts(ts: datetime) -> str:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
     return ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
@@ -70,9 +72,25 @@ async def append(
     target: str,
     meta: dict[str, Any] | None = None,
 ) -> AuditRecord:
-    """Append one record inside the caller's transaction (the audit row commits with the action)."""
-    await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _LOCK_KEY})
-    last = (await session.execute(text("SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1"))).first()
+    # Transaction-scoped lock: in MySQL InnoDB, select ... for update on audit_lock; in PostgreSQL, advisory lock.
+    bind = session.get_bind()
+    is_mysql = bind is not None and getattr(bind, "dialect", None) and bind.dialect.name == "mysql"
+    if is_mysql:
+        res = await session.execute(text("SELECT id FROM audit_lock WHERE id = 1 FOR UPDATE"))
+        if not res.first():
+            await session.execute(text("INSERT IGNORE INTO audit_lock (id, dummy) VALUES (1, 1)"))
+            await session.execute(text("SELECT id FROM audit_lock WHERE id = 1 FOR UPDATE"))
+    else:
+        await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _LOCK_KEY})
+    # MySQL's default REPEATABLE READ serves plain SELECTs from the transaction's first-read snapshot, which can
+    # predate an append committed while we waited for the lock (duplicate seq). A locking read sees the latest
+    # committed head. PostgreSQL's READ COMMITTED already does.
+    head_sql = (
+        "SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1 FOR UPDATE"
+        if is_mysql
+        else "SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1"
+    )
+    last = (await session.execute(text(head_sql))).first()
     seq = (last.seq + 1) if last else 1
     prev = last.hash if last else GENESIS_HASH
     # Round-trip meta through canonical JSON so the hashed form equals the stored jsonb form.
@@ -91,7 +109,7 @@ async def append(
     await session.execute(
         text(
             "INSERT INTO audit_log (seq, org_id, actor, action, target, meta, ts, prev_hash, hash) "
-            "VALUES (:seq, :org_id, :actor, :action, :target, CAST(:meta AS jsonb), :ts, :prev, :hash)"
+            "VALUES (:seq, :org_id, :actor, :action, :target, :meta, :ts, :prev, :hash)"
         ),
         {
             "seq": rec.seq,
@@ -155,7 +173,17 @@ async def verify_chain(session: AsyncSession, batch: int = 5000) -> VerifyResult
         if not rows:
             break
         recs = [
-            AuditRecord(r.seq, str(r.org_id), r.actor, r.action, r.target, r.meta or {}, r.ts, r.prev_hash, r.hash)
+            AuditRecord(
+                r.seq,
+                str(r.org_id),
+                r.actor,
+                r.action,
+                r.target,
+                json.loads(r.meta) if isinstance(r.meta, str) else (r.meta or {}),
+                r.ts,
+                r.prev_hash,
+                r.hash,
+            )
             for r in rows
         ]
         res = verify_records(recs, prev, expected)
