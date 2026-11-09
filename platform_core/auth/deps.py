@@ -20,8 +20,9 @@ from platform_core.auth.oidc import get_verifier
 from platform_core.auth.principal import Principal
 from platform_core.auth.rbac import get_rbac
 from platform_core.config import get_settings
-from platform_core.errors import Forbidden, Unauthorized
+from platform_core.errors import Forbidden, StepUpRequired, Unauthorized
 from platform_core.policy.opa import get_opa
+from platform_core.security import security_event
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -30,17 +31,28 @@ OPA_AUTHZ_PACKAGE = "cortex.authz"
 
 async def authenticate(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> Principal:
     if creds is None or creds.scheme.lower() != "bearer":
+        security_event("authn.token_missing", "denied", request=request)
         raise Unauthorized()
-    principal = await get_verifier().verify(creds.credentials)
+    try:
+        principal = await get_verifier().verify(creds.credentials)
+    except Unauthorized:
+        security_event("authn.token_rejected", "denied", request=request)
+        raise
     request.state.principal = principal
     if get_settings().oidc_enforce_mfa:
-        enforce_role_mfa(principal, get_rbac())
+        try:
+            enforce_role_mfa(principal, get_rbac())
+        except Forbidden:
+            security_event("authn.mfa_required", "denied", principal=principal, request=request)
+            raise
     return principal
 
 
 async def check_access(principal: Principal, permission: str, resource: Resource, context: dict | None = None) -> None:
     """Service-boundary re-check usable outside FastAPI (workers, internal calls)."""
     if not get_rbac().allows(principal, permission):
+        security_event("authz.permission_denied", "denied", principal=principal, resource_type=resource.type,
+                       resource_id=resource.id, reason=permission, **_where(context))  # fmt: skip
         raise Forbidden(f"Missing permission {permission}", permission=permission)
     decision = await get_opa().evaluate(
         OPA_AUTHZ_PACKAGE,
@@ -52,7 +64,13 @@ async def check_access(principal: Principal, permission: str, resource: Resource
         },
     )
     if not decision.allow:
+        security_event("authz.policy_denied", "denied", principal=principal, resource_type=resource.type,
+                       resource_id=resource.id, reason=permission, policy_reasons=decision.reasons, **_where(context))  # fmt: skip
         raise Forbidden("Denied by policy", permission=permission, reasons=decision.reasons)
+
+
+def _where(context: dict | None) -> dict:
+    return {k: (context or {})[k] for k in ("method", "path") if k in (context or {})}
 
 
 ResourceFn = Callable[[Request], Awaitable[Resource] | Resource]
@@ -72,7 +90,12 @@ def authorize(
             resource = Resource(type=resource_type, id=request.path_params.get("id"))
         if step_up:
             s = get_settings()
-            enforce_step_up(principal, s.step_up_max_age_seconds, require_mfa=s.oidc_enforce_mfa)
+            try:
+                enforce_step_up(principal, s.step_up_max_age_seconds, require_mfa=s.oidc_enforce_mfa)
+            except StepUpRequired:
+                security_event("authn.step_up_required", "denied", principal=principal, reason=permission,
+                               request=request)  # fmt: skip
+                raise
         await check_access(
             principal,
             permission,
