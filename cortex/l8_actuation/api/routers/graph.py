@@ -14,8 +14,10 @@ from cortex.l7_governance import audit_service
 from platform_core.auth.abac import Resource
 from platform_core.auth.deps import authorize, check_access
 from platform_core.auth.principal import Principal
-from platform_core.db import age, get_session, session_scope
+from platform_core.config import get_settings
+from platform_core.db import get_session, session_scope
 from platform_core.errors import Problem
+from platform_core.security import rate_limit
 
 router = APIRouter(prefix="/v1/graph", tags=["graph"])
 GRAPH = "ckg"
@@ -38,47 +40,30 @@ LABELS = [
     "Outcome",
     "Signal",
 ]
-_WRITE = re.compile(r"\b(create|merge|set|delete|detach|remove|load|call|drop)\b", re.I)
 _UUID = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
 def _collect(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """AGE vertices/edges/paths → {nodes, edges} keyed by the domain id property."""
-    nodes: dict[int, dict[str, Any]] = {}
-    edges: dict[int, dict[str, Any]] = {}
+    """Collected graph dict -> {nodes, edges} keyed by domain id."""
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
 
     def visit(v: Any) -> None:
         if isinstance(v, list):
             for x in v:
                 visit(x)
         elif isinstance(v, dict) and "label" in v and "id" in v:
-            if "start_id" in v:
-                edges[v["id"]] = v
+            if "start_id" in v or "source" in v:
+                edges.append(v)
             else:
-                nodes[v["id"]] = v
+                nodes[str(v["id"])] = v
         elif isinstance(v, dict):
             for x in v.values():
                 visit(x)
 
     for r in rows:
         visit(list(r.values()))
-    gid = {k: (n.get("properties") or {}).get("id", str(k)) for k, n in nodes.items()}
-    return {
-        "nodes": [
-            {"id": gid[k], "label": n["label"], "properties": n.get("properties") or {}} for k, n in nodes.items()
-        ],
-        "edges": [
-            {
-                "id": str(k),
-                "type": e["label"],
-                "source": gid.get(e["start_id"], str(e["start_id"])),
-                "target": gid.get(e["end_id"], str(e["end_id"])),
-                "properties": e.get("properties") or {},
-            }
-            for k, e in edges.items()
-            if e["start_id"] in gid and e["end_id"] in gid
-        ],
-    }
+    return {"nodes": list(nodes.values()), "edges": edges}
 
 
 @router.get("/query", summary="Parameterised graph templates; raw read-only Cypher is admin-only")
@@ -92,34 +77,88 @@ async def query(
     p: Principal = Depends(authorize("graph:read", "graph")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    await session.execute(text("SET TRANSACTION READ ONLY"))
     if template == "cypher":
         await check_access(p, "graph:cypher", Resource(type="graph"))  # admin only (OPA raw_cypher_admin_only)
-        if not cypher or _WRITE.search(cypher):
-            raise Problem(422, "Read-only Cypher only", "write clauses are not allowed in the console", "validation")
-        async with session_scope() as audit_s:  # this request's transaction is read-only
-            await audit_service.record(audit_s, p, "graph.cypher", "graph:ckg", {"cypher": cypher[:2000]})
-        rows = await age.cypher(session, GRAPH, cypher, columns=("result",))
-        out = _collect(rows)
-        out["rows"] = [r["result"] for r in rows[:limit]]
-        return out
+        async with session_scope() as audit_s:
+            await audit_service.record(
+                audit_s, p, "graph.cypher.rejected", "graph:ckg", {"cypher": (cypher or "")[:2000]}
+            )
+        # An explicit error, never an empty success: MySQL has no Cypher engine, so a query cannot be answered.
+        raise Problem(
+            410,
+            "Raw Cypher is not available",
+            "The graph now runs on MySQL 8.4, which has no Cypher engine. Use template=neighbourhood, provenance or label.",
+            "cypher_removed",
+        )
     if template in ("neighbourhood", "provenance"):
         if not id or not _UUID.match(id):
             raise Problem(422, "id required", "a node id (uuid) is required", "validation")
-        if template == "provenance":  # directed and bounded: stays in Cypher
-            q = f"MATCH p = (n {{id: $id}})-[:DERIVED_FROM*1..3]->(s) RETURN p LIMIT {limit}"
-            return _collect(await age.cypher(session, GRAPH, q, {"id": id}))
-        # undirected hops can't use an index in AGE's Cypher; walk the label tables instead (LOAD_TEST §4.1)
+        if template == "provenance":
+            start = (await graph_traversal.find(session, [id])).get(id)
+            if not start:
+                return {"nodes": [], "edges": []}
+            vids, eids, frontier = {start}, set(), {start}
+            for _ in range(3):
+                nxt: set[str] = set()
+                f_list = sorted(frontier)
+                params: dict[str, Any] = {f"f_{idx}": fid for idx, fid in enumerate(f_list)}
+                params["org"] = get_settings().org_id
+                placeholders = ", ".join(f":f_{idx}" for idx in range(len(f_list)))
+                q_prov = (
+                    f"SELECT id, from_entity, to_entity FROM relationship_edge "
+                    f"WHERE org_id = :org AND from_entity IN ({placeholders}) AND type = 'DERIVED_FROM'"
+                )
+                rows = (await session.execute(text(q_prov), params)).all()
+                for r in rows:
+                    eids.add(str(r[0]))
+                    t = str(r[2])
+                    if t not in vids:
+                        nxt.add(t)
+                        vids.add(t)
+                frontier = nxt
+                if not frontier:
+                    break
+            return await graph_traversal.materialise(session, vids, eids)
         return await graph_traversal.neighbourhood(session, id, depth, limit)
     if not label or label not in LABELS:
         raise Problem(422, "label required", f"label must be one of {LABELS}", "validation")
-    rows = await age.cypher(
-        session, GRAPH, f"MATCH (n:{label}) OPTIONAL MATCH (n)-[r]->(m) RETURN [n, r, m] LIMIT {limit}"
+    rows = (
+        (
+            await session.execute(
+                text("SELECT id FROM entity WHERE org_id = :org AND entity_type = :lbl LIMIT :limit"),
+                {"org": get_settings().org_id, "lbl": label, "limit": limit},
+            )
+        )
+        .scalars()
+        .all()
     )
-    return _collect(rows)
+    vids = {str(r) for r in rows}
+    if not vids:
+        return {"nodes": [], "edges": []}
+    v_list = sorted(vids)
+    params_e: dict[str, Any] = {f"v_{idx}": vid for idx, vid in enumerate(v_list)}
+    placeholders_e = ", ".join(f":v_{idx}" for idx in range(len(v_list)))
+    e_rows = (
+        (
+            await session.execute(
+                text(
+                    f"SELECT id FROM relationship_edge WHERE org_id = :org AND from_entity IN ({placeholders_e}) LIMIT :limit"
+                ),
+                {**params_e, "org": get_settings().org_id, "limit": limit},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    eids = {str(e) for e in e_rows}
+    return await graph_traversal.materialise(session, vids, eids)
 
 
-@router.get("/paths", summary="Shortest paths between two nodes (warm-intro path finder)")
+@router.get(
+    "/paths",
+    dependencies=[Depends(rate_limit("graph_paths", 60))],
+    summary="Shortest paths between two nodes (warm-intro path finder)",
+)
 async def paths(
     from_: str = Query(..., alias="from"),
     to: str = Query(...),
@@ -130,9 +169,6 @@ async def paths(
 ) -> dict[str, Any]:
     if not (_UUID.match(from_) and _UUID.match(to)):
         raise Problem(422, "ids required", "from and to must be node ids", "validation")
-    await session.execute(text("SET TRANSACTION READ ONLY"))
-    await session.execute(text("SET LOCAL statement_timeout = '5s'"))
-    # bidirectional BFS instead of AGE's variable-length match, which loads the whole graph per backend (§4.3)
     out = await graph_traversal.paths(session, from_, to, max_hops, limit)
     return {**out, "count": len(out["paths"]), "max_hops": max_hops}
 
@@ -142,16 +178,23 @@ async def stats(
     _: Principal = Depends(authorize("graph:read", "graph")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
+    v_rows = (
         await session.execute(
             text(
-                "SELECT l.name, l.kind, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM ckg.%I', l.name), "
-                "false, true, '')))[1]::text::bigint AS n FROM ag_catalog.ag_label l JOIN ag_catalog.ag_graph g ON g.graphid = l.graph "
-                "WHERE g.name = 'ckg' AND l.name NOT LIKE '\\_ag%' ORDER BY l.kind, l.name"
-            )
+                "SELECT entity_type AS name, COUNT(*) AS n FROM entity WHERE org_id = :org GROUP BY entity_type ORDER BY entity_type"
+            ),
+            {"org": get_settings().org_id},
+        )
+    ).all()
+    e_rows = (
+        await session.execute(
+            text(
+                "SELECT type AS name, COUNT(*) AS n FROM relationship_edge WHERE org_id = :org GROUP BY type ORDER BY type"
+            ),
+            {"org": get_settings().org_id},
         )
     ).all()
     return {
-        "vertices": {r.name: r.n for r in rows if r.kind == "v"},
-        "edges": {r.name: r.n for r in rows if r.kind == "e"},
+        "vertices": {r.name: int(r.n) for r in v_rows},
+        "edges": {r.name: int(r.n) for r in e_rows},
     }
