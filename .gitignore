@@ -31,3 +31,5 @@ compose-logs.txt
 /package-lock.json
 /postgresql_dependency_*.csv
 rehearsal_reconciliation_report.json
+# Raw local test logs: machine-specific; summarised in docs/CORTEX_MYSQL_EVIDENCE_INDEX.md and kept in a private archive
+docs/evidence/
