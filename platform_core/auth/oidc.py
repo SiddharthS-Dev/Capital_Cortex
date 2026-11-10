@@ -43,7 +43,10 @@ class TokenVerifier:
             log.warning("jwks lookup failed: %s", e)
             raise Unauthorized("Unable to validate token signing key") from e
         except jwt.InvalidTokenError as e:
-            raise Unauthorized(f"Invalid token: {e}") from e
+            # The reason (expired, bad audience, bad signature…) is logged, not returned: it helps an attacker
+            # probe the verifier and the client can't act on it beyond "sign in again".
+            log.info("token rejected: %s", type(e).__name__)
+            raise Unauthorized("Invalid or expired token") from e
 
     def principal_from_claims(self, claims: dict[str, Any], token: str = "") -> Principal:
         realm_roles = set(claims.get("realm_access", {}).get("roles", []))

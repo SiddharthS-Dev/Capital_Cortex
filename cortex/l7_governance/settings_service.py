@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.l7_governance import audit_service
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db import is_mysql_session
 from platform_core.errors import Problem
 
 KEYS = ("llm_router", "budgets", "governance", "retention", "taxonomy")
@@ -52,8 +54,13 @@ def validate(key: str, value: Any) -> Any:
                 raise Problem(
                     422, "Invalid governance setting", f"{k}: allowed {sorted(GOVERNANCE_KEYS)}", "validation"
                 )
-        if any(not str(u).startswith("https://") for u in value.get("webhook_allowlist", [])):
-            raise Problem(422, "Invalid allowlist", "webhook destinations must be https URLs", "validation")
+        for u in value.get("webhook_allowlist", []):
+            parts = urlsplit(str(u))
+            if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+                    or parts.query or parts.fragment):  # fmt: skip
+                raise Problem(422, "Invalid allowlist",
+                              "webhook destinations must be https://host[:port][/path] (no credentials, query or fragment)",
+                              "validation")  # fmt: skip
     if key == "llm_router":
         for tier, spec in (value.get("tiers") or {}).items():
             if tier not in ("small", "mid", "large") or not isinstance(spec, dict):
@@ -111,42 +118,82 @@ def apply(key: str, value: Any) -> None:
 
 
 async def load_all(s: AsyncSession) -> dict[str, int]:
+    col_k = "`key`" if is_mysql_session(s) else "key"
     rows = (
         await s.execute(
-            text("SELECT key, value, version FROM setting WHERE org_id = :org"), {"org": get_settings().org_id}
+            text(f"SELECT {col_k}, value, version FROM setting WHERE org_id = :org"), {"org": get_settings().org_id}
         )
     ).all()
+    out = {}
     for r in rows:
-        if r.key in KEYS:
-            apply(r.key, r.value)
-    return {r.key: r.version for r in rows}
+        k = getattr(r, "key", r[0])
+        val = getattr(r, "value", r[1])
+        ver = getattr(r, "version", r[2])
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except ValueError:
+                pass
+        if k in KEYS:
+            apply(k, val)
+        out[k] = ver
+    return out
 
 
 async def get(s: AsyncSession, key: str) -> dict[str, Any] | None:
+    col_k = "`key`" if is_mysql_session(s) else "key"
     r = (
-        (await s.execute(text("SELECT value, version, updated_by, updated_at FROM setting WHERE org_id = :org AND key = :k"),
+        (await s.execute(text(f"SELECT value, version, updated_by, updated_at FROM setting WHERE org_id = :org AND {col_k} = :k"),
                          {"org": get_settings().org_id, "k": key}))
         .mappings()
         .first()
     )  # fmt: skip
-    return dict(r) if r else None
+    if not r:
+        return None
+    d = dict(r)
+    if isinstance(d.get("value"), str):
+        try:
+            d["value"] = json.loads(d["value"])
+        except ValueError:
+            pass
+    return d
 
 
 async def put(s: AsyncSession, actor: Principal, key: str, value: Any) -> dict[str, Any]:
     value = validate(key, value)
     before = await get(s, key)
-    version = int(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO setting (org_id, key, value, version, updated_by) VALUES (:org, :k, CAST(:v AS jsonb), 1, :by) "
-                    "ON CONFLICT (org_id, key) DO UPDATE SET value = EXCLUDED.value, version = setting.version + 1, "
-                    "updated_by = EXCLUDED.updated_by RETURNING version"
-                ),
-                {"org": get_settings().org_id, "k": key, "v": json.dumps(value), "by": actor.sub},
-            )
-        ).scalar_one()
-    )
+    mysql = is_mysql_session(s)
+    if mysql:
+        # atomic like PostgreSQL's `version = setting.version + 1 … RETURNING`: the increment happens in the row
+        # update (no read-modify-write race), then the row (locked by the upsert) is read back in this transaction
+        await s.execute(
+            text(
+                "INSERT INTO setting (org_id, `key`, value, version, updated_by) VALUES (:org, :k, CAST(:v AS JSON), 1, :by) "
+                "AS new ON DUPLICATE KEY UPDATE value = new.value, version = setting.version + 1, updated_by = new.updated_by"
+            ),
+            {"org": get_settings().org_id, "k": key, "v": json.dumps(value), "by": actor.sub},
+        )
+        version = int(
+            (
+                await s.execute(
+                    text("SELECT version FROM setting WHERE org_id = :org AND `key` = :k"),
+                    {"org": get_settings().org_id, "k": key},
+                )
+            ).scalar_one()
+        )
+    else:
+        version = int(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO setting (org_id, key, value, version, updated_by) VALUES (:org, :k, CAST(:v AS jsonb), 1, :by) "
+                        "ON CONFLICT (org_id, key) DO UPDATE SET value = EXCLUDED.value, version = setting.version + 1, "
+                        "updated_by = EXCLUDED.updated_by RETURNING version"
+                    ),
+                    {"org": get_settings().org_id, "k": key, "v": json.dumps(value), "by": actor.sub},
+                )
+            ).scalar_one()
+        )
     apply(key, value)
     await audit_service.record(s, actor, f"setting.{key}.updated", f"setting:{key}",
                                {"version": version, "before": (before or {}).get("value"), "after": value})  # fmt: skip

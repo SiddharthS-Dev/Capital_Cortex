@@ -41,6 +41,8 @@ mapping:
   categories: ["synopsis.fundingActivityCategories[*].description", "forecast.fundingActivityCategories[*].description"]
   instruments: ["synopsis.fundingInstruments[*].description", "forecast.fundingInstruments[*].description"]
   eligibility_text: [synopsis.applicantEligibilityDesc, forecast.applicantEligibilityDesc]
+accept:
+  future_deadline: true         # "posted" listings can keep a close date years in the past (seen 2026-11-02)
 defaults:
   currency: USD
   countries: [US]               # federal programmes; eligibility text is kept for review

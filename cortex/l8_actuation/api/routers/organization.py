@@ -6,6 +6,7 @@ Edits are attributed provenance (manual entry by the signed-in user) and trigger
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,7 +23,7 @@ from cortex.l8_actuation.api.routers.opportunities import enqueue_rescore_all
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session
 from platform_core.errors import Problem
 from platform_core.geo import to_iso2
 
@@ -129,25 +130,45 @@ async def put_self(
         "note": "self-organisation profile entered in Scoring Studio",
     }
     me = await self_profile(session)
+    is_my = is_mysql_session(session)
     if me and not me["is_demo"]:
+        cast_type = "JSON" if is_my else "jsonb"
         await session.execute(
             text(
-                "UPDATE organization SET name = :n, country = :c, profile = CAST(:p AS jsonb), source_ref = CAST(:s AS jsonb) "
+                f"UPDATE organization SET name = :n, country = :c, profile = CAST(:p AS {cast_type}), source_ref = CAST(:s AS {cast_type}) "
                 "WHERE id = :id"
             ),
-            {"n": body.name, "c": body.country, "p": json.dumps(profile), "s": json.dumps(src), "id": me["id"]},
+            {"n": body.name, "c": body.country, "p": json.dumps(profile), "s": json.dumps(src), "id": str(me["id"])},
         )
         oid = me["id"]
     else:
-        oid = (
+        if is_my:
+            new_id = uuid.uuid4()
             await session.execute(
                 text(
-                    "INSERT INTO organization (org_id, name, normalized_name, kind, country, profile, source_ref) "
-                    "VALUES (:org, :n, lower(:n), 'self', :c, CAST(:p AS jsonb), CAST(:s AS jsonb)) RETURNING id"
+                    "INSERT INTO organization (id, org_id, name, normalized_name, kind, country, profile, source_ref) "
+                    "VALUES (:id, :org, :n, lower(:n), 'self', :c, CAST(:p AS JSON), CAST(:s AS JSON))"
                 ),
-                {"org": org, "n": body.name, "c": body.country, "p": json.dumps(profile), "s": json.dumps(src)},
+                {
+                    "id": str(new_id),
+                    "org": org,
+                    "n": body.name,
+                    "c": body.country,
+                    "p": json.dumps(profile),
+                    "s": json.dumps(src),
+                },
             )
-        ).scalar_one()
+            oid = new_id
+        else:
+            oid = (
+                await session.execute(
+                    text(
+                        "INSERT INTO organization (org_id, name, normalized_name, kind, country, profile, source_ref) "
+                        "VALUES (:org, :n, lower(:n), 'self', :c, CAST(:p AS jsonb), CAST(:s AS jsonb)) RETURNING id"
+                    ),
+                    {"org": org, "n": body.name, "c": body.country, "p": json.dumps(profile), "s": json.dumps(src)},
+                )
+            ).scalar_one()
     await audit_service.record(session, p, "organization.self.update", f"organization:{oid}", {"profile": profile})
     job = await enqueue_rescore_all(p, "self-organisation profile updated")
     return {"id": str(oid), "rescore_job": job}

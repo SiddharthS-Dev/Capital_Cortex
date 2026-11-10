@@ -1,0 +1,47 @@
+# Capital Cortex — private-network production overlay for the MySQL stack.
+#
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml \
+#     -f infra/docker-compose.mysql-private.yml --env-file /secure/path/cortex.env up -d
+#
+# - MySQL publishes no host port: only containers on the project network (api, worker, migrate, keycloak,
+#   mysql-binlog-shipper) can reach it. Operators use `docker exec capital-cortex-mysql mysql ...` or a bastion.
+# - The application secrets that the dev stack defaults (Keycloak admin, MinIO, worker client, approval signing key,
+#   Grafana) become required here, so a production start cannot silently run on dev credentials.
+# - Not covered here (decided with the deployment target, D-011/D-030): Keycloak `start` with HTTPS instead of
+#   `start-dev`, a production Vault instead of the dev-mode container, and TLS on the internal network.
+
+services:
+  mysql:
+    ports: !reset []
+
+  minio:
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+
+  minio-init:
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+
+  keycloak:
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+
+  api:
+    environment: &prod-app-secrets
+      OBJECT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      OBJECT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      APPROVAL_SIGNING_KEY: ${APPROVAL_SIGNING_KEY:?set APPROVAL_SIGNING_KEY}
+
+  worker:
+    environment:
+      <<: *prod-app-secrets
+      WORKER_CLIENT_SECRET: ${WORKER_CLIENT_SECRET:?set WORKER_CLIENT_SECRET}
+
+  grafana:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}

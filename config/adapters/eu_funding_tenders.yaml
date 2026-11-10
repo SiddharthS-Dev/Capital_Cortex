@@ -1,28 +1,53 @@
-# EU Funding & Tenders portal: the SEDIA search API. Disabled until its current API terms are verified (§6/L1).
+# EU Funding & Tenders Portal: the portal's public search API (api.tech.ec.europa.eu/search-api, apiKey=SEDIA,
+# the public key the portal itself sends; no account). The query is the portal's own "open + forthcoming" filter,
+# sent as multipart parts like the portal does. Verified live 2026-11-02: 1,207 items (type 1 = call-for-proposals
+# topics 1,008; type 2 = tenders 18; type 8 = cascade/third-party calls 181).
+#   status 31094501 = forthcoming, 31094502 = open (31094503 = closed, excluded)
+# Fields the search response does NOT give flat: an organisation name (always the EC/agency, set as a default),
+# the per-topic budget of type 1 topics (only inside the JSON string metadata.budgetOverview; not mapped) and a
+# human programme name (metadata.frameworkProgramme is a numeric code). The raw record, including
+# metadata.esDA_IngestDate (portal last-updated) and budgetOverview, is kept in the signal's raw payload.
 key: eu_funding_tenders
-name: EU Funding & Tenders (template)
+name: EU Funding & Tenders Portal
 kind: api
 adapter: json_api
-enabled: false
-schedule: "30 3 * * *"
+enabled: false                  # D-034: no live crawling until the portal's terms are verified
+schedule: "30 3 * * *"          # daily, UTC
 terms_note: >-
-  EU Funding & Tenders Portal search API (api.tech.ec.europa.eu). Verify the current terms and endpoint
-  before enabling. The mapping follows the public search response.
+  European Commission Funding & Tenders Portal public search API (api.tech.ec.europa.eu/search-api), the same
+  unauthenticated endpoint the portal uses. EC content is reusable with acknowledgement (Commission Decision
+  2011/833/EU). Polite use: one page of 50 every 2 seconds; the whole open + forthcoming set (about 25 pages)
+  per daily run.
 rate_limit: {min_interval_seconds: 2.0}
-respect_robots: false
-max_items: 100
+respect_robots: false            # an API endpoint, not a crawled page; its usage terms govern (R11)
+timeout_seconds: 60
+max_items: 2000
 request:
   method: POST
-  url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text={keyword}&pageSize=50&pageNumber=1"
-  vars: {keyword: ["innovation"]}
+  url: "https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text=***&pageSize=50&pageNumber={page}"
+  multipart:
+    query: {bool: {must: [{terms: {type: ["1", "2", "8"]}}, {terms: {status: ["31094501", "31094502"]}}]}}
+    languages: ["en"]
+    # deadlineDate is a stable order (sortStatus reshuffled pages between requests: 24/50 overlap, 2026-11-02).
+    # A range filter on deadlineDate is ignored by the API, so passed deadlines are dropped by `accept` instead.
+    sort: {field: deadlineDate, order: ASC}
+  page: {param: page, size: 1, start: 1, max_pages: 40}
   items_path: results
   id_path: reference
 mapping:
-  external_id: reference
+  external_id: reference                      # unique per portal record (cascade calls share a parent topic id)
   title: ["metadata.title[0]", summary]
-  description: ["metadata.description[0]", content]
+  description: ["metadata.descriptionByte[0]", "metadata.description[0]", summary]
   url: url
-  deadline: "metadata.deadlineDate[0]"
+  published_at: "metadata.startDate[0]"
+  open_date: "metadata.startDate[0]"
+  deadline: {paths: ["metadata.deadlineDate[*]"], transform: next_date}   # multi-cut-off calls: next cut-off
+  amount_max: "metadata.budget[0]"            # tenders and cascade calls; topics carry budgetOverview only
+  categories: ["metadata.identifier[*]", "metadata.callIdentifier[*]"]  # topic id and call id (programme prefix)
+  instruments: "metadata.typesOfAction[*]"
+  eligibility_programme_period: "metadata.programmePeriod[0]"
+accept:
+  future_deadline: true           # the portal's 'open' flag can lag a passed cut-off
 defaults:
   currency: EUR
   countries: [EU]

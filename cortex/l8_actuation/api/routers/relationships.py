@@ -19,8 +19,9 @@ from cortex.l8_actuation.api.common import decode_cursor, encode_cursor, row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, in_clause, is_mysql_session, order_by_nulls
 from platform_core.errors import NotFound, Problem
+from platform_core.jsonutil import as_utc, json_obj
 
 router = APIRouter(prefix="/v1", tags=["relationships"])
 CONSENT = Literal["consent", "legitimate_interest", "contract", "public_professional", "manual_entry"]
@@ -42,18 +43,28 @@ async def list_contacts(
     p: Principal = Depends(authorize("relationship:read", "contact")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
     where: list[str] = ["c.org_id = :org"]
     prm: dict[str, Any] = {"org": get_settings().org_id}
     if q:
-        where.append("(c.name ILIKE :q OR o.name ILIKE :q OR c.role ILIKE :q)")
+        like_op = "LIKE" if is_my else "ILIKE"
+        where.append(f"(c.name {like_op} :q OR o.name {like_op} :q OR c.role {like_op} :q)")
         prm["q"] = f"%{q}%"
     if organization_id:
-        where.append("c.organization_id = CAST(:oid AS uuid)")
+        if is_my:
+            where.append("c.organization_id = :oid")
+        else:
+            where.append("c.organization_id = CAST(:oid AS uuid)")
         prm["oid"] = organization_id
     if demo is not None:
         where.append("c.is_demo = :demo")
         prm["demo"] = demo
     off = decode_cursor(cursor)
+    order_clause = (
+        f"{order_by_nulls('r.strength', 'DESC', 'NULLS LAST')}, c.name"
+        if is_my
+        else "r.strength DESC NULLS LAST, c.name"
+    )
     rows = (
         (
             await session.execute(
@@ -64,7 +75,7 @@ async def list_contacts(
                     "(SELECT count(*) FROM milestone m WHERE m.contact_id = c.id AND m.status = 'open') AS open_milestones "
                     "FROM contact c LEFT JOIN organization o ON o.id = c.organization_id LEFT JOIN relationship r ON r.from_id = c.id "
                     f"AND r.to_id = c.organization_id AND r.type = 'met' WHERE {' AND '.join(where)} "
-                    "ORDER BY r.strength DESC NULLS LAST, c.name LIMIT :n OFFSET :off"
+                    f"ORDER BY {order_clause} LIMIT :n OFFSET :off"
                 ),
                 {**prm, "n": limit + 1, "off": off},
             )
@@ -75,20 +86,23 @@ async def list_contacts(
     ids = [str(r["id"]) for r in rows[:limit]]
     touches: dict[str, list[Touch]] = {i: [] for i in ids}
     if ids:
-        for t in (
-            await session.execute(
-                text(
-                    "SELECT contact_id, kind, occurred_at FROM interaction WHERE contact_id = ANY(CAST(:ids AS uuid[]))"
-                ),
-                {"ids": ids},
+        if is_my:
+            t_prm: dict[str, Any] = {}
+            id_in = in_clause("contact_id", "cid", ids, t_prm)
+            touch_sql = f"SELECT contact_id, kind, occurred_at FROM interaction WHERE {id_in}"
+            touch_rows = (await session.execute(text(touch_sql), t_prm)).all()
+        else:
+            touch_sql = (
+                "SELECT contact_id, kind, occurred_at FROM interaction WHERE contact_id = ANY(CAST(:ids AS uuid[]))"
             )
-        ).all():
+            touch_rows = (await session.execute(text(touch_sql), {"ids": ids})).all()
+        for t in touch_rows:
             touches[str(t.contact_id)].append(Touch(t.kind, t.occurred_at))
     now = datetime.now(UTC)
     items = []
     for r in rows[:limit]:
         d = row(r)
-        d["emails"] = [_mask(e) for e in r["emails"]]  # the list view never shows full addresses
+        d["emails"] = [_mask(e) for e in json_obj(r["emails"], [])]  # the list view never shows full addresses
         d["sparkline"] = sparkline(touches[str(r["id"])], now) if touches[str(r["id"])] else []
         items.append(d)
     return {"items": items, "next_cursor": encode_cursor(off + limit) if len(rows) > limit else None}
@@ -122,13 +136,15 @@ async def get_contact(
     p: Principal = Depends(authorize("relationship:read", "contact")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "c.id = :id" if is_my else "c.id = CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
                 text(
                     "SELECT c.*, o.name AS organization_name, r.strength AS warmth, r.last_touch_at FROM contact c "
                     "LEFT JOIN organization o ON o.id = c.organization_id LEFT JOIN relationship r ON r.from_id = c.id "
-                    "AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.id = CAST(:id AS uuid) AND c.org_id = :org"
+                    f"AND r.to_id = c.organization_id AND r.type = 'met' WHERE {where_id} AND c.org_id = :org"
                 ),
                 {"id": id, "org": get_settings().org_id},
             )
@@ -149,12 +165,12 @@ async def timeline(
     p: Principal = Depends(authorize("relationship:read", "contact")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     c = (
         (
             await session.execute(
-                text(
-                    "SELECT id, name, emails, organization_id FROM contact WHERE id = CAST(:id AS uuid) AND org_id = :org"
-                ),
+                text(f"SELECT id, name, emails, organization_id FROM contact WHERE {where_id} AND org_id = :org"),
                 {"id": contact_id, "org": get_settings().org_id},
             )
         )
@@ -164,45 +180,62 @@ async def timeline(
     if c is None:
         raise NotFound("contact not found")
     events: list[dict[str, Any]] = []
+    source_json = "i.source_ref ->> '$.kind'" if is_my else "i.source_ref ->> 'kind'"
+    c_where = "i.contact_id = :c" if is_my else "i.contact_id = CAST(:c AS uuid)"
     for r in (
         await session.execute(
             text(
-                "SELECT i.id, i.kind, i.direction, i.occurred_at, i.summary, i.opportunity_id, i.meeting_id, i.recorded_by, "
-                "i.source_ref ->> 'kind' AS source FROM interaction i WHERE i.contact_id = CAST(:c AS uuid)"
+                f"SELECT i.id, i.kind, i.direction, i.occurred_at, i.summary, i.opportunity_id, i.meeting_id, i.recorded_by, "
+                f"{source_json} AS source FROM interaction i WHERE {c_where}"
             ),
             {"c": contact_id},
         )
     ).mappings():
         events.append({"type": "interaction", "at": r["occurred_at"], **row(r), "ref": f"interaction:{r['id']}"})
+    m_c_where = "contact_id = :c" if is_my else "contact_id = CAST(:c AS uuid)"
     for r in (
         await session.execute(
             text(
-                "SELECT id, kind, title, due_at, status, completed_at, opportunity_id FROM milestone WHERE contact_id = CAST(:c AS uuid)"
+                f"SELECT id, kind, title, due_at, status, completed_at, opportunity_id FROM milestone WHERE {m_c_where}"
             ),
             {"c": contact_id},
         )
     ).mappings():
         events.append({"type": "milestone", "at": r["due_at"], **row(r), "ref": f"milestone:{r['id']}"})
+    r_c_where = "r.from_id = :c" if is_my else "r.from_id = CAST(:c AS uuid)"
     for r in (
         await session.execute(
             text(
-                "SELECT r.id, r.type, r.last_touch_at, r.to_id, ic.name AS introducer FROM relationship r LEFT JOIN contact ic "
-                "ON ic.id = r.to_id WHERE r.from_id = CAST(:c AS uuid) AND r.type = 'introduced_by'"
+                f"SELECT r.id, r.type, r.last_touch_at, r.to_id, ic.name AS introducer FROM relationship r LEFT JOIN contact ic "
+                f"ON ic.id = r.to_id WHERE {r_c_where} AND r.type = 'introduced_by'"
             ),
             {"c": contact_id},
         )
     ).mappings():
         events.append({"type": "introduction", "at": r["last_touch_at"], **row(r), "ref": f"relationship:{r['id']}"})
-    for r in (
-        await session.execute(
-            text(
-                "SELECT id, status, channel, payload ->> 'subject' AS subject, created_at, sent_at FROM outbox "
+    emails = json_obj(c["emails"], [])  # JSON array; text on MySQL
+    if emails:
+        subj_json = "payload ->> '$.subject'" if is_my else "payload ->> 'subject'"
+        if is_my:
+            o_prm: dict[str, Any] = {}
+            recip_in = in_clause("recipient", "em", emails, o_prm)
+            outbox_sql = (
+                f"SELECT id, status, channel, {subj_json} AS subject, created_at, sent_at FROM outbox "
+                f"WHERE channel = 'email' AND {recip_in}"
+            )
+            outbox_res = await session.execute(text(outbox_sql), o_prm)
+        else:
+            outbox_sql = (
+                f"SELECT id, status, channel, {subj_json} AS subject, created_at, sent_at FROM outbox "
                 "WHERE channel = 'email' AND recipient = ANY(:em)"
-            ),
-            {"em": list(c["emails"])},
-        )
-    ).mappings():
-        events.append({"type": "outbox", "at": r["sent_at"] or r["created_at"], **row(r), "ref": f"outbox:{r['id']}"})
+            )
+            outbox_res = await session.execute(text(outbox_sql), {"em": emails})
+        for r in outbox_res.mappings():
+            events.append(
+                {"type": "outbox", "at": r["sent_at"] or r["created_at"], **row(r), "ref": f"outbox:{r['id']}"}
+            )
+    for e in events:  # MySQL DATETIME is naive UTC; comparing it with aware values raises TypeError
+        e["at"] = as_utc(e["at"])
     events.sort(key=lambda e: e["at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
     for e in events:
         e["at"] = e["at"].isoformat() if e["at"] else None
@@ -272,21 +305,31 @@ async def list_relationships(
     _: Principal = Depends(authorize("relationship:read", "relationship")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT r.id, r.from_type, r.from_id, r.to_type, r.to_id, r.type, r.strength, r.last_touch_at, r.is_demo, "
-                    "c.name AS contact_name FROM relationship r LEFT JOIN contact c ON c.id = r.from_id WHERE r.org_id = :org "
-                    "AND (CAST(:o AS uuid) IS NULL OR r.to_id = CAST(:o AS uuid)) AND (CAST(:t AS text) IS NULL OR r.type = :t) "
-                    "ORDER BY r.strength DESC NULLS LAST LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "o": organization_id, "t": type, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["r.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if organization_id:
+            where.append("r.to_id = :o")
+            prm["o"] = organization_id
+        if type:
+            where.append("r.type = :t")
+            prm["t"] = type
+        order_clause = f"{order_by_nulls('r.strength', 'DESC', 'NULLS LAST')}"
+        sql = (
+            "SELECT r.id, r.from_type, r.from_id, r.to_type, r.to_id, r.type, r.strength, r.last_touch_at, r.is_demo, "
+            "c.name AS contact_name FROM relationship r LEFT JOIN contact c ON c.id = r.from_id WHERE "
+            f"{' AND '.join(where)} ORDER BY {order_clause} LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        sql = (
+            "SELECT r.id, r.from_type, r.from_id, r.to_type, r.to_id, r.type, r.strength, r.last_touch_at, r.is_demo, "
+            "c.name AS contact_name FROM relationship r LEFT JOIN contact c ON c.id = r.from_id WHERE r.org_id = :org "
+            "AND (CAST(:o AS uuid) IS NULL OR r.to_id = CAST(:o AS uuid)) AND (CAST(:t AS text) IS NULL OR r.type = :t) "
+            "ORDER BY r.strength DESC NULLS LAST LIMIT :n"
+        )
+        prm = {"org": get_settings().org_id, "o": organization_id, "t": type, "n": limit}
+    rows = (await session.execute(text(sql), prm)).mappings().all()
     return {"items": [row(r) for r in rows]}
 
 
@@ -317,21 +360,30 @@ async def list_meetings(
     _: Principal = Depends(authorize("relationship:read", "meeting")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT m.id, m.contact_ids, m.opportunity_id, m.occurred_at, m.summary, m.commitments, m.next_steps, m.is_demo, "
-                    "(SELECT array_agg(c.name) FROM contact c WHERE c.id = ANY(m.contact_ids)) AS contact_names FROM meeting m "
-                    "WHERE m.org_id = :org AND (CAST(:opp AS uuid) IS NULL OR m.opportunity_id = CAST(:opp AS uuid)) "
-                    "AND (CAST(:c AS uuid) IS NULL OR CAST(:c AS uuid) = ANY(m.contact_ids)) ORDER BY m.occurred_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "opp": opportunity_id, "c": contact_id, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["m.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if opportunity_id:
+            where.append("m.opportunity_id = :opp")
+            prm["opp"] = opportunity_id
+        if contact_id:
+            where.append("JSON_CONTAINS(m.contact_ids, JSON_QUOTE(:c))")
+            prm["c"] = contact_id
+        sql = (
+            "SELECT m.id, m.contact_ids, m.opportunity_id, m.occurred_at, m.summary, m.commitments, m.next_steps, m.is_demo, "
+            "(SELECT JSON_ARRAYAGG(c.name) FROM contact c WHERE JSON_CONTAINS(m.contact_ids, JSON_QUOTE(c.id))) AS contact_names FROM meeting m "
+            f"WHERE {' AND '.join(where)} ORDER BY m.occurred_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        sql = (
+            "SELECT m.id, m.contact_ids, m.opportunity_id, m.occurred_at, m.summary, m.commitments, m.next_steps, m.is_demo, "
+            "(SELECT array_agg(c.name) FROM contact c WHERE c.id = ANY(m.contact_ids)) AS contact_names FROM meeting m "
+            "WHERE m.org_id = :org AND (CAST(:opp AS uuid) IS NULL OR m.opportunity_id = CAST(:opp AS uuid)) "
+            "AND (CAST(:c AS uuid) IS NULL OR CAST(:c AS uuid) = ANY(m.contact_ids)) ORDER BY m.occurred_at DESC LIMIT :n"
+        )
+        prm = {"org": get_settings().org_id, "opp": opportunity_id, "c": contact_id, "n": limit}
+    rows = (await session.execute(text(sql), prm)).mappings().all()
     return {"items": [row(r) for r in rows]}
 
 
@@ -378,33 +430,49 @@ async def list_milestones(
     _: Principal = Depends(authorize("relationship:read", "milestone")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT m.id, m.kind, m.title, m.description, m.due_at, m.status, m.completed_at, m.owner_id, m.opportunity_id, "
-                    "m.contact_id, m.organization_id, m.meeting_id, m.is_demo, c.name AS contact_name, o.name AS organization_name, "
-                    "op.title AS opportunity_title, (m.status = 'open' AND m.due_at < now()) AS overdue FROM milestone m "
-                    "LEFT JOIN contact c ON c.id = m.contact_id LEFT JOIN organization o ON o.id = m.organization_id "
-                    "LEFT JOIN opportunity op ON op.id = m.opportunity_id WHERE m.org_id = :org "
-                    "AND (CAST(:k AS text[]) IS NULL OR m.kind = ANY(:k)) AND m.status = ANY(:st) "
-                    "AND (CAST(:opp AS uuid) IS NULL OR m.opportunity_id = CAST(:opp AS uuid)) "
-                    "AND (CAST(:c AS uuid) IS NULL OR m.contact_id = CAST(:c AS uuid)) "
-                    "ORDER BY (m.status = 'open' AND m.due_at < now()) DESC, m.due_at LIMIT :n"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "k": kind,
-                    "st": status or ["open"],
-                    "opp": opportunity_id,
-                    "c": contact_id,
-                    "n": limit,
-                },
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["m.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if kind:
+            where.append(in_clause("m.kind", "k", kind, prm))
+        st = status or ["open"]
+        where.append(in_clause("m.status", "st", st, prm))
+        if opportunity_id:
+            where.append("m.opportunity_id = :opp")
+            prm["opp"] = opportunity_id
+        if contact_id:
+            where.append("m.contact_id = :c")
+            prm["c"] = contact_id
+        sql = (
+            "SELECT m.id, m.kind, m.title, m.description, m.due_at, m.status, m.completed_at, m.owner_id, m.opportunity_id, "
+            "m.contact_id, m.organization_id, m.meeting_id, m.is_demo, c.name AS contact_name, o.name AS organization_name, "
+            "op.title AS opportunity_title, (m.status = 'open' AND m.due_at < now()) AS overdue FROM milestone m "
+            "LEFT JOIN contact c ON c.id = m.contact_id LEFT JOIN organization o ON o.id = m.organization_id "
+            f"LEFT JOIN opportunity op ON op.id = m.opportunity_id WHERE {' AND '.join(where)} "
+            "ORDER BY (m.status = 'open' AND m.due_at < now()) DESC, m.due_at LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        sql = (
+            "SELECT m.id, m.kind, m.title, m.description, m.due_at, m.status, m.completed_at, m.owner_id, m.opportunity_id, "
+            "m.contact_id, m.organization_id, m.meeting_id, m.is_demo, c.name AS contact_name, o.name AS organization_name, "
+            "op.title AS opportunity_title, (m.status = 'open' AND m.due_at < now()) AS overdue FROM milestone m "
+            "LEFT JOIN contact c ON c.id = m.contact_id LEFT JOIN organization o ON o.id = m.organization_id "
+            "LEFT JOIN opportunity op ON op.id = m.opportunity_id WHERE m.org_id = :org "
+            "AND (CAST(:k AS text[]) IS NULL OR m.kind = ANY(:k)) AND m.status = ANY(:st) "
+            "AND (CAST(:opp AS uuid) IS NULL OR m.opportunity_id = CAST(:opp AS uuid)) "
+            "AND (CAST(:c AS uuid) IS NULL OR m.contact_id = CAST(:c AS uuid)) "
+            "ORDER BY (m.status = 'open' AND m.due_at < now()) DESC, m.due_at LIMIT :n"
+        )
+        prm = {
+            "org": get_settings().org_id,
+            "k": kind,
+            "st": status or ["open"],
+            "opp": opportunity_id,
+            "c": contact_id,
+            "n": limit,
+        }
+    rows = (await session.execute(text(sql), prm)).mappings().all()
     return {"items": [row(r) for r in rows]}
 
 
@@ -458,10 +526,12 @@ async def draft_follow_up(
     p: Principal = Depends(authorize("outbox:draft", "outbox")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     c = (
         (
             await session.execute(
-                text("SELECT id, emails, consent_basis FROM contact WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT id, emails, consent_basis FROM contact WHERE {where_id} AND org_id = :org"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -470,11 +540,12 @@ async def draft_follow_up(
     )
     if c is None:
         raise NotFound("contact not found")
-    if not c["emails"]:
+    emails = json_obj(c["emails"], [])  # JSON array; text on MySQL ('[]' is a non-empty string)
+    if not emails:
         raise Problem(422, "No e-mail", "this contact has no e-mail address on record", "validation")
     return await drafts.create_draft(
         session, p, "email",
-        {"to": c["emails"][0], "subject": body.subject, "body": body.body, "contact_id": id, "opportunity_id": body.opportunity_id},
+        {"to": emails[0], "subject": body.subject, "body": body.body, "contact_id": id, "opportunity_id": body.opportunity_id},
         opportunity_id=body.opportunity_id,
     )  # fmt: skip
 
@@ -486,13 +557,16 @@ async def search_organizations(
     _: Principal = Depends(authorize("opportunity:read", "organization")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    like_op = "LIKE" if is_my else "ILIKE"
+    sql = (
+        "SELECT id, name, kind, country, is_demo FROM organization WHERE org_id = :org AND merged_into IS NULL "
+        f"AND (:q = '' OR name {like_op} :ql) ORDER BY (kind = 'self') DESC, name LIMIT :n"
+    )
     rows = (
         (
             await session.execute(
-                text(
-                    "SELECT id, name, kind, country, is_demo FROM organization WHERE org_id = :org AND merged_into IS NULL "
-                    "AND (:q = '' OR name ILIKE :ql) ORDER BY (kind = 'self') DESC, name LIMIT :n"
-                ),
+                text(sql),
                 {"org": get_settings().org_id, "q": q, "ql": f"%{q}%", "n": limit},
             )
         )

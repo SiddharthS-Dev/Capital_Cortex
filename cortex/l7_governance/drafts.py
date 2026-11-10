@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any, Literal
 
 from sqlalchemy import text
@@ -14,6 +15,7 @@ from cortex.l7_governance import audit_service
 from cortex.l7_governance.policy_engine import CHANNEL_KIND, content_flags
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
 from platform_core.errors import NotFound, Problem
 from platform_core.signing import content_hash
 
@@ -59,30 +61,43 @@ async def create_draft(
     kind = kind or CHANNEL_KIND[channel]
     flags = content_flags(payload, kind, recipient)
     created_by = actor if isinstance(actor, str) else actor.sub
-    oid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO outbox (org_id, channel, payload, content_hash, status, created_by, kind, recipient, "
-                    "recipient_external, flags, recommendation_id, opportunity_id) VALUES (:org, :ch, CAST(:p AS jsonb), "
-                    ":h, 'draft', :by, :k, :r, :ext, CAST(:f AS jsonb), :rec, :opp) RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "ch": channel,
-                    "p": json.dumps(payload, default=str),
-                    "h": content_hash(json.loads(json.dumps(payload, default=str))),
-                    "by": created_by,
-                    "k": kind,
-                    "r": recipient,
-                    "ext": _is_external(channel, recipient),
-                    "f": json.dumps(flags),
-                    "rec": recommendation_id,
-                    "opp": opportunity_id,
-                },
-            )
-        ).scalar_one()
-    )
+    params = {
+        "org": get_settings().org_id,
+        "ch": channel,
+        "p": json.dumps(payload, default=str),
+        "h": content_hash(json.loads(json.dumps(payload, default=str))),
+        "by": created_by,
+        "k": kind,
+        "r": recipient,
+        "ext": _is_external(channel, recipient),
+        "f": json.dumps(flags),
+        "rec": recommendation_id,
+        "opp": opportunity_id,
+    }
+    if is_mysql_session(s):
+        oid = str(uuid.uuid4())
+        params["id"] = oid
+        await s.execute(
+            text(
+                "INSERT INTO outbox (id, org_id, channel, payload, content_hash, status, created_by, kind, recipient, "
+                "recipient_external, flags, recommendation_id, opportunity_id) VALUES (:id, :org, :ch, CAST(:p AS JSON), "
+                ":h, 'draft', :by, :k, :r, :ext, CAST(:f AS JSON), :rec, :opp)"
+            ),
+            params,
+        )
+    else:
+        oid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO outbox (org_id, channel, payload, content_hash, status, created_by, kind, recipient, "
+                        "recipient_external, flags, recommendation_id, opportunity_id) VALUES (:org, :ch, CAST(:p AS jsonb), "
+                        ":h, 'draft', :by, :k, :r, :ext, CAST(:f AS jsonb), :rec, :opp) RETURNING id"
+                    ),
+                    params,
+                )
+            ).scalar_one()
+        )
     await audit_service.record(
         s, actor, "outbox.draft_created", f"outbox:{oid}", {"channel": channel, "kind": kind, "flags": flags}
     )
@@ -91,11 +106,12 @@ async def create_draft(
 
 async def edit_draft(s: AsyncSession, actor: Principal, outbox_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Editing is always allowed before sending; after approval the DB trigger invalidates the approval."""
+    id_cond = "id = :id" if is_mysql_session(s) else "id = CAST(:id AS uuid)"
     row = (
         (
             await s.execute(
                 text(
-                    "SELECT id, channel, kind, status, approval_id FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"
+                    f"SELECT id, channel, kind, status, approval_id FROM outbox WHERE {id_cond} AND org_id = :org FOR UPDATE"
                 ),
                 {"id": outbox_id, "org": get_settings().org_id},
             )
@@ -110,10 +126,11 @@ async def edit_draft(s: AsyncSession, actor: Principal, outbox_id: str, payload:
     recipient = _validate(row["channel"], payload)
     normalized = json.loads(json.dumps(payload, default=str))
     flags = content_flags(normalized, row["kind"], recipient)
+    json_type = "JSON" if is_mysql_session(s) else "jsonb"
     await s.execute(
         text(
-            "UPDATE outbox SET payload = CAST(:p AS jsonb), content_hash = :h, recipient = :r, recipient_external = :ext, "
-            "flags = CAST(:f AS jsonb) WHERE id = :id"
+            f"UPDATE outbox SET payload = CAST(:p AS {json_type}), content_hash = :h, recipient = :r, recipient_external = :ext, "
+            f"flags = CAST(:f AS {json_type}) WHERE id = :id"
         ),
         {
             "p": json.dumps(normalized),

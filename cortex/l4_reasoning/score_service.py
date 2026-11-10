@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.l4_reasoning.factors import REGISTRY, FactorResult, ScoringContext
 from cortex.l4_reasoning.factors.base import RUN_LAST
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
 
 
 @lru_cache
@@ -108,23 +110,42 @@ async def active_profile(s: AsyncSession) -> dict[str, Any]:
     )
     if row is None:
         d = default_profile()
-        rid = (
+        params = {
+            "org": org,
+            "n": d["name"],
+            "v": d["version"],
+            "w": json.dumps(d["factors"]),
+            "t": json.dumps(d["thresholds"]),
+            "f": json.dumps({k: True for k in d["factors"]}),
+        }
+        if is_mysql_session(s):
+            new_id = str(uuid.uuid4())
+            params["id"] = new_id
             await s.execute(
                 text(
-                    "INSERT INTO scoring_profile (org_id, name, version, weights, thresholds, factors_enabled, active, "
-                    "created_by) VALUES (:org, :n, :v, CAST(:w AS jsonb), CAST(:t AS jsonb), CAST(:f AS jsonb), true, "
-                    "'system:default') ON CONFLICT (org_id, name, version) DO UPDATE SET active = true RETURNING id"
+                    "INSERT INTO scoring_profile (id, org_id, name, version, weights, thresholds, factors_enabled, active, "
+                    "created_by) VALUES (:id, :org, :n, :v, CAST(:w AS JSON), CAST(:t AS JSON), CAST(:f AS JSON), true, "
+                    "'system:default') ON DUPLICATE KEY UPDATE active = true"
                 ),
-                {
-                    "org": org,
-                    "n": d["name"],
-                    "v": d["version"],
-                    "w": json.dumps(d["factors"]),
-                    "t": json.dumps(d["thresholds"]),
-                    "f": json.dumps({k: True for k in d["factors"]}),
-                },
+                params,
             )
-        ).scalar_one()
+            rid = (
+                await s.execute(
+                    text("SELECT id FROM scoring_profile WHERE org_id = :org AND name = :n AND version = :v"),
+                    {"org": org, "n": d["name"], "v": d["version"]},
+                )
+            ).scalar_one()
+        else:
+            rid = (
+                await s.execute(
+                    text(
+                        "INSERT INTO scoring_profile (org_id, name, version, weights, thresholds, factors_enabled, active, "
+                        "created_by) VALUES (:org, :n, :v, CAST(:w AS jsonb), CAST(:t AS jsonb), CAST(:f AS jsonb), true, "
+                        "'system:default') ON CONFLICT (org_id, name, version) DO UPDATE SET active = true RETURNING id"
+                    ),
+                    params,
+                )
+            ).scalar_one()
         return {
             "id": str(rid),
             "name": d["name"],
@@ -132,12 +153,18 @@ async def active_profile(s: AsyncSession) -> dict[str, Any]:
             "factors": d["factors"],
             "thresholds": d["thresholds"],
         }
+    weights = row["weights"]
+    if isinstance(weights, str):
+        weights = json.loads(weights)
+    thresholds = row["thresholds"]
+    if isinstance(thresholds, str):
+        thresholds = json.loads(thresholds)
     return {
         "id": str(row["id"]),
         "name": row["name"],
         "version": row["version"],
-        "factors": row["weights"],
-        "thresholds": row["thresholds"],
+        "factors": weights,
+        "thresholds": thresholds,
     }
 
 
@@ -156,17 +183,26 @@ async def self_profile(s: AsyncSession) -> dict[str, Any] | None:
         .mappings()
         .first()
     )
-    return dict(r) if r else None
+    if not r:
+        return None
+    res = dict(r)
+    if isinstance(res.get("profile"), str):
+        try:
+            res["profile"] = json.loads(res["profile"])
+        except ValueError:
+            pass
+    return res
 
 
 async def build_context(
     s: AsyncSession, opp_id: str, me: dict[str, Any] | None, models: dict[bool, Any] | None = None
 ) -> ScoringContext:
+    cls_col = "o.class AS class" if is_mysql_session(s) else "o.class::text AS class"
     opp = dict(
         (
             await s.execute(
                 text(
-                    "SELECT o.*, o.class::text AS class, fi.terms FROM opportunity o "
+                    f"SELECT o.*, {cls_col}, fi.terms FROM opportunity o "
                     "LEFT JOIN financial_instrument fi ON fi.id = o.instrument_id WHERE o.id = :id"
                 ),
                 {"id": opp_id},
@@ -176,6 +212,23 @@ async def build_context(
         .one()
     )
     opp["id"] = str(opp["id"])
+    for col in ("sectors", "stage_fit", "geography", "esg_tags", "meta", "terms"):
+        if isinstance(opp.get(col), str):
+            try:
+                opp[col] = json.loads(opp[col])
+            except ValueError:
+                pass
+    dl = opp.get("deadline")
+    if dl is not None:
+        if isinstance(dl, str):
+            try:
+                dl = datetime.fromisoformat(dl)
+            except ValueError:
+                pass
+        if hasattr(dl, "tzinfo") and dl.tzinfo is None:
+            dl = dl.replace(tzinfo=UTC)  # type: ignore[call-arg]
+        opp["deadline"] = dl
+
     cp = None
     rel = None
     if opp.get("counterparty_id"):
@@ -243,9 +296,10 @@ async def score_opportunity(
     models = models if models is not None else await active_models(s)
     ctx = await build_context(s, opp_id, me, models)
     c = combine(compute(ctx, profile), profile)
+    json_type = "JSON" if is_mysql_session(s) else "jsonb"
     await s.execute(
         text(
-            "UPDATE opportunity SET score = :score, score_band = :band, completeness = :comp, factors = CAST(:f AS jsonb), "
+            f"UPDATE opportunity SET score = :score, score_band = :band, completeness = :comp, factors = CAST(:f AS {json_type}), "
             "scoring_profile_id = :pid, scored_at = now() WHERE id = :id"
         ),
         {
@@ -275,23 +329,43 @@ async def _record_history(s: AsyncSession, opp_id: str, profile_id: str, c: Comb
 
     values = {k: v.get("value") for k, v in c.factors.items()}
     h = hashlib.sha256(json.dumps([values, c.score, c.band], sort_keys=True, default=str).encode()).hexdigest()
-    await s.execute(
-        text(
-            "INSERT INTO factor_history (org_id, opportunity_id, scoring_profile_id, score, score_band, completeness, factors, factor_hash, is_demo) "
-            "SELECT o.org_id, o.id, CAST(:pid AS uuid), :sc, :b, :comp, CAST(:f AS jsonb), :h, o.is_demo FROM opportunity o WHERE o.id = CAST(:id AS uuid) "
-            "AND NOT EXISTS (SELECT 1 FROM (SELECT factor_hash FROM factor_history WHERE opportunity_id = CAST(:id AS uuid) "
-            "ORDER BY scored_at DESC LIMIT 1) last WHERE last.factor_hash = :h)"
-        ),
-        {
-            "pid": profile_id,
-            "sc": c.score,
-            "b": c.band,
-            "comp": c.completeness,
-            "f": json.dumps({"factors": c.factors}, default=str),
-            "h": h,
-            "id": opp_id,
-        },
-    )
+    if is_mysql_session(s):
+        await s.execute(
+            text(
+                "INSERT INTO factor_history (id, org_id, opportunity_id, scoring_profile_id, score, score_band, completeness, factors, factor_hash, is_demo) "
+                "SELECT :new_id, o.org_id, o.id, :pid, :sc, :b, :comp, CAST(:f AS JSON), :h, o.is_demo FROM opportunity o WHERE o.id = :id "
+                "AND NOT EXISTS (SELECT 1 FROM (SELECT factor_hash FROM factor_history WHERE opportunity_id = :id "
+                "ORDER BY scored_at DESC LIMIT 1) last WHERE last.factor_hash = :h)"
+            ),
+            {
+                "new_id": str(uuid.uuid4()),
+                "pid": profile_id,
+                "sc": c.score,
+                "b": c.band,
+                "comp": c.completeness,
+                "f": json.dumps({"factors": c.factors}, default=str),
+                "h": h,
+                "id": opp_id,
+            },
+        )
+    else:
+        await s.execute(
+            text(
+                "INSERT INTO factor_history (org_id, opportunity_id, scoring_profile_id, score, score_band, completeness, factors, factor_hash, is_demo) "
+                "SELECT o.org_id, o.id, CAST(:pid AS uuid), :sc, :b, :comp, CAST(:f AS jsonb), :h, o.is_demo FROM opportunity o WHERE o.id = CAST(:id AS uuid) "
+                "AND NOT EXISTS (SELECT 1 FROM (SELECT factor_hash FROM factor_history WHERE opportunity_id = CAST(:id AS uuid) "
+                "ORDER BY scored_at DESC LIMIT 1) last WHERE last.factor_hash = :h)"
+            ),
+            {
+                "pid": profile_id,
+                "sc": c.score,
+                "b": c.band,
+                "comp": c.completeness,
+                "f": json.dumps({"factors": c.factors}, default=str),
+                "h": h,
+                "id": opp_id,
+            },
+        )
 
 
 async def rescore_all(s: AsyncSession, where: str = "TRUE", params: dict[str, Any] | None = None) -> int:

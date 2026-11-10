@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -25,8 +26,9 @@ from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.bus import Envelope, get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_session, session_scope
+from platform_core.db import get_session, in_clause, is_mysql_session, session_scope
 from platform_core.errors import NotFound, Problem, current_trace_id
+from platform_core.jsonutil import json_obj
 from platform_core.llm import get_router
 from platform_core.signing import content_hash
 
@@ -39,17 +41,31 @@ async def roster(
     _: Principal = Depends(authorize("agent:read", "agent")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    if is_my:
+        roster_sql = (
+            "SELECT agent, "
+            "COUNT(CASE WHEN created_at >= CURDATE() THEN 1 END) AS runs_today, count(*) AS runs, "
+            "COUNT(CASE WHEN status = 'succeeded' THEN 1 END) AS succeeded, "
+            "COUNT(CASE WHEN status IN ('succeeded','partial','failed') THEN 1 END) AS finished, "
+            "COALESCE(SUM(CASE WHEN created_at >= CURDATE() THEN cost_usd ELSE 0 END), 0) AS cost_today, "
+            "COALESCE(SUM(CASE WHEN created_at >= CURDATE() THEN tokens_in + tokens_out ELSE 0 END), 0) AS tokens_today, "
+            "max(created_at) AS last_run_at, MAX(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running "
+            "FROM agent_run WHERE org_id = :org GROUP BY agent"
+        )
+    else:
+        roster_sql = (
+            "SELECT agent, count(*) FILTER (WHERE created_at >= date_trunc('day', now())) AS runs_today, count(*) AS runs, "
+            "count(*) FILTER (WHERE status = 'succeeded') AS succeeded, count(*) FILTER (WHERE status IN ('succeeded','partial','failed')) AS finished, "
+            "coalesce(sum(cost_usd) FILTER (WHERE created_at >= date_trunc('day', now())), 0) AS cost_today, "
+            "coalesce(sum(tokens_in + tokens_out) FILTER (WHERE created_at >= date_trunc('day', now())), 0) AS tokens_today, "
+            "max(created_at) AS last_run_at, bool_or(status = 'running') AS running FROM agent_run WHERE org_id = :org GROUP BY agent"
+        )
     stats = {
         r["agent"]: dict(r)
         for r in (
             await session.execute(
-                text(
-                    "SELECT agent, count(*) FILTER (WHERE created_at >= date_trunc('day', now())) AS runs_today, count(*) AS runs, "
-                    "count(*) FILTER (WHERE status = 'succeeded') AS succeeded, count(*) FILTER (WHERE status IN ('succeeded','partial','failed')) AS finished, "
-                    "coalesce(sum(cost_usd) FILTER (WHERE created_at >= date_trunc('day', now())), 0) AS cost_today, "
-                    "coalesce(sum(tokens_in + tokens_out) FILTER (WHERE created_at >= date_trunc('day', now())), 0) AS tokens_today, "
-                    "max(created_at) AS last_run_at, bool_or(status = 'running') AS running FROM agent_run WHERE org_id = :org GROUP BY agent"
-                ),
+                text(roster_sql),
                 {"org": get_settings().org_id},
             )
         )
@@ -98,33 +114,66 @@ async def run(body: RunIn, p: Principal = Depends(authorize("agent:run", "agent_
         rid = await _queue_run(session, body, p)
     await get_bus().publish(
         "agents.jobs",
-        Envelope(type="council.run", payload={"run_id": rid}, actor_token=p.token, idempotency_key=f"council:{rid}"),
+        Envelope(
+            type="council.run",
+            payload={"run_id": rid},
+            actor_token=p.token,
+            idempotency_key=f"council:{rid}",
+        ),
     )
     await publish_event({"type": "agent_run.queued", "run_id": rid})
     return {"run_id": rid, "status": "queued", "stream": f"/v1/agents/runs/{rid}/stream"}
 
 
 async def _queue_run(session: AsyncSession, body: RunIn, p: Principal) -> str:
+    is_my = is_mysql_session(session)
+    opp_where = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     exists = (
         await session.execute(
-            text("SELECT 1 FROM opportunity WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+            text(f"SELECT 1 FROM opportunity WHERE {opp_where} AND org_id = :org"),
             {"id": body.opportunity_id, "org": get_settings().org_id},
         )
     ).scalar()
     if not exists:
         raise NotFound("opportunity not found")
-    rid = str(
-        (
-            await session.execute(
-                text(
-                    "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, input, budget_tokens, budget_usd) "
-                    "VALUES (:org, 'council', :t, :opp, :by, 'none', 'queued', CAST(:inp AS jsonb), :bt, :bu) RETURNING id"
-                ),
-                {"org": get_settings().org_id, "t": body.task, "opp": body.opportunity_id, "by": p.sub,
-                 "inp": json.dumps(body.model_dump()), "bt": body.budget_tokens, "bu": body.budget_usd},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    if is_my:
+        rid = str(uuid.uuid4())
+        await session.execute(
+            text(
+                "INSERT INTO agent_run (id, org_id, agent, task, opportunity_id, requested_by, model_tier, status, input, budget_tokens, budget_usd) "
+                "VALUES (:id, :org, 'council', :t, :opp, :by, 'none', 'queued', :inp, :bt, :bu)"
+            ),
+            {
+                "id": rid,
+                "org": get_settings().org_id,
+                "t": body.task,
+                "opp": body.opportunity_id,
+                "by": p.sub,
+                "inp": json.dumps(body.model_dump()),
+                "bt": body.budget_tokens,
+                "bu": body.budget_usd,
+            },
+        )
+    else:
+        rid = str(
+            (
+                await session.execute(
+                    text(
+                        "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, input, budget_tokens, budget_usd) "
+                        "VALUES (:org, 'council', :t, :opp, :by, 'none', 'queued', CAST(:inp AS jsonb), :bt, :bu) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "t": body.task,
+                        "opp": body.opportunity_id,
+                        "by": p.sub,
+                        "inp": json.dumps(body.model_dump()),
+                        "bt": body.budget_tokens,
+                        "bu": body.budget_usd,
+                    },
+                )
+            ).scalar_one()
+        )
     await audit_service.record(session, p, "council.run.requested", f"agent_run:{rid}", body.model_dump())
     return rid
 
@@ -136,25 +185,38 @@ async def runs(
     _: Principal = Depends(authorize("agent:read", "agent_run")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT r.id, r.task, r.status, r.mode, r.opportunity_id, op.title AS opportunity_title, r.requested_by, r.created_at, "
-                    "r.started_at, r.finished_at, r.tokens_in, r.tokens_out, r.cost_usd, r.trace_id, r.incomplete, r.error, "
-                    "r.output -> 'stance' AS stance, r.output -> 'confidence' AS confidence, r.output ->> 'recommendation_id' AS recommendation_id, "
-                    "r.output ->> 'approval_id' AS approval_id, r.output -> 'citation' ->> 'status' AS citation_status, "
-                    "(SELECT count(*) FROM agent_run c WHERE c.parent_run_id = r.id) AS agents FROM agent_run r "
-                    "LEFT JOIN opportunity op ON op.id = r.opportunity_id WHERE r.org_id = :org AND r.agent = 'council' "
-                    "AND (CAST(:opp AS uuid) IS NULL OR r.opportunity_id = CAST(:opp AS uuid)) ORDER BY r.created_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "opp": opportunity_id, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        opp_filter = "AND r.opportunity_id = :opp" if opportunity_id else ""
+        sql = (
+            "SELECT r.id, r.task, r.status, r.mode, r.opportunity_id, op.title AS opportunity_title, r.requested_by, r.created_at, "
+            "r.started_at, r.finished_at, r.tokens_in, r.tokens_out, r.cost_usd, r.trace_id, r.incomplete, r.error, "
+            "r.output -> '$.stance' AS stance, r.output -> '$.confidence' AS confidence, r.output ->> '$.recommendation_id' AS recommendation_id, "
+            "r.output ->> '$.approval_id' AS approval_id, r.output ->> '$.citation.status' AS citation_status, "
+            "(SELECT count(*) FROM agent_run c WHERE c.parent_run_id = r.id) AS agents FROM agent_run r "
+            f"LEFT JOIN opportunity op ON op.id = r.opportunity_id WHERE r.org_id = :org AND r.agent = 'council' "
+            f"{opp_filter} ORDER BY r.created_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
-    return {"items": [row(r) for r in rows]}
+        params: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if opportunity_id:
+            params["opp"] = opportunity_id
+    else:
+        sql = (
+            "SELECT r.id, r.task, r.status, r.mode, r.opportunity_id, op.title AS opportunity_title, r.requested_by, r.created_at, "
+            "r.started_at, r.finished_at, r.tokens_in, r.tokens_out, r.cost_usd, r.trace_id, r.incomplete, r.error, "
+            "r.output -> 'stance' AS stance, r.output -> 'confidence' AS confidence, r.output ->> 'recommendation_id' AS recommendation_id, "
+            "r.output ->> 'approval_id' AS approval_id, r.output -> 'citation' ->> 'status' AS citation_status, "
+            "(SELECT count(*) FROM agent_run c WHERE c.parent_run_id = r.id) AS agents FROM agent_run r "
+            "LEFT JOIN opportunity op ON op.id = r.opportunity_id WHERE r.org_id = :org AND r.agent = 'council' "
+            "AND (CAST(:opp AS uuid) IS NULL OR r.opportunity_id = CAST(:opp AS uuid)) ORDER BY r.created_at DESC LIMIT :n"
+        )
+        params = {"org": get_settings().org_id, "opp": opportunity_id, "n": limit}
+    rows = (await session.execute(text(sql), params)).mappings().all()
+    # `output -> path` yields a JSON value: decoded by the driver on PostgreSQL, JSON text on MySQL ('"pursue"',
+    # '0.72'). Decode it so both backends return the same string/number.
+    return {
+        "items": [{**row(r), "stance": json_obj(r["stance"]), "confidence": json_obj(r["confidence"])} for r in rows]
+    }
 
 
 @router.get("/agents/runs/{id}", summary="Run status with every agent's position, tokens, cost and trace")
@@ -163,10 +225,12 @@ async def run_status(
     _: Principal = Depends(authorize("agent:read", "agent_run")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
-                text("SELECT * FROM agent_run WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM agent_run WHERE {where_id} AND org_id = :org"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -175,13 +239,20 @@ async def run_status(
     )
     if r is None:
         raise NotFound("run not found")
+    if is_my:
+        kids_sql = (
+            "SELECT id, agent, status, mode, model_tier, tokens_in, tokens_out, cost_usd, started_at, finished_at, error, "
+            "trace_id, JSON_REMOVE(output, '$.evidence_pack') AS output FROM agent_run WHERE parent_run_id = :id ORDER BY started_at"
+        )
+    else:
+        kids_sql = (
+            "SELECT id, agent, status, mode, model_tier, tokens_in, tokens_out, cost_usd, started_at, finished_at, error, "
+            "trace_id, output - 'evidence_pack' AS output FROM agent_run WHERE parent_run_id = CAST(:id AS uuid) ORDER BY started_at"
+        )
     kids = (
         (
             await session.execute(
-                text(
-                    "SELECT id, agent, status, mode, model_tier, tokens_in, tokens_out, cost_usd, started_at, finished_at, error, "
-                    "trace_id, output - 'evidence_pack' AS output FROM agent_run WHERE parent_run_id = CAST(:id AS uuid) ORDER BY started_at"
-                ),
+                text(kids_sql),
                 {"id": id},
             )
         )
@@ -241,23 +312,33 @@ async def list_recommendations(
     _: Principal = Depends(authorize("agent:read", "recommendation")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT rc.id, rc.opportunity_id, op.title AS opportunity_title, rc.agent_run_id, rc.text, rc.confidence, rc.stance, "
-                    "rc.method, rc.status, rc.claims, rc.gaps, rc.evidence, rc.reasoning, rc.citation_report ->> 'status' AS citation_status, "
-                    "rc.content_hash, rc.version, rc.created_at, rc.updated_at, rc.is_demo FROM recommendation rc "
-                    "LEFT JOIN opportunity op ON op.id = rc.opportunity_id WHERE rc.org_id = :org "
-                    "AND (CAST(:opp AS uuid) IS NULL OR rc.opportunity_id = CAST(:opp AS uuid)) "
-                    "AND (CAST(:st AS text[]) IS NULL OR rc.status = ANY(:st)) ORDER BY rc.created_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "opp": opportunity_id, "st": status, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["rc.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if opportunity_id:
+            where.append("rc.opportunity_id = :opp")
+            prm["opp"] = opportunity_id
+        if status:
+            where.append(in_clause("rc.status", "st", status, prm))
+        sql = (
+            "SELECT rc.id, rc.opportunity_id, op.title AS opportunity_title, rc.agent_run_id, rc.text, rc.confidence, rc.stance, "
+            "rc.method, rc.status, rc.claims, rc.gaps, rc.evidence, rc.reasoning, rc.citation_report ->> '$.status' AS citation_status, "
+            "rc.content_hash, rc.version, rc.created_at, rc.updated_at, rc.is_demo FROM recommendation rc "
+            f"LEFT JOIN opportunity op ON op.id = rc.opportunity_id WHERE {' AND '.join(where)} "
+            "ORDER BY rc.created_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        sql = (
+            "SELECT rc.id, rc.opportunity_id, op.title AS opportunity_title, rc.agent_run_id, rc.text, rc.confidence, rc.stance, "
+            "rc.method, rc.status, rc.claims, rc.gaps, rc.evidence, rc.reasoning, rc.citation_report ->> 'status' AS citation_status, "
+            "rc.content_hash, rc.version, rc.created_at, rc.updated_at, rc.is_demo FROM recommendation rc "
+            "LEFT JOIN opportunity op ON op.id = rc.opportunity_id WHERE rc.org_id = :org "
+            "AND (CAST(:opp AS uuid) IS NULL OR rc.opportunity_id = CAST(:opp AS uuid)) "
+            "AND (CAST(:st AS text[]) IS NULL OR rc.status = ANY(:st)) ORDER BY rc.created_at DESC LIMIT :n"
+        )
+        prm = {"org": get_settings().org_id, "opp": opportunity_id, "st": status, "n": limit}
+    rows = (await session.execute(text(sql), prm)).mappings().all()
     return {"items": [row(r) for r in rows]}
 
 
@@ -267,10 +348,12 @@ async def get_recommendation(
     _: Principal = Depends(authorize("agent:read", "recommendation")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
-                text("SELECT * FROM recommendation WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM recommendation WHERE {where_id} AND org_id = :org"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -293,10 +376,12 @@ async def edit_recommendation(
     p: Principal = Depends(authorize("recommendation:write", "recommendation")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
-                text("SELECT * FROM recommendation WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"),
+                text(f"SELECT * FROM recommendation WHERE {where_id} AND org_id = :org FOR UPDATE"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -307,6 +392,21 @@ async def edit_recommendation(
         raise NotFound("recommendation not found")
     new = {**dict(r), "text": body.text}
     h = content_hash(recommendation_content(new))
+    # approvals of the recommendation itself that trg_recommendation_invalidate is about to invalidate (same condition
+    # as the trigger); counted before the UPDATE so the response and audit report them, not only the drafts' ones
+    direct = (
+        (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM approval WHERE subject_type = 'recommendation' AND subject_id = :id "
+                    "AND decision IN ('pending', 'approved') AND (content_hash IS NULL OR content_hash <> :h)"
+                ),
+                {"id": r["id"], "h": h},
+            )
+        ).scalar()
+        if h != r["content_hash"]
+        else 0
+    )
     await session.execute(
         text(
             "UPDATE recommendation SET text = :t, content_hash = :h, version = version + 1, edited_by = :by WHERE id = :id"
@@ -314,7 +414,8 @@ async def edit_recommendation(
         {"t": body.text, "h": h, "by": p.sub, "id": r["id"]},
     )
     # linked export drafts embed the recommendation text: regenerate them (their trigger invalidates approvals)
-    invalidated = 0
+    invalidated = int(direct or 0)
+    p_cast = ":p" if is_my else "CAST(:p AS jsonb)"
     for o in (
         await session.execute(
             text(
@@ -323,12 +424,12 @@ async def edit_recommendation(
             {"id": r["id"]},
         )
     ).mappings():
-        payload = {**o["payload"], "recommendation": body.text}
+        payload = {**json_obj(o["payload"], {}), "recommendation": body.text}  # JSON text on MySQL
         before = (
             await session.execute(text("SELECT approval_id FROM outbox WHERE id = :id"), {"id": o["id"]})
         ).scalar()
         await session.execute(
-            text("UPDATE outbox SET payload = CAST(:p AS jsonb), content_hash = :h WHERE id = :id"),
+            text(f"UPDATE outbox SET payload = {p_cast}, content_hash = :h WHERE id = :id"),
             {"p": json.dumps(payload, default=str), "h": content_hash(payload), "id": o["id"]},
         )
         invalidated += 1 if before else 0
@@ -350,10 +451,12 @@ async def request_recommendation_approval(
     p: Principal = Depends(authorize("approval:request", "recommendation")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    where_id = "id = :id" if is_my else "id = CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
-                text("SELECT id, citation_report FROM recommendation WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT id, citation_report FROM recommendation WHERE {where_id} AND org_id = :org"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -372,19 +475,13 @@ async def request_recommendation_approval(
         .scalars()
         .all()
     )
+    # decoded document, so request_approval stores it once (json.dumps of the MySQL text would double-encode it)
+    citation = json_obj(r["citation_report"])
     out = []
     if drafts_:
         for d in drafts_:
-            out.append(
-                await approval_service.request_approval(
-                    session, p, "outbox", str(d), citation_report=r["citation_report"]
-                )
-            )
+            out.append(await approval_service.request_approval(session, p, "outbox", str(d), citation_report=citation))
     else:
-        out.append(
-            await approval_service.request_approval(
-                session, p, "recommendation", id, citation_report=r["citation_report"]
-            )
-        )
+        out.append(await approval_service.request_approval(session, p, "recommendation", id, citation_report=citation))
     await publish_event({"type": "approval.requested", "ids": [o["approval_id"] for o in out]})
     return {"recommendation_id": id, "approvals": out}

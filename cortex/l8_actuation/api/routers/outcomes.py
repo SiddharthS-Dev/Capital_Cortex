@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,8 @@ from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.bus import get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session
+from platform_core.db.vector import publish_vector_change
 from platform_core.errors import NotFound, Problem
 
 router = APIRouter(prefix="/v1", tags=["outcomes"])
@@ -39,14 +41,17 @@ class OutcomeIn(BaseModel):
 @router.post("/outcomes", status_code=201, summary="Record a realised outcome (L8→L1; the only ML training source)")
 async def record_outcome(
     body: OutcomeIn,
+    background: BackgroundTasks,
     p: Principal = Depends(authorize("outcome:write", "outcome")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     o = (
         (
             await session.execute(
                 text(
-                    "SELECT id, counterparty_id, is_demo, currency FROM opportunity WHERE id = CAST(:id AS uuid) AND org_id = :org FOR UPDATE"
+                    f"SELECT id, counterparty_id, is_demo, currency FROM opportunity WHERE id = {id_clause} AND org_id = :org FOR UPDATE"
                 ),
                 {"id": body.opportunity_id, "org": get_settings().org_id},
             )
@@ -65,25 +70,51 @@ async def record_outcome(
         raise Problem(
             422, "Future outcome", "an outcome can't close in the future (only realised outcomes)", "validation"
         )
-    oid = (
+    src_val = json.dumps(
+        {"kind": "manual_entry", "entered_by": p.username or p.sub, "at": datetime.now(UTC).isoformat()}
+    )
+    if is_my:
+        oid = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO outcome (org_id, opportunity_id, result, amount, currency, reason, closed_at, recorded_by, source_ref, "
-                "label_source, is_demo) VALUES (:org, :opp, :r, :a, :c, :why, :t, :by, CAST(:src AS jsonb), 'realised', :demo) RETURNING id"
+                "INSERT INTO outcome (id, org_id, opportunity_id, result, amount, currency, reason, closed_at, recorded_by, source_ref, "
+                "label_source, is_demo) VALUES (:id, :org, :opp, :r, :a, :c, :why, :t, :by, CAST(:src AS JSON), 'realised', :demo)"
             ),
-            {"org": get_settings().org_id, "opp": o["id"], "r": body.result, "a": body.amount, "c": body.currency or o["currency"],
-             "why": body.reason, "t": closed, "by": p.sub, "demo": o["is_demo"],
-             "src": json.dumps({"kind": "manual_entry", "entered_by": p.username or p.sub, "at": datetime.now(UTC).isoformat()})},
+            {
+                "id": str(oid),
+                "org": get_settings().org_id,
+                "opp": str(o["id"]),
+                "r": body.result,
+                "a": body.amount,
+                "c": body.currency or o["currency"],
+                "why": body.reason,
+                "t": closed,
+                "by": p.sub,
+                "demo": o["is_demo"],
+                "src": src_val,
+            },
         )
-    ).scalar_one()  # fmt: skip
+    else:
+        oid = (
+            await session.execute(
+                text(
+                    "INSERT INTO outcome (org_id, opportunity_id, result, amount, currency, reason, closed_at, recorded_by, source_ref, "
+                    "label_source, is_demo) VALUES (:org, :opp, :r, :a, :c, :why, :t, :by, CAST(:src AS jsonb), 'realised', :demo) RETURNING id"
+                ),
+                {"org": get_settings().org_id, "opp": o["id"], "r": body.result, "a": body.amount, "c": body.currency or o["currency"],
+                 "why": body.reason, "t": closed, "by": p.sub, "demo": o["is_demo"], "src": src_val},
+            )
+        ).scalar_one()  # fmt: skip
     stage = "closed" if body.result == "won" else "lost"
+    stage_clause = ":stage" if is_my else "CAST(:stage AS pipeline_stage)"
     await session.execute(
-        text("UPDATE opportunity SET status = :st, pipeline_stage = CAST(:stage AS pipeline_stage) WHERE id = :id"),
-        {"st": body.result, "stage": stage, "id": o["id"]},
+        text(f"UPDATE opportunity SET status = :st, pipeline_stage = {stage_clause} WHERE id = :id"),
+        {"st": body.result, "stage": stage, "id": str(o["id"]) if is_my else o["id"]},
     )
     if o["counterparty_id"]:
         await consolidate_organization(session, str(o["counterparty_id"]))  # L3 memory update on the feedback edge
     await get_bus().r.set(RETRAIN_FLAG, "1")
+    background.add_task(publish_vector_change, get_settings().org_id)  # status changed; runs after the commit
     await audit_service.record(
         session,
         p,
@@ -102,20 +133,34 @@ async def list_outcomes(
     _: Principal = Depends(authorize("opportunity:read", "outcome")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT oc.id, oc.opportunity_id, op.title AS opportunity_title, oc.result, oc.amount, oc.currency, oc.reason, "
-                    "oc.closed_at, oc.recorded_by, oc.label_source, oc.is_demo FROM outcome oc JOIN opportunity op ON op.id = oc.opportunity_id "
-                    "WHERE oc.org_id = :org AND (CAST(:o AS uuid) IS NULL OR oc.opportunity_id = CAST(:o AS uuid)) ORDER BY oc.closed_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "o": opportunity_id, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        where = ["oc.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if opportunity_id:
+            where.append("oc.opportunity_id = :o")
+            prm["o"] = opportunity_id
+        sql = (
+            "SELECT oc.id, oc.opportunity_id, op.title AS opportunity_title, oc.result, oc.amount, oc.currency, oc.reason, "
+            "oc.closed_at, oc.recorded_by, oc.label_source, oc.is_demo FROM outcome oc JOIN opportunity op ON op.id = oc.opportunity_id "
+            f"WHERE {' AND '.join(where)} ORDER BY oc.closed_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+        rows = (await session.execute(text(sql), prm)).mappings().all()
+    else:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT oc.id, oc.opportunity_id, op.title AS opportunity_title, oc.result, oc.amount, oc.currency, oc.reason, "
+                        "oc.closed_at, oc.recorded_by, oc.label_source, oc.is_demo FROM outcome oc JOIN opportunity op ON op.id = oc.opportunity_id "
+                        "WHERE oc.org_id = :org AND (CAST(:o AS uuid) IS NULL OR oc.opportunity_id = CAST(:o AS uuid)) ORDER BY oc.closed_at DESC LIMIT :n"
+                    ),
+                    {"org": get_settings().org_id, "o": opportunity_id, "n": limit},
+                )
+            )
+            .mappings()
+            .all()
+        )
     return {"items": [row(r) for r in rows]}
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from cortex.l1_perception.mapping import resolve, strip_html, to_date, to_number
@@ -90,3 +91,32 @@ def normalize(cfg: SourceConfig, raw: RawItem) -> Signal:
     if amax is not None and amax <= 0:
         fields.pop("amount_max")
     return Signal(source_key=cfg.key, field_sources=sources, **fields)
+
+
+def accept(cfg: SourceConfig, sig: Signal) -> str | None:
+    """Apply the source's ``accept`` rules to a normalised signal. Returns the rejection reason, or None to keep it.
+
+    url_pattern       regex the signal URL must match (e.g. only solicitation pages of a mixed feed)
+    require_fields    signal fields that must be present (e.g. [deadline])
+    keywords_any      at least one must appear in the title or description (case-insensitive)
+    exclude_keywords  none may appear in the title
+    future_deadline   true: drop items whose deadline has already passed (closed calls)
+    """
+    rules = cfg.accept
+    if not rules:
+        return None
+    if rules.get("url_pattern") and not re.search(rules["url_pattern"], sig.url or ""):
+        return "url does not match url_pattern"
+    for f in rules.get("require_fields") or []:
+        if getattr(sig, f, None) in (None, "", []):
+            return f"missing required field {f}"
+    text_ = f"{sig.title} {sig.description or ''}".lower()
+    kws = [k.lower() for k in rules.get("keywords_any") or []]
+    if kws and not any(k in text_ for k in kws):
+        return "no funding keyword in title or description"
+    bad = [k for k in (rules.get("exclude_keywords") or []) if k.lower() in sig.title.lower()]
+    if bad:
+        return f"excluded keyword {bad[0]!r} in title"
+    if rules.get("future_deadline") and sig.deadline is not None and sig.deadline < datetime.now(UTC):
+        return "deadline has passed"
+    return None

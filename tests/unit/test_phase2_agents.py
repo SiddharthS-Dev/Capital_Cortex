@@ -50,6 +50,14 @@ def test_sparkline_is_oldest_first_and_monotone_with_new_touch():
     assert len(sp) == 4 and sp[-1] > 0 and sp[0] == 0.0
 
 
+def test_sparkline_accepts_naive_mysql_datetimes():
+    """MySQL DATETIME comes back naive (UTC); GET /v1/contacts returned 500 comparing it with an aware now."""
+    naive = (NOW - timedelta(days=1)).replace(tzinfo=None)
+    aware = sparkline([Touch("meeting", NOW - timedelta(days=1))], NOW, cfg=CFG)
+    assert sparkline([Touch("meeting", naive)], NOW, cfg=CFG) == aware
+    assert sparkline([Touch("meeting", naive)], NOW.replace(tzinfo=None), cfg=CFG) == aware
+
+
 # ----------------------------------------------------------------------------- agent declarations (§7)
 def test_thirteen_syrs_agents_with_declared_tools():
     roster = agents()

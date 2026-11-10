@@ -55,7 +55,11 @@ async def _ingest(env: Envelope, principal: Principal) -> None:
     from cortex.l1_perception.ingestion import run_source
 
     await run_source(
-        env.payload["source_id"], principal, env.payload.get("trigger", "manual"), service_token=await service_token()
+        env.payload["source_id"],
+        principal,
+        env.payload.get("trigger", "manual"),
+        service_token=await service_token(),
+        run_id=env.payload.get("run_id"),
     )
 
 

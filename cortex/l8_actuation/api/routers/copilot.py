@@ -16,6 +16,7 @@ from cortex.l5_strategy import copilot
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.errors import current_trace_id
+from platform_core.security import rate_limit
 
 router = APIRouter(prefix="/v1/copilot", tags=["copilot"])
 log = logging.getLogger(__name__)
@@ -28,7 +29,11 @@ class AskIn(BaseModel):
     include_demo: bool = True
 
 
-@router.post("/ask", summary="Grounded, cited Q&A (SSE: start, retrieval, claim…, done). Refuses ungrounded answers.")
+@router.post(
+    "/ask",
+    dependencies=[Depends(rate_limit("copilot_ask", 20))],
+    summary="Grounded, cited Q&A (SSE: start, retrieval, claim…, done). Refuses ungrounded answers.",
+)
 async def ask(body: AskIn, p: Principal = Depends(authorize("copilot:ask", "copilot"))) -> EventSourceResponse:
     opp = str(body.opportunity_id) if body.opportunity_id else None
 

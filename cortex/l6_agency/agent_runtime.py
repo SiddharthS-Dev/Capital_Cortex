@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from cortex.l7_governance.refs import DBRefResolver
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
 from platform_core.db import session_scope
+from platform_core.db.compat import is_mysql_session
 from platform_core.errors import current_trace_id
 from platform_core.llm import BudgetExceeded, LLMRequest, get_router
 from platform_core.llm.safety import UNTRUSTED_PREAMBLE, wrap_untrusted
@@ -144,22 +146,55 @@ async def run_agent(
     mode, tier = ("llm", spec.model_tier) if use_llm else ("deterministic", "none")
     org = get_settings().org_id
     async with session_scope() as s:
-        run_id = str(
-            (
-                await s.execute(
-                    text(
-                        "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, trace_id, "
-                        "started_at, parent_run_id, mode, budget_tokens, input) VALUES (:org, :a, :t, :opp, :by, :tier, 'running', "
-                        ":tr, now(), :parent, :mode, :bt, CAST(:inp AS jsonb)) RETURNING id"
-                    ),
-                    {
-                        "org": org, "a": spec.name, "t": task, "opp": opp_id, "by": principal.sub, "tier": tier,
-                        "tr": current_trace_id(), "parent": council_run_id, "mode": mode, "bt": spec.budget_tokens,
-                        "inp": json.dumps({"tools": spec.tools}),
-                    },
-                )
-            ).scalar_one()
-        )  # fmt: skip
+        is_my = is_mysql_session(s)
+        if is_my:
+            run_id = str(uuid.uuid4())
+            await s.execute(
+                text(
+                    "INSERT INTO agent_run (id, org_id, agent, task, opportunity_id, requested_by, model_tier, status, trace_id, "
+                    "started_at, parent_run_id, mode, budget_tokens, input) VALUES (:id, :org, :a, :t, :opp, :by, :tier, 'running', "
+                    ":tr, now(), :parent, :mode, :bt, CAST(:inp AS JSON))"
+                ),
+                {
+                    "id": run_id,
+                    "org": org,
+                    "a": spec.name,
+                    "t": task,
+                    "opp": opp_id,
+                    "by": principal.sub,
+                    "tier": tier,
+                    "tr": current_trace_id(),
+                    "parent": council_run_id,
+                    "mode": mode,
+                    "bt": spec.budget_tokens,
+                    "inp": json.dumps({"tools": spec.tools}),
+                },
+            )
+        else:
+            run_id = str(
+                (
+                    await s.execute(
+                        text(
+                            "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, trace_id, "
+                            "started_at, parent_run_id, mode, budget_tokens, input) VALUES (:org, :a, :t, :opp, :by, :tier, 'running', "
+                            ":tr, now(), :parent, :mode, :bt, CAST(:inp AS jsonb)) RETURNING id"
+                        ),
+                        {
+                            "org": org,
+                            "a": spec.name,
+                            "t": task,
+                            "opp": opp_id,
+                            "by": principal.sub,
+                            "tier": tier,
+                            "tr": current_trace_id(),
+                            "parent": council_run_id,
+                            "mode": mode,
+                            "bt": spec.budget_tokens,
+                            "inp": json.dumps({"tools": spec.tools}),
+                        },
+                    )
+                ).scalar_one()
+            )
     pos = Position(spec.name, spec.title, run_id, mode, tier, tools=list(spec.tools))
     await emit(council_run_id, "agent.started", agent=spec.name, title=spec.title, run_id=run_id, mode=mode, tier=tier)
     try:
@@ -196,17 +231,24 @@ async def run_agent(
             pos.report = report.as_dict()
             pos.confidence = computed_confidence(report, opp.get("completeness"))
             pos.status = "partial" if pos.incomplete else "succeeded"
+            cast_out = "CAST(:out AS JSON)" if is_mysql_session(s) else "CAST(:out AS jsonb)"
             await s.execute(
                 text(
-                    "UPDATE agent_run SET status = :st, finished_at = now(), tokens_in = :ti, tokens_out = :to, cost_usd = :c, "
-                    "model_tier = :tier, mode = :mode, incomplete = :inc, output = CAST(:out AS jsonb) WHERE id = :id"
+                    f"UPDATE agent_run SET status = :st, finished_at = now(), tokens_in = :ti, tokens_out = :to, cost_usd = :c, "
+                    f"model_tier = :tier, mode = :mode, incomplete = :inc, output = {cast_out} WHERE id = :id"
                 ),
                 {
-                    "st": pos.status, "ti": pos.tokens_in, "to": pos.tokens_out, "c": pos.cost_usd, "tier": pos.tier,
-                    "mode": pos.mode, "inc": bool(pos.incomplete), "id": run_id,
+                    "st": pos.status,
+                    "ti": pos.tokens_in,
+                    "to": pos.tokens_out,
+                    "c": pos.cost_usd,
+                    "tier": pos.tier,
+                    "mode": pos.mode,
+                    "inc": bool(pos.incomplete),
+                    "id": run_id,
                     "out": json.dumps({**pos.as_dict(), "evidence_pack": pack}, default=str),
                 },
-            )  # fmt: skip
+            )
     except Exception as e:  # one failing agent never sinks the council; it's reported as failed
         log.exception("agent %s failed", spec.name)
         pos.status, pos.error, pos.stance, pos.confidence = "failed", f"{type(e).__name__}: {e}"[:500], "watch", 0.0

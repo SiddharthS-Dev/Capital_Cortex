@@ -107,6 +107,9 @@ export interface SourceRun {
   error: string | null;
 }
 
+/** GET /v1/sources/{id}/runs/{run_id}: "queued" until the worker starts the run, then the run row. */
+export type TrackedRun = { id: string; status: "queued" } | SourceRun;
+
 export interface SourceItem {
   id: string;
   name: string;

@@ -1,0 +1,33 @@
+# U.S. National Science Foundation "Program Announcements and Information" RSS feed: a real funder feed read by the
+# generic RSS adapter, configured here without code. Verified live 2026-11-02: 15 items; robots.txt does not
+# disallow /rss. The feed can carry non-solicitation items, so `accept` keeps only funding-opportunity pages.
+# The feed gives no deadline or award amount (those stay empty; NSF solicitations are also listed on Grants.gov
+# under their own opportunity numbers, so the same programme can appear once per source).
+key: nsf_funding_rss
+name: NSF funding opportunities (RSS)
+kind: rss
+adapter: rss
+enabled: false                  # D-034: no live crawling until the source's terms are verified
+schedule: "45 5 * * *"          # daily, UTC
+terms_note: >-
+  Public RSS feed of the U.S. National Science Foundation (www.nsf.gov), U.S. government work. robots.txt is
+  honoured; one request per run.
+urls: ["https://www.nsf.gov/rss/rss_www_funding_pgm_annc_inf.xml"]
+rate_limit: {min_interval_seconds: 2.0}
+respect_robots: true
+max_items: 100
+mapping:
+  external_id: [id, link]
+  title: title
+  description: [summary, description]
+  url: link
+  published_at: [published, updated]
+accept:
+  url_pattern: "^https://www\\.nsf\\.gov/funding/opportunities/"
+defaults:
+  currency: USD
+  countries: [US]
+  counterparty_name: U.S. National Science Foundation
+  counterparty_kind: agency
+  counterparty_country: US
+  class_hint: grant

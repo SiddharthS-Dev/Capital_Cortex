@@ -1,0 +1,80 @@
+# Capital Cortex — local MySQL 8.4 demo services (Keycloak, OPA, Redis).
+#
+# Runs next to the isolated MySQL from docker-compose.mysql-test.yml (container capital-cortex-mysql-test,
+# 127.0.0.1:53306) and reaches it over that project's network. The API, worker and web app run natively
+# from the repo (see CORTEX_MYSQL_DEMO_START.ps1), so no images need building. Ports match the project
+# defaults the API settings and apps/web/public/config.js already use (Keycloak 8380, OPA 8381, Redis 56379).
+#
+#   docker compose --env-file .env -f infra/docker-compose.mysql-test.yml up -d mysql-test
+#   docker compose --env-file .env -f infra/docker-compose.mysql-demo.yml up -d
+#
+# Keycloak shares the `keycloak` database with keycloak-test (58480); run one or the other, not both.
+# No service here declares a volume; nothing in this file deletes data.
+name: capital-cortex-mysql-demo
+
+services:
+  keycloak-demo:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: capital-cortex-keycloak-demo
+    restart: unless-stopped  # come back after a host reboot (the demo PC rebooted unexpectedly several times)
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: mysql
+      KC_DB_URL: jdbc:mysql://mysql-test:3306/keycloak?characterEncoding=UTF-8&serverTimezone=UTC
+      KC_DB_USERNAME: ${MYSQL_TEST_USER:-cortex}
+      KC_DB_PASSWORD: ${MYSQL_TEST_PASSWORD:?set MYSQL_TEST_PASSWORD in .env}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      # Resolved by the realm import's ${VAR} placeholders (infra/keycloak/generate_realm.py); no committed value.
+      SMOKE_USER_PASSWORD: ${SMOKE_USER_PASSWORD:?set SMOKE_USER_PASSWORD in .env}
+      API_CLIENT_SECRET: ${API_CLIENT_SECRET:?set API_CLIENT_SECRET in .env}
+      WORKER_CLIENT_SECRET: ${WORKER_CLIENT_SECRET:?set WORKER_CLIENT_SECRET in .env}
+      INGESTION_CLIENT_SECRET: ${INGESTION_CLIENT_SECRET:?set INGESTION_CLIENT_SECRET in .env}
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8380}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8380}:8080"
+    volumes:
+      - ./keycloak/realm-cortex.json:/opt/keycloak/data/import/realm-cortex.json:ro
+    networks: [mysqlnet]
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  opa-demo:
+    image: openpolicyagent/opa:0.70.0
+    container_name: capital-cortex-opa-demo
+    restart: unless-stopped  # come back after a host reboot (the demo PC rebooted unexpectedly several times)
+    command: ["run", "--server", "--addr", ":8181", "--log-level", "info", "--ignore", "*_test.rego", "/policies"]
+    environment:
+      CORTEX_MFA_REQUIRED: ${CORTEX_MFA_REQUIRED:-true}
+    ports:
+      - "127.0.0.1:${OPA_PORT:-8381}:8181"
+    volumes:
+      - ../config/policies:/policies/cortex:ro
+      - ../config/roles.yaml:/policies/rbac/data.yaml:ro
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--fail", "true"]
+      interval: 10s
+      retries: 10
+
+  redis-demo:
+    image: redis:7.4-alpine
+    container_name: capital-cortex-redis-demo
+    restart: unless-stopped  # come back after a host reboot (the demo PC rebooted unexpectedly several times)
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+networks:
+  mysqlnet:
+    name: capital-cortex-mysql-test_default
+    external: true

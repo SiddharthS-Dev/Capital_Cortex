@@ -20,7 +20,7 @@ from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.bus import Envelope, get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_session, session_scope
+from platform_core.db import get_session, in_clause, is_mysql_session, order_by_nulls, session_scope
 from platform_core.errors import NotFound
 
 router = APIRouter(prefix="/v1", tags=["approvals"])
@@ -32,8 +32,10 @@ async def _approval_resource(request: Request) -> Resource:
     st = None
     try:
         async with session_scope() as s:
+            is_my = is_mysql_session(s)
+            id_clause = ":id" if is_my else "CAST(:id AS uuid)"
             st = (
-                await s.execute(text("SELECT subject_type FROM approval WHERE id = CAST(:id AS uuid)"), {"id": aid})
+                await s.execute(text(f"SELECT subject_type FROM approval WHERE id = {id_clause}"), {"id": aid})
             ).scalar()
     except Exception:  # malformed id → the handler returns 404/422
         st = None
@@ -48,6 +50,14 @@ async def list_approvals(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     org = get_settings().org_id
+    is_my = is_mysql_session(session)
+    if is_my:
+        order_clause = f"{order_by_nulls('a.due_at', asc=True, nulls_last=True)}, a.ts"
+        citation_status_col = "a.citation_report ->> '$.status' AS citation_status"
+    else:
+        order_clause = "a.due_at NULLS LAST, a.ts"
+        citation_status_col = "a.citation_report ->> 'status' AS citation_status"
+
     rows = (
         (
             await session.execute(
@@ -56,11 +66,11 @@ async def list_approvals(
                     "a.due_at, a.ts, a.decided_at, a.required_approvals, a.policy_result, a.is_demo, "
                     "(SELECT count(*) FROM approval_decision d WHERE d.approval_id = a.id AND d.decision = 'approved') AS approvals, "
                     "o.channel, o.recipient, o.kind AS outbox_kind, o.status AS outbox_status, op.title AS opportunity_title, "
-                    "coalesce(o.opportunity_id, rc.opportunity_id) AS opportunity_id, a.citation_report ->> 'status' AS citation_status "
+                    f"coalesce(o.opportunity_id, rc.opportunity_id) AS opportunity_id, {citation_status_col} "
                     "FROM approval a LEFT JOIN outbox o ON a.subject_type = 'outbox' AND o.id = a.subject_id "
                     "LEFT JOIN recommendation rc ON a.subject_type = 'recommendation' AND rc.id = a.subject_id "
                     "LEFT JOIN opportunity op ON op.id = coalesce(o.opportunity_id, rc.opportunity_id) "
-                    "WHERE a.org_id = :org AND a.decision = :d ORDER BY a.due_at NULLS LAST, a.ts LIMIT :n"
+                    f"WHERE a.org_id = :org AND a.decision = :d ORDER BY {order_clause} LIMIT :n"
                 ),
                 {"org": org, "d": status, "n": limit},
             )
@@ -140,27 +150,43 @@ async def list_outbox(
     _: Principal = Depends(authorize("outbox:read", "outbox")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    rows = (
-        (
-            await session.execute(
-                text(
-                    "SELECT o.id, o.channel, o.kind, o.recipient, o.recipient_external, o.status, o.flags, o.approval_id, o.created_by, "
-                    "o.created_at, o.updated_at, o.sent_at, o.error, o.attempts, o.delivery, o.recommendation_id, o.opportunity_id, "
-                    "o.payload ->> 'subject' AS subject, o.payload ->> 'title' AS title, op.title AS opportunity_title, o.is_demo "
-                    "FROM outbox o LEFT JOIN opportunity op ON op.id = o.opportunity_id WHERE o.org_id = :org "
-                    "AND (CAST(:st AS text[]) IS NULL OR o.status = ANY(:st)) ORDER BY o.updated_at DESC LIMIT :n"
-                ),
-                {"org": get_settings().org_id, "st": status, "n": limit},
-            )
+    is_my = is_mysql_session(session)
+    if is_my:
+        subj_col = "o.payload ->> '$.subject' AS subject, o.payload ->> '$.title' AS title"
+        where = ["o.org_id = :org"]
+        prm: dict[str, Any] = {"org": get_settings().org_id, "n": limit}
+        if status:
+            where.append(in_clause("o.status", "st", status, prm))
+        sql = (
+            "SELECT o.id, o.channel, o.kind, o.recipient, o.recipient_external, o.status, o.flags, o.approval_id, o.created_by, "
+            "o.created_at, o.updated_at, o.sent_at, o.error, o.attempts, o.delivery, o.recommendation_id, o.opportunity_id, "
+            f"{subj_col}, op.title AS opportunity_title, o.is_demo "
+            f"FROM outbox o LEFT JOIN opportunity op ON op.id = o.opportunity_id WHERE {' AND '.join(where)} "
+            "ORDER BY o.updated_at DESC LIMIT :n"
         )
-        .mappings()
-        .all()
-    )
+        rows = (await session.execute(text(sql), prm)).mappings().all()
+    else:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT o.id, o.channel, o.kind, o.recipient, o.recipient_external, o.status, o.flags, o.approval_id, o.created_by, "
+                        "o.created_at, o.updated_at, o.sent_at, o.error, o.attempts, o.delivery, o.recommendation_id, o.opportunity_id, "
+                        "o.payload ->> 'subject' AS subject, o.payload ->> 'title' AS title, op.title AS opportunity_title, o.is_demo "
+                        "FROM outbox o LEFT JOIN opportunity op ON op.id = o.opportunity_id WHERE o.org_id = :org "
+                        "AND (CAST(:st AS text[]) IS NULL OR o.status = ANY(:st)) ORDER BY o.updated_at DESC LIMIT :n"
+                    ),
+                    {"org": get_settings().org_id, "st": status, "n": limit},
+                )
+            )
+            .mappings()
+            .all()
+        )
     counts = {
         r[0]: r[1]
         for r in (
             await session.execute(
-                text("SELECT status, count(*) FROM outbox WHERE org_id = :org GROUP BY 1"),
+                text("SELECT status, count(*) FROM outbox WHERE org_id = :org GROUP BY status"),
                 {"org": get_settings().org_id},
             )
         ).all()
@@ -174,10 +200,12 @@ async def get_outbox(
     p: Principal = Depends(authorize("outbox:read", "outbox")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     r = (
         (
             await session.execute(
-                text("SELECT * FROM outbox WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM outbox WHERE id = {id_clause} AND org_id = :org"),
                 {"id": id, "org": get_settings().org_id},
             )
         )
@@ -194,8 +222,8 @@ async def get_outbox(
         for a in (
             await session.execute(
                 text(
-                    "SELECT id, decision, content_hash, requested_by, approver_id, comment, ts, decided_at FROM approval "
-                    "WHERE subject_type = 'outbox' AND subject_id = CAST(:id AS uuid) ORDER BY ts DESC"
+                    f"SELECT id, decision, content_hash, requested_by, approver_id, comment, ts, decided_at FROM approval "
+                    f"WHERE subject_type = 'outbox' AND subject_id = {id_clause} ORDER BY ts DESC"
                 ),
                 {"id": id},
             )

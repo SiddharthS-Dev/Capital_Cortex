@@ -35,22 +35,25 @@ async def test_neighbourhood_and_paths_match_cypher(engine):
             await upsert_edge(s, "Organization", ids["org"], "OFFERS", "Opportunity", ids["opp"], {})
             await upsert_edge(s, "Organization", ids["far"], "OFFERS", "Opportunity", ids["opp"], {})
 
-            one = "MATCH (n {id: $id}) OPTIONAL MATCH (n)-[r]-(m) RETURN [n, r, m]"
-            old = _collect(await age.cypher(s, GRAPH, one, {"id": ids["contact"]}))
             new = await gt.neighbourhood(s, ids["contact"], 1, 150)
-            assert {n["id"] for n in new["nodes"]} == {n["id"] for n in old["nodes"]}
-            edges = {(e["source"], e["type"], e["target"]) for e in new["edges"]}
-            assert edges == {(e["source"], e["type"], e["target"]) for e in old["edges"]}
+            if engine.dialect.name != "mysql":
+                one = "MATCH (n {id: $id}) OPTIONAL MATCH (n)-[r]-(m) RETURN [n, r, m]"
+                old = _collect(await age.cypher(s, GRAPH, one, {"id": ids["contact"]}))
+                assert {n["id"] for n in new["nodes"]} == {n["id"] for n in old["nodes"]}
+                edges = {(e["source"], e["type"], e["target"]) for e in new["edges"]}
+                assert edges == {(e["source"], e["type"], e["target"]) for e in old["edges"]}
+
             assert {n["label"] for n in new["nodes"]} == {"Organization", "Fund", "Contact"}
 
             # depth 2 = everything within two hops. The old Cypher template only kept complete 2-hop chains, so
             # neighbours without a second hop (self, fund) disappeared; the traversal keeps them.
             two = "MATCH (n {id: $id}) OPTIONAL MATCH (n)-[r1]-(m)-[r2]-(k) RETURN [n, r1, m, r2, k]"
-            old2 = _collect(await age.cypher(s, GRAPH, two, {"id": ids["contact"]}))
             new2 = await gt.neighbourhood(s, ids["contact"], 2, 150)
             got = {n["id"] for n in new2["nodes"]}
             assert got == {ids[k] for k in ("contact", "self", "fund", "org", "opp")}
-            assert got >= {n["id"] for n in old2["nodes"]}
+            if engine.dialect.name != "mysql":
+                old2 = _collect(await age.cypher(s, GRAPH, two, {"id": ids["contact"]}))
+                assert got >= {n["id"] for n in old2["nodes"]}
 
             # self → contact → org → opp → far: 4 hops, undirected
             out = await gt.paths(s, ids["self"], ids["far"], 4, 5)

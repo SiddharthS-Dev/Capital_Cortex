@@ -12,10 +12,11 @@ Numbers in facts are formatted so they survive the citation checker's ±0.5 % co
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from statistics import median
 from typing import Any
 
@@ -26,8 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from platform_core.auth.principal import Principal
 from platform_core.auth.rbac import get_rbac
 from platform_core.config import get_settings
+from platform_core.db import in_clause, is_mysql_session, order_by_nulls
 from platform_core.embeddings import cosine, embed, shared_terms
-from platform_core.jsonutil import jsonable
+from platform_core.jsonutil import json_obj, jsonable
 
 CLASS_LABELS = {
     "venture_equity": "venture equity", "private_equity": "private equity", "strategic_corporate": "strategic / corporate",
@@ -131,21 +133,36 @@ def _f(v: Any) -> float | None:
 
 
 def _days(deadline: datetime | None, now: datetime) -> int | None:
-    return None if deadline is None else math.floor((deadline - now).total_seconds() / 86400)
+    if deadline is None:
+        return None
+    if hasattr(deadline, "tzinfo") and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return math.floor((deadline - now).total_seconds() / 86400)
 
 
 async def load_opportunity(s: AsyncSession, opp_id: str) -> dict[str, Any] | None:
+    if is_mysql_session(s):
+        sql = (
+            "SELECT o.id, o.title, o.description, o.class AS class, o.pipeline_stage AS pipeline_stage, "
+            "o.status, o.score, o.score_band, o.completeness, o.factors, o.class_evidence, o.amount_min, o.amount_max, "
+            "o.currency, o.deadline, o.geography, o.stage_fit, o.sectors, o.esg_tags, o.url, o.is_demo, o.signal_id, "
+            "o.counterparty_id, o.grant_program_id, o.source_ref, cp.name AS counterparty_name, cp.kind AS counterparty_kind, "
+            "cp.country AS counterparty_country, fi.terms FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
+            "LEFT JOIN financial_instrument fi ON fi.id = o.instrument_id WHERE o.id = :id AND o.org_id = :org"
+        )
+    else:
+        sql = (
+            "SELECT o.id, o.title, o.description, o.class::text AS class, o.pipeline_stage::text AS pipeline_stage, "
+            "o.status, o.score, o.score_band, o.completeness, o.factors, o.class_evidence, o.amount_min, o.amount_max, "
+            "o.currency, o.deadline, o.geography, o.stage_fit, o.sectors, o.esg_tags, o.url, o.is_demo, o.signal_id, "
+            "o.counterparty_id, o.grant_program_id, o.source_ref, cp.name AS counterparty_name, cp.kind AS counterparty_kind, "
+            "cp.country AS counterparty_country, fi.terms FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
+            "LEFT JOIN financial_instrument fi ON fi.id = o.instrument_id WHERE o.id = CAST(:id AS uuid) AND o.org_id = :org"
+        )
     r = (
         (
             await s.execute(
-                text(
-                    "SELECT o.id, o.title, o.description, o.class::text AS class, o.pipeline_stage::text AS pipeline_stage, "
-                    "o.status, o.score, o.score_band, o.completeness, o.factors, o.class_evidence, o.amount_min, o.amount_max, "
-                    "o.currency, o.deadline, o.geography, o.stage_fit, o.sectors, o.esg_tags, o.url, o.is_demo, o.signal_id, "
-                    "o.counterparty_id, o.grant_program_id, o.source_ref, cp.name AS counterparty_name, cp.kind AS counterparty_kind, "
-                    "cp.country AS counterparty_country, fi.terms FROM opportunity o LEFT JOIN organization cp ON cp.id = o.counterparty_id "
-                    "LEFT JOIN financial_instrument fi ON fi.id = o.instrument_id WHERE o.id = CAST(:id AS uuid) AND o.org_id = :org"
-                ),
+                text(sql),
                 {"id": opp_id, "org": get_settings().org_id},
             )
         )
@@ -156,6 +173,15 @@ async def load_opportunity(s: AsyncSession, opp_id: str) -> dict[str, Any] | Non
         return None
     d = dict(r)
     d["id"] = str(d["id"])
+    for col in ("factors", "geography", "stage_fit", "sectors", "esg_tags", "class_evidence", "terms", "source_ref"):
+        if isinstance(d.get(col), str):
+            try:
+                d[col] = json.loads(d[col])
+            except ValueError:
+                pass
+    dl = d.get("deadline")
+    if dl is not None and hasattr(dl, "tzinfo") and dl.tzinfo is None:
+        d["deadline"] = dl.replace(tzinfo=UTC)
     return d
 
 
@@ -236,16 +262,20 @@ async def opportunity_read(ctx: ToolContext) -> ToolResult:
 
 @tool("search_signals", "The source signal(s) the opportunity was derived from (provenance).", "opportunity:read")
 async def search_signals(ctx: ToolContext) -> ToolResult:
+    mysql = is_mysql_session(ctx.s)
+    sig_tbl = "`signal`" if mysql else "signal"
+    ref_filter = "e.ref_id = :id" if mysql else "e.ref_id = CAST(:id AS uuid)"
+    sql = (
+        "SELECT sg.id, sg.external_id, sg.ingested_at, s.name AS source_name, s.adapter_key, s.terms_note "
+        "FROM entity e JOIN relationship_edge re ON re.from_entity = e.id AND re.type = 'DERIVED_FROM' "
+        f"JOIN entity se ON se.id = re.to_entity AND se.ref_table = 'signal' JOIN {sig_tbl} sg ON sg.id = se.ref_id "
+        f"JOIN source s ON s.id = sg.source_id WHERE e.ref_table = 'opportunity' AND {ref_filter} "
+        "ORDER BY sg.ingested_at DESC LIMIT 5"
+    )
     rows = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT sg.id, sg.external_id, sg.ingested_at, s.name AS source_name, s.adapter_key, s.terms_note "
-                    "FROM entity e JOIN relationship_edge re ON re.from_entity = e.id AND re.type = 'DERIVED_FROM' "
-                    "JOIN entity se ON se.id = re.to_entity AND se.ref_table = 'signal' JOIN signal sg ON sg.id = se.ref_id "
-                    "JOIN source s ON s.id = sg.source_id WHERE e.ref_table = 'opportunity' AND e.ref_id = CAST(:id AS uuid) "
-                    "ORDER BY sg.ingested_at DESC LIMIT 5"
-                ),
+                text(sql),
                 {"id": ctx.opp["id"]},
             )
         )
@@ -293,16 +323,28 @@ async def classify(ctx: ToolContext) -> ToolResult:
 )
 async def graph_read(ctx: ToolContext) -> ToolResult:
     ids = [ctx.opp["id"]] + ([str(ctx.opp["counterparty_id"])] if ctx.opp.get("counterparty_id") else [])
+    if is_mysql_session(ctx.s):
+        id_clause, id_params = in_clause("e.ref_id", ids, prefix="id")
+        sql = (
+            "SELECT e.ref_id AS node, re.type, n.entity_type, count(*) AS n FROM entity e "
+            "JOIN relationship_edge re ON re.from_entity = e.id OR re.to_entity = e.id "
+            "JOIN entity n ON n.id = CASE WHEN re.from_entity = e.id THEN re.to_entity ELSE re.from_entity END "
+            f"WHERE {id_clause} GROUP BY 1, 2, 3"
+        )
+        params = id_params
+    else:
+        sql = (
+            "SELECT e.ref_id::text AS node, re.type, n.entity_type, count(*) AS n FROM entity e "
+            "JOIN relationship_edge re ON re.from_entity = e.id OR re.to_entity = e.id "
+            "JOIN entity n ON n.id = CASE WHEN re.from_entity = e.id THEN re.to_entity ELSE re.from_entity END "
+            "WHERE e.ref_id = ANY(CAST(:ids AS uuid[])) GROUP BY 1, 2, 3"
+        )
+        params = {"ids": ids}
     rows = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT e.ref_id::text AS node, re.type, n.entity_type, count(*) AS n FROM entity e "
-                    "JOIN relationship_edge re ON re.from_entity = e.id OR re.to_entity = e.id "
-                    "JOIN entity n ON n.id = CASE WHEN re.from_entity = e.id THEN re.to_entity ELSE re.from_entity END "
-                    "WHERE e.ref_id = ANY(CAST(:ids AS uuid[])) GROUP BY 1, 2, 3"
-                ),
-                {"ids": ids},
+                text(sql),
+                params,
             )
         )
         .mappings()
@@ -335,6 +377,7 @@ async def eligibility_check(ctx: ToolContext) -> ToolResult:
                 text("SELECT eligibility FROM grant_program WHERE id = :id"), {"id": ctx.opp["grant_program_id"]}
             )
         ).scalar()
+        elig = json_obj(elig)  # JSON object; text on MySQL (sorted() of the text would list characters)
     fgeo = ((ctx.opp.get("factors") or {}).get("factors") or {}).get("geography") or {}
     eligible = None if not geo or not country else country in geo
     data = jsonable(
@@ -379,12 +422,16 @@ async def eligibility_check(ctx: ToolContext) -> ToolResult:
     "grant_calendar", "Deadline, open milestones, and the counterparty's other upcoming deadlines.", "opportunity:read"
 )
 async def grant_calendar(ctx: ToolContext) -> ToolResult:
+    mysql = is_mysql_session(ctx.s)
+    ms_sql = (
+        "SELECT id, kind, title, due_at FROM milestone WHERE opportunity_id = :id AND status = 'open' ORDER BY due_at"
+        if mysql
+        else "SELECT id, kind, title, due_at FROM milestone WHERE opportunity_id = CAST(:id AS uuid) AND status = 'open' ORDER BY due_at"
+    )
     ms = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT id, kind, title, due_at FROM milestone WHERE opportunity_id = CAST(:id AS uuid) AND status = 'open' ORDER BY due_at"
-                ),
+                text(ms_sql),
                 {"id": ctx.opp["id"]},
             )
         )
@@ -393,13 +440,17 @@ async def grant_calendar(ctx: ToolContext) -> ToolResult:
     )
     others: Any = []
     if ctx.opp.get("counterparty_id"):
+        other_sql = (
+            "SELECT id, title, deadline FROM opportunity WHERE counterparty_id = :cp AND id <> :id "
+            "AND status IN ('active','watchlist') AND deadline BETWEEN :a AND :b ORDER BY deadline LIMIT 5"
+            if mysql
+            else "SELECT id, title, deadline FROM opportunity WHERE counterparty_id = :cp AND id <> CAST(:id AS uuid) "
+            "AND status IN ('active','watchlist') AND deadline BETWEEN :a AND :b ORDER BY deadline LIMIT 5"
+        )
         others = (
             (
                 await ctx.s.execute(
-                    text(
-                        "SELECT id, title, deadline FROM opportunity WHERE counterparty_id = :cp AND id <> CAST(:id AS uuid) "
-                        "AND status IN ('active','watchlist') AND deadline BETWEEN :a AND :b ORDER BY deadline LIMIT 5"
-                    ),
+                    text(other_sql),
                     {
                         "cp": ctx.opp["counterparty_id"],
                         "id": ctx.opp["id"],
@@ -430,22 +481,44 @@ async def grant_calendar(ctx: ToolContext) -> ToolResult:
     "opportunity:read",
 )
 async def program_search(ctx: ToolContext) -> ToolResult:
+    cls_list = ["grant", "government_program", "university_program", "foundation_esg"]
+    if is_mysql_session(ctx.s):
+        cls_clause, cls_params = in_clause("class", cls_list, prefix="cls")
+        order_clause = order_by_nulls("score", "DESC", nulls_first=False)
+        sec_list = list(ctx.opp.get("sectors") or [])
+        sec_filter = "JSON_OVERLAPS(sectors, CAST(:sec AS JSON))" if sec_list else "1=0"
+        sql = (
+            f"SELECT id, title, class, score, deadline FROM opportunity WHERE org_id = :org AND id <> :id "
+            f"AND status IN ('active','watchlist') AND is_demo = :demo AND {cls_clause} "
+            f"AND (counterparty_id = :cp OR {sec_filter}) ORDER BY {order_clause} LIMIT 5"
+        )
+        params = {
+            "org": get_settings().org_id,
+            "id": ctx.opp["id"],
+            "demo": ctx.demo,
+            "cp": ctx.opp.get("counterparty_id"),
+            "sec": json.dumps(sec_list),
+            **cls_params,
+        }
+    else:
+        sql = (
+            "SELECT id, title, class::text AS class, score, deadline FROM opportunity WHERE org_id = :org AND id <> CAST(:id AS uuid) "
+            "AND status IN ('active','watchlist') AND is_demo = :demo AND class::text = ANY(:cls) "
+            "AND (counterparty_id = :cp OR sectors && CAST(:sec AS text[])) ORDER BY score DESC NULLS LAST LIMIT 5"
+        )
+        params = {
+            "org": get_settings().org_id,
+            "id": ctx.opp["id"],
+            "demo": ctx.demo,
+            "cp": ctx.opp.get("counterparty_id"),
+            "sec": list(ctx.opp.get("sectors") or []),
+            "cls": cls_list,
+        }
     rows = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT id, title, class::text AS class, score, deadline FROM opportunity WHERE org_id = :org AND id <> CAST(:id AS uuid) "
-                    "AND status IN ('active','watchlist') AND is_demo = :demo AND class::text = ANY(:cls) "
-                    "AND (counterparty_id = :cp OR sectors && CAST(:sec AS text[])) ORDER BY score DESC NULLS LAST LIMIT 5"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "id": ctx.opp["id"],
-                    "demo": ctx.demo,
-                    "cp": ctx.opp.get("counterparty_id"),
-                    "sec": list(ctx.opp.get("sectors") or []),
-                    "cls": ["grant", "government_program", "university_program", "foundation_esg"],
-                },
+                text(sql),
+                params,
             )
         )
         .mappings()
@@ -483,6 +556,8 @@ async def investor_search(ctx: ToolContext) -> ToolResult:
             .mappings()
             .all()
         )
+    # stages/geos are JSON arrays (text on MySQL): decode, so membership tests compare stages, not characters
+    rows = [{**x, "stages": json_obj(x["stages"], []), "geos": json_obj(x["geos"], [])} for x in rows]
     r = ToolResult("investors", jsonable({"investors": [dict(x) for x in rows]}))
     stage = ((ctx.me or {}).get("profile") or {}).get("stage")
     me_ref = f"organization:{ctx.me['id']}" if ctx.me else ""
@@ -543,15 +618,25 @@ async def thesis_similarity(ctx: ToolContext) -> ToolResult:
 async def _contacts(ctx: ToolContext) -> list[dict[str, Any]]:
     if not ctx.opp.get("counterparty_id"):
         return []
+    if is_mysql_session(ctx.s):
+        order_clause = order_by_nulls("r.strength", "DESC", nulls_first=False)
+        sql = (
+            "SELECT c.id, c.name, c.role, c.consent_basis, JSON_LENGTH(c.emails) > 0 AS has_email, r.id AS relationship_id, "
+            f"r.strength AS warmth, r.last_touch_at FROM contact c LEFT JOIN relationship r ON r.from_id = c.id "
+            "AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
+            f"ORDER BY {order_clause}, c.name LIMIT 20"
+        )
+    else:
+        sql = (
+            "SELECT c.id, c.name, c.role, c.consent_basis, cardinality(c.emails) > 0 AS has_email, r.id AS relationship_id, "
+            "r.strength AS warmth, r.last_touch_at FROM contact c LEFT JOIN relationship r ON r.from_id = c.id "
+            "AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
+            "ORDER BY r.strength DESC NULLS LAST, c.name LIMIT 20"
+        )
     rows = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT c.id, c.name, c.role, c.consent_basis, cardinality(c.emails) > 0 AS has_email, r.id AS relationship_id, "
-                    "r.strength AS warmth, r.last_touch_at FROM contact c LEFT JOIN relationship r ON r.from_id = c.id "
-                    "AND r.to_id = c.organization_id AND r.type = 'met' WHERE c.organization_id = :cp "
-                    "ORDER BY r.strength DESC NULLS LAST, c.name LIMIT 20"
-                ),
+                text(sql),
                 {"cp": ctx.opp["counterparty_id"]},
             )
         )
@@ -592,14 +677,25 @@ async def warm_path(ctx: ToolContext) -> ToolResult:
     cs = [c for c in await _contacts(ctx) if c["warmth"] is not None]
     intros: Any = []
     if cs:
+        ids = [str(c["id"]) for c in cs]
+        if is_mysql_session(ctx.s):
+            in_cls, in_pms = in_clause("r.from_id", ids, prefix="rf")
+            sql = (
+                "SELECT r.id, r.from_id AS contact_id, r.to_id AS introducer_id, c.name AS introducer FROM relationship r "
+                f"JOIN contact c ON c.id = r.to_id WHERE r.type = 'introduced_by' AND {in_cls}"
+            )
+            params = in_pms
+        else:
+            sql = (
+                "SELECT r.id, r.from_id AS contact_id, r.to_id AS introducer_id, c.name AS introducer FROM relationship r "
+                "JOIN contact c ON c.id = r.to_id WHERE r.type = 'introduced_by' AND r.from_id = ANY(CAST(:ids AS uuid[]))"
+            )
+            params = {"ids": ids}
         intros = (
             (
                 await ctx.s.execute(
-                    text(
-                        "SELECT r.id, r.from_id AS contact_id, r.to_id AS introducer_id, c.name AS introducer FROM relationship r "
-                        "JOIN contact c ON c.id = r.to_id WHERE r.type = 'introduced_by' AND r.from_id = ANY(CAST(:ids AS uuid[]))"
-                    ),
-                    {"ids": [str(c["id"]) for c in cs]},
+                    text(sql),
+                    params,
                 )
             )
             .mappings()
@@ -681,11 +777,15 @@ async def milestone_create(ctx: ToolContext) -> ToolResult:
         return ToolResult(
             "follow_up", {"created": False, "reason": "only high-band opportunities get an automatic follow-up"}
         )
+    mysql = is_mysql_session(ctx.s)
+    exist_sql = (
+        "SELECT id, due_at FROM milestone WHERE opportunity_id = :id AND kind = 'follow_up' AND status = 'open' LIMIT 1"
+        if mysql
+        else "SELECT id, due_at FROM milestone WHERE opportunity_id = CAST(:id AS uuid) AND kind = 'follow_up' AND status = 'open' LIMIT 1"
+    )
     existing = (
         await ctx.s.execute(
-            text(
-                "SELECT id, due_at FROM milestone WHERE opportunity_id = CAST(:id AS uuid) AND kind = 'follow_up' AND status = 'open' LIMIT 1"
-            ),
+            text(exist_sql),
             {"id": ctx.opp["id"]},
         )
     ).first()
@@ -808,19 +908,27 @@ async def terms_compare(ctx: ToolContext) -> ToolResult:
     terms = ctx.opp.get("terms") or {}
     if not terms:
         return ToolResult("terms", {}, gaps=["No instrument terms (rate, cap, discount, tenor, collateral) on record"])
+    if is_mysql_session(ctx.s):
+        peers_sql = (
+            "SELECT fi.terms FROM opportunity o JOIN financial_instrument fi ON fi.id = o.instrument_id "
+            "WHERE o.class = :c AND o.id <> :id AND o.is_demo = :demo LIMIT 200"
+        )
+    else:
+        peers_sql = (
+            "SELECT fi.terms FROM opportunity o JOIN financial_instrument fi ON fi.id = o.instrument_id "
+            "WHERE o.class::text = :c AND o.id <> CAST(:id AS uuid) AND o.is_demo = :demo LIMIT 200"
+        )
     peers = (
         (
             await ctx.s.execute(
-                text(
-                    "SELECT fi.terms FROM opportunity o JOIN financial_instrument fi ON fi.id = o.instrument_id "
-                    "WHERE o.class::text = :c AND o.id <> CAST(:id AS uuid) AND o.is_demo = :demo LIMIT 200"
-                ),
+                text(peers_sql),
                 {"c": ctx.opp.get("class"), "id": ctx.opp["id"], "demo": ctx.demo},
             )
         )
         .scalars()
         .all()
     )
+    peers = [json_obj(p, {}) for p in peers]  # JSON objects; text on MySQL
     keys = [k for k, v in terms.items() if isinstance(v, int | float)]
     med = {}
     for k in keys:
@@ -919,7 +1027,7 @@ async def checklist_map(ctx: ToolContext) -> ToolResult:
         .scalars()
         .all()
     )
-    have = {t for row_tags in tags for t in (row_tags or [])}
+    have = {t for row_tags in tags for t in json_obj(row_tags, [])}  # JSON arrays; text on MySQL
     mapped = [{"key": i["key"], "title": i["title"], "covered": bool(have & set(i["tags"]))} for i in items]
     missing = [m for m in mapped if not m["covered"]]
     r = ToolResult("dd_checklist", {"items": mapped, "missing": len(missing), "total": len(mapped)})

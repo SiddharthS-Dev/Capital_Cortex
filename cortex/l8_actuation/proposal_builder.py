@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -29,6 +30,7 @@ from cortex.l7_governance.citation_checker import check_with_revisions, collater
 from cortex.l7_governance.refs import DBRefResolver
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
 from platform_core.llm import BudgetExceeded, LLMRequest, get_router
 from platform_core.llm.safety import UNTRUSTED_PREAMBLE, wrap_untrusted
 from platform_core.signing import content_hash
@@ -263,17 +265,39 @@ async def build(s: AsyncSession, principal: Principal, opp_id: str, package_type
     if opp is None:
         raise LookupError("opportunity not found")
     me = await self_profile(s)
-    run_id = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
-                    "VALUES (:org, 'proposal', 'proposal', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:inp AS jsonb)) RETURNING id"
-                ),
-                {"org": get_settings().org_id, "opp": opp_id, "by": principal.sub, "inp": json.dumps({"package_type": package_type})},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    is_my = is_mysql_session(s)
+    if is_my:
+        run_id = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO agent_run (id, org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
+                "VALUES (:id, :org, 'proposal', 'proposal', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:inp AS JSON))"
+            ),
+            {
+                "id": run_id,
+                "org": get_settings().org_id,
+                "opp": opp_id,
+                "by": principal.sub,
+                "inp": json.dumps({"package_type": package_type}),
+            },
+        )
+    else:
+        run_id = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO agent_run (org_id, agent, task, opportunity_id, requested_by, model_tier, status, started_at, mode, input) "
+                        "VALUES (:org, 'proposal', 'proposal', :opp, :by, 'none', 'running', now(), 'deterministic', CAST(:inp AS jsonb)) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "opp": opp_id,
+                        "by": principal.sub,
+                        "inp": json.dumps({"package_type": package_type}),
+                    },
+                )
+            ).scalar_one()
+        )
     ctx = ToolContext(s, principal, opp, run_id, me, datetime.now(UTC), "proposal")
     results: dict[str, ToolResult] = {}
     for name in TOOLS:
@@ -324,14 +348,21 @@ async def build(s: AsyncSession, principal: Principal, opp_id: str, package_type
             gaps.append(f"no sourced evidence for {titles[key]['title'].lower()}")
         sections.append({"key": key, "title": titles[key]["title"], "claims": [dict(c) for c in claims],
                          "gaps": [gap(key, g) for g in gaps], "stripped": stripped})  # fmt: skip
+    cast_json = "CAST(:out AS JSON)" if is_my else "CAST(:out AS jsonb)"
     await s.execute(
         text(
-            "UPDATE agent_run SET status = 'succeeded', finished_at = now(), mode = :m, tokens_in = :ti, tokens_out = :to, "
-            "cost_usd = :c, output = CAST(:out AS jsonb) WHERE id = :id"
+            f"UPDATE agent_run SET status = 'succeeded', finished_at = now(), mode = :m, tokens_in = :ti, tokens_out = :to, "
+            f"cost_usd = :c, output = {cast_json} WHERE id = :id"
         ),
-        {"m": mode, "ti": meta["tokens_in"], "to": meta["tokens_out"], "c": meta["cost_usd"], "id": run_id,
-         "out": json.dumps({"evidence_pack": pack, "passed": passed, "rejected": rejected}, default=str)},
-    )  # fmt: skip
+        {
+            "m": mode,
+            "ti": meta["tokens_in"],
+            "to": meta["tokens_out"],
+            "c": meta["cost_usd"],
+            "id": run_id,
+            "out": json.dumps({"evidence_pack": pack, "passed": passed, "rejected": rejected}, default=str),
+        },
+    )
     return Built(
         sections,
         run_id,

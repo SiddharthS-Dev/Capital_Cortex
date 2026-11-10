@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (nginx/mysql/minio entrypoints, WAL archiving) and break on CRLF.
+# Keep them LF in every checkout, regardless of core.autocrlf on Windows.
+*.sh    text eol=lf
+*.envsh text eol=lf

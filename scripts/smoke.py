@@ -6,7 +6,10 @@
   4. Service-account token -> POST /v1/system/ping -> the worker handles the job (bus round trip)
   5. Grafana (Tempo datasource) returns traces for the API
 
-Usage: python scripts/smoke.py   (env overrides: API, KEYCLOAK, GRAFANA, GRAFANA_PASSWORD)
+Usage: python scripts/smoke.py   (env overrides: API, KEYCLOAK, GRAFANA, SMOKE_USER)
+Credentials come from the environment or the git-ignored .env, never from this file (SEC-1): SMOKE_USER_PASSWORD,
+SMOKE_TOTP_SECRET (smoke-auditor's TOTP seed), WORKER_CLIENT_SECRET, and GRAFANA_PASSWORD or GRAFANA_ADMIN_PASSWORD
+for the Grafana step. A missing one stops the run with a message naming it; values are never printed.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Literal, overload
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import httpx
@@ -31,14 +35,32 @@ import httpx
 API = os.environ.get("API", "http://localhost:8300")
 KC = os.environ.get("KEYCLOAK", "http://localhost:8380")
 GRAFANA = os.environ.get("GRAFANA", "http://localhost:3301")
-GRAFANA_PW = os.environ.get("GRAFANA_PASSWORD", "grafana-dev-pw")
 REALM = f"{KC}/realms/cortex"
 REDIRECT = "http://localhost:3300/auth/callback"
-USER, PASSWORD = "smoke-auditor", "Cortex!dev-2026"
-TOTP_SECRET = "cortex-dev-smoke-totp-secret"  # noqa: S105 - dev realm only
-WORKER_ID, WORKER_SECRET = "cortex-worker", os.environ.get("WORKER_CLIENT_SECRET", "dev-worker-secret-change-me")
+USER = os.environ.get("SMOKE_USER", "smoke-auditor")
+WORKER_ID = "cortex-worker"
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 ok_count = 0
+
+
+@overload
+def setting(name: str, *, required: Literal[True] = ...) -> str: ...
+@overload
+def setting(name: str, *, required: bool) -> str | None: ...
+def setting(name: str, *, required: bool = True) -> str | None:
+    """A credential from the environment, else the git-ignored .env. No committed fallback: a required one that is
+    missing stops the run with a clear message. Values are never printed."""
+    v = os.environ.get(name)
+    if not v and ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            key, sep, val = line.partition("=")
+            if sep and key.strip() == name and val.strip():
+                v = val.strip().strip('"')
+                break
+    if not v and required:
+        raise SystemExit(f"smoke: set {name} in the environment or .env (no credential is committed in this script)")
+    return v
 
 
 def step(msg: str, cond: bool, detail: str = "") -> None:
@@ -82,7 +104,9 @@ def browser_login(c: httpx.Client) -> str:
         "code_challenge_method": "S256",
     }
     r = c.get(f"{REALM}/protocol/openid-connect/auth?{urlencode(q)}")
-    r = c.post(form_action(r.text), data={"username": USER, "password": PASSWORD, "credentialId": ""})
+    r = c.post(
+        form_action(r.text), data={"username": USER, "password": setting("SMOKE_USER_PASSWORD"), "credentialId": ""}
+    )
     step("password accepted; OTP form presented", "otp" in r.text.lower() and r.status_code == 200)
     # Keycloak rejects a TOTP code that was already used (replay protection); never reuse a 30 s window.
     stamp = Path(tempfile.gettempdir()) / "cortex-smoke-totp-window"
@@ -94,7 +118,7 @@ def browser_login(c: httpx.Client) -> str:
     r = c.post(
         form_action(r.text),
         data={
-            "otp": totp(TOTP_SECRET.encode()),
+            "otp": totp(setting("SMOKE_TOTP_SECRET").encode()),
             "login": "Sign In",
             "selectedCredentialId": sel.group(1) if sel else "",
         },
@@ -124,6 +148,8 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(f"Capital Cortex smoke - API {API}, IdP {KC}")
+    for name in ("SMOKE_USER_PASSWORD", "SMOKE_TOTP_SECRET", "WORKER_CLIENT_SECRET"):  # fail before any request
+        setting(name)
     with httpx.Client(follow_redirects=False, timeout=20) as c:
         # Keycloak marks its cookies Secure; browsers send those to http://localhost, Python's cookie jar
         # does not, so this dev-only script clears the flag.
@@ -171,7 +197,7 @@ def main() -> None:
         svc = httpx.post(
             f"{REALM}/protocol/openid-connect/token",
             data={"grant_type": "client_credentials"},
-            auth=(WORKER_ID, WORKER_SECRET),
+            auth=(WORKER_ID, setting("WORKER_CLIENT_SECRET")),
             timeout=10,
         )
         svc.raise_for_status()
@@ -197,12 +223,31 @@ def main() -> None:
             f"checked={v2['checked']} head={str(v2['head_hash'])[:12]}...",
         )
 
+    # Traces need the observability stack (Grafana + Tempo), which the MySQL demo stack does not run. When Grafana is
+    # unreachable, or excluded on purpose (SMOKE_SKIP_TRACES=1), the check is reported as SKIPPED with the reason and is
+    # never counted as passed. When Grafana is reachable, the check runs and can fail as before.
+    skip_reason = None
+    if os.environ.get("SMOKE_SKIP_TRACES") == "1":
+        skip_reason = "SMOKE_SKIP_TRACES=1 (observability excluded on purpose)"
+    else:
+        try:
+            httpx.get(f"{GRAFANA}/api/health", timeout=5)
+        except httpx.HTTPError as e:
+            skip_reason = (
+                f"Grafana unreachable at {GRAFANA} ({type(e).__name__}); observability is not part of this stack"
+            )
+    if skip_reason:
+        print(f"  [SKIP] Grafana shows API traces from Tempo - SKIPPED: {skip_reason}")
+        print()
+        print(f"SMOKE OK - {ok_count} checks passed, 1 skipped (traces: {skip_reason})")
+        return
+
     found = 0
     for _ in range(20):
         g = httpx.get(
             f"{GRAFANA}/api/datasources/proxy/uid/tempo/api/search",
             params={"tags": "service.name=capital-cortex-api", "limit": 5},
-            auth=("admin", GRAFANA_PW),
+            auth=("admin", setting("GRAFANA_PASSWORD", required=False) or setting("GRAFANA_ADMIN_PASSWORD")),
             timeout=10,
         )
         if g.status_code == 200:

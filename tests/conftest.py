@@ -9,6 +9,25 @@ os.environ.setdefault("ENV", "test")
 os.environ.setdefault("OIDC_ISSUER", "https://idp.test/realms/cortex")
 os.environ.setdefault("OIDC_AUDIENCE", "cortex-api")
 
+
+def _load_test_db_env() -> None:
+    """MYSQL_TEST_* and KEYCLOAK_ADMIN* come from the (git-ignored) .env when the shell doesn't set them: no credential
+    is committed in code any more (get_mysql_test_url requires MYSQL_TEST_PASSWORD; the Keycloak admin test requires
+    KEYCLOAK_ADMIN_PASSWORD). Values are never printed."""
+    from pathlib import Path
+
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if sep and key.startswith(("MYSQL_TEST_", "KEYCLOAK_ADMIN")) and value.strip():
+            os.environ.setdefault(key, value.strip().strip('"'))
+
+
+_load_test_db_env()
+
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa

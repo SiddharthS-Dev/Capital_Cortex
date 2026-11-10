@@ -1,4 +1,6 @@
 # Capital Cortex runbook
+> **Database note (2026-11-08):** MySQL 8.4 is the default stack. Sections below that mention PostgreSQL, WAL or `make backup` describe the rollback stack, now reached with the `*-postgres` targets. MySQL backup: `make mysql-backup`. Rollback: `docs/CORTEX_MYSQL_ROLLBACK_RUNBOOK.md`.
+
 
 Operational procedures for the Compose stack (dev/staging and initial prod, per the HLD). Windows hosts
 without GNU make use `./make.ps1 <target>`; it has the same targets as `make`.
@@ -40,10 +42,12 @@ is socket-only (a socket check would pass too early).
 - **Platform administrator:** set `CORTEX_ADMIN_EMAIL` / `CORTEX_ADMIN_PASSWORD` in `.env` (gitignored).
   `scripts/bootstrap_admin.py` creates or updates that user with the roles admin + approver on every
   `make up`, or you can run it directly. You sign in with the email, and the first login enrols TOTP (R5).
-- Dev users (password `Cortex!dev-2026`): `dev-admin` (admin+approver), `dev-analyst`, `dev-finance`
+- Dev users (password: `SMOKE_USER_PASSWORD` in `.env`, substituted into the realm import by Keycloak; no
+  password is committed): `dev-admin` (admin+approver), `dev-analyst`, `dev-finance`
   (analyst + `forecast:write`), `dev-approver`, `dev-legal` (auditor+approver + `compliance:review`),
-  `dev-executive`. Privileged users enrol TOTP at first login. `smoke-auditor` has a pre-seeded TOTP secret
-  for automation. It exists **only in the dev realm**.
+  `dev-executive`. Privileged users enrol TOTP at first login. `smoke-auditor` gets a pre-seeded TOTP secret
+  only when the realm is generated with `SMOKE_TOTP_SECRET` set (never commit such a file); client secrets come
+  from `API_CLIENT_SECRET`, `WORKER_CLIENT_SECRET` and `INGESTION_CLIENT_SECRET`. All exist **only in the dev realm**.
 - **Production:** create the realm from Terraform with no dev users, rotate every client secret into Vault,
   set `KC_HOSTNAME` to the public HTTPS URL and run `start` (not `start-dev`).
 - "MFA required for your role" errors from the API mean the token has no `otp` in `amr`. Check that the
@@ -89,6 +93,21 @@ is socket-only (a socket check would pass too early).
 - SLO and cost alert rules: `infra/prometheus/rules.yml`.
 
 ## 8. Backups and restore (D-031: RPO ≤ 15 min, RTO ≤ 1 h)
+
+### 8.0 MySQL 8.4 backups (current default)
+
+MySQL is the default database, so these are the commands to use. Sections 8.1 to 8.4 describe the PostgreSQL rollback
+stack only.
+
+| Task | Command |
+|---|---|
+| Encrypted backup of `cortex` and `keycloak`, manifest written last | `make mysql-backup` |
+| Verify the newest backup (ciphertext and plaintext SHA-256, every GCM frame) | `make mysql-backup-verify` |
+| Retention dry run (`MYSQL_BACKUP_KEEP`) | `make mysql-backup-prune` |
+| Restore into a new database with strict row counts | `scripts/backup_mysql.py restore --id <id> --database cortex --target-db cortex_restore_drill --strict` |
+
+Keep `MYSQL_BACKUP_ENCRYPTION_KEY` in the secret store: a lost key means lost backups. Point-in-time recovery for
+production MySQL is not designed yet (see `docs/CORTEX_PRODUCTION_READINESS_CHECKLIST.md`).
 
 ### 8.1 Design
 

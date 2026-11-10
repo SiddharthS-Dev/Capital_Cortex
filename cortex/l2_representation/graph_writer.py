@@ -1,4 +1,4 @@
-"""Graph writer (FR-02): opportunity + counterparty + signal → relational rows, mirrors, and CKG vertices/edges.
+"""Graph writer (FR-02): opportunity + counterparty + signal -> relational rows, mirrors, and graph vertices/edges.
 
 Everything happens in the caller's transaction. Every derived node gets a DERIVED_FROM edge back to the
 signal it came from (I5), and every node and edge carries ``source_ref``. A human-set class, stage, owner or
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 
 from sqlalchemy import text
@@ -18,7 +19,6 @@ from cortex.l1_perception.models import Signal
 from cortex.l2_representation.classifier import Classification
 from cortex.l2_representation.typer import Tags
 from platform_core.config import get_settings
-from platform_core.db import age
 
 GRAPH = "ckg"
 
@@ -33,37 +33,68 @@ async def _entity(
     attrs: dict[str, Any] | None = None,
     is_demo: bool = False,
 ) -> str:
-    return str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO entity (org_id, entity_type, ref_table, ref_id, label, attrs, source_ref, is_demo) "
-                    "VALUES (:org, :t, :tbl, :ref, :label, CAST(:attrs AS jsonb), CAST(:src AS jsonb), :demo) "
-                    "ON CONFLICT (org_id, ref_table, ref_id) DO UPDATE SET label = EXCLUDED.label, attrs = EXCLUDED.attrs "
-                    "RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "t": etype,
-                    "tbl": table,
-                    "ref": ref_id,
-                    "label": label[:300],
-                    "attrs": json.dumps(attrs or {}, default=str),
-                    "src": json.dumps(src),
-                    "demo": is_demo,
-                },
-            )
-        ).scalar_one()
+    org = get_settings().org_id
+    existing = (
+        await s.execute(
+            text("SELECT id FROM entity WHERE org_id = :org AND ref_table = :tbl AND ref_id = :ref"),
+            {"org": org, "tbl": table, "ref": ref_id},
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await s.execute(
+            text(
+                "UPDATE entity SET label = :label, attrs = :attrs, source_ref = :src, is_demo = :demo, updated_at = NOW(6) "
+                "WHERE id = :id"
+            ),
+            {
+                "id": str(existing),
+                "label": label[:300],
+                "attrs": json.dumps(attrs or {}, default=str),
+                "src": json.dumps(src),
+                "demo": is_demo,
+            },
+        )
+        return str(existing)
+
+    new_id = str(uuid.uuid4())
+    await s.execute(
+        text(
+            "INSERT INTO entity (id, org_id, entity_type, ref_table, ref_id, label, attrs, source_ref, is_demo) "
+            "VALUES (:id, :org, :t, :tbl, :ref, :label, :attrs, :src, :demo)"
+        ),
+        {
+            "id": new_id,
+            "org": org,
+            "t": etype,
+            "tbl": table,
+            "ref": ref_id,
+            "label": label[:300],
+            "attrs": json.dumps(attrs or {}, default=str),
+            "src": json.dumps(src),
+            "demo": is_demo,
+        },
     )
+    return new_id
 
 
 async def _edge(s: AsyncSession, frm: str, to: str, etype: str, src: dict[str, Any], is_demo: bool = False) -> None:
+    edge_id = str(uuid.uuid4())
+    sref_data = src if (src and len(src) > 0) else {"source": "graph_writer"}
     await s.execute(
         text(
-            "INSERT INTO relationship_edge (org_id, from_entity, to_entity, type, source_ref, is_demo) "
-            "VALUES (:org, :f, :t, :type, CAST(:src AS jsonb), :demo) ON CONFLICT (from_entity, to_entity, type) DO NOTHING"
+            "INSERT INTO relationship_edge (id, org_id, from_entity, to_entity, type, source_ref, is_demo) "
+            "VALUES (:id, :org, :f, :t, :type, :src, :demo) "
+            "ON DUPLICATE KEY UPDATE source_ref = VALUES(source_ref), updated_at = NOW(6)"
         ),
-        {"org": get_settings().org_id, "f": frm, "t": to, "type": etype, "src": json.dumps(src), "demo": is_demo},
+        {
+            "id": edge_id,
+            "org": get_settings().org_id,
+            "f": frm,
+            "t": to,
+            "type": etype,
+            "src": json.dumps(sref_data, default=str),
+            "demo": is_demo,
+        },
     )
 
 
@@ -71,7 +102,6 @@ _PROP = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
 
 
 def _set_clause(var: str, props: dict[str, Any], prefix: str) -> tuple[str, dict[str, Any]]:
-    """AGE can't ``SET n += $map`` from a parameter, so each property becomes ``var.key = $prefix_key``."""
     parts, params = [], {}
     for k, v in props.items():
         if not _PROP.match(k):
@@ -82,19 +112,78 @@ def _set_clause(var: str, props: dict[str, Any], prefix: str) -> tuple[str, dict
 
 
 async def upsert_vertex(s: AsyncSession, label: str, node_id: str, props: dict[str, Any]) -> None:
-    clause, params = _set_clause("n", props, "p")
-    await age.cypher(s, GRAPH, f"MERGE (n:{label} {{id: $id}}){clause} RETURN n.id", {"id": node_id, **params})
+    org = get_settings().org_id
+    tbl = label.lower()
+    name = props.get("name") or props.get("title") or node_id
+    attrs = json.dumps(props, default=str)
+    existing = (
+        await s.execute(
+            text("SELECT id FROM entity WHERE org_id = :org AND ref_table = :tbl AND ref_id = :ref"),
+            {"org": org, "tbl": tbl, "ref": node_id},
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await s.execute(
+            text("UPDATE entity SET label = :name, attrs = :attrs, updated_at = NOW(6) WHERE id = :id"),
+            {"id": str(existing), "name": str(name)[:300], "attrs": attrs},
+        )
+    else:
+        new_id = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO entity (id, org_id, entity_type, ref_table, ref_id, label, attrs, source_ref, is_demo) "
+                "VALUES (:id, :org, :etype, :tbl, :ref, :name, :attrs, :src, :demo)"
+            ),
+            {
+                "id": new_id,
+                "org": org,
+                "etype": label,
+                "tbl": tbl,
+                "ref": node_id,
+                "name": str(name)[:300],
+                "attrs": attrs,
+                "src": json.dumps({"source": "graph_writer"}),
+                "demo": bool(props.get("is_demo", False)),
+            },
+        )
 
 
 async def upsert_edge(
     s: AsyncSession, a_label: str, a_id: str, rel: str, b_label: str, b_id: str, props: dict[str, Any]
 ) -> None:
-    clause, params = _set_clause("r", props, "p")
-    await age.cypher(
-        s,
-        GRAPH,
-        f"MATCH (a:{a_label} {{id: $a}}), (b:{b_label} {{id: $b}}) MERGE (a)-[r:{rel}]->(b){clause} RETURN id(r)",
-        {"a": a_id, "b": b_id, **params},
+    org = get_settings().org_id
+    ea = (
+        await s.execute(
+            text("SELECT id FROM entity WHERE org_id = :org AND ref_id = :ref LIMIT 1"),
+            {"org": org, "ref": a_id},
+        )
+    ).scalar_one_or_none()
+    eb = (
+        await s.execute(
+            text("SELECT id FROM entity WHERE org_id = :org AND ref_id = :ref LIMIT 1"),
+            {"org": org, "ref": b_id},
+        )
+    ).scalar_one_or_none()
+    if not ea or not eb:
+        return
+    edge_id = str(uuid.uuid4())
+    sref_data = {"source": "graph_writer", **(props or {})}
+    sref = json.dumps(sref_data, default=str)
+    await s.execute(
+        text(
+            "INSERT INTO relationship_edge (id, org_id, from_entity, to_entity, type, source_ref, is_demo) "
+            "VALUES (:id, :org, :ea, :eb, :type, :src, :demo) "
+            "ON DUPLICATE KEY UPDATE source_ref = VALUES(source_ref), updated_at = NOW(6)"
+        ),
+        {
+            "id": edge_id,
+            "org": org,
+            "ea": str(ea),
+            "eb": str(eb),
+            "type": rel,
+            "src": sref,
+            "demo": bool(props.get("is_demo", False)),
+        },
     )
 
 
@@ -151,28 +240,39 @@ async def write_opportunity(
         "demo": is_demo,
     }
     if existing_gp and cls.capital_class in ("grant", "government_program", "university_program", "foundation_esg"):
-        grant_program_id = existing_gp
+        grant_program_id = str(existing_gp)
         await s.execute(
             text(
                 "UPDATE grant_program SET agency_org_id = :agency, title = :title, description = :desc, "
-                "eligibility = CAST(:elig AS jsonb), amount_min = :amin, amount_max = :amax, currency = :ccy, "
-                "open_date = :open, deadline = :deadline, url = :url, source_ref = CAST(:src AS jsonb) WHERE id = :id"
+                "eligibility = :elig, amount_min = :amin, amount_max = :amax, currency = :ccy, "
+                "open_date = :open, deadline = :deadline, url = :url, source_ref = :src WHERE id = :id"
             ),
-            {**gp_params, "id": existing_gp},
+            {**gp_params, "id": str(existing_gp)},
         )
     elif cls.capital_class in ("grant", "government_program", "university_program", "foundation_esg"):
-        grant_program_id = (
+        grant_program_id = str(uuid.uuid4())
+        await s.execute(
+            text(
+                "INSERT INTO grant_program (id, org_id, agency_org_id, title, description, eligibility, amount_min, amount_max, "
+                "currency, open_date, deadline, url, source_ref, is_demo) VALUES (:id, :org, :agency, :title, :desc, "
+                ":elig, :amin, :amax, :ccy, :open, :deadline, :url, :src, :demo)"
+            ),
+            {**gp_params, "id": grant_program_id},
+        )
+
+    existing_opp = None
+    if sig.external_key:
+        existing_opp = (
             await s.execute(
-                text(
-                    "INSERT INTO grant_program (org_id, agency_org_id, title, description, eligibility, amount_min, amount_max, "
-                    "currency, open_date, deadline, url, source_ref, is_demo) VALUES (:org, :agency, :title, :desc, "
-                    "CAST(:elig AS jsonb), :amin, :amax, :ccy, :open, :deadline, :url, CAST(:src AS jsonb), :demo) RETURNING id"
-                ),
-                gp_params,
+                text("SELECT id FROM opportunity WHERE org_id = :org AND external_key = :key"),
+                {"org": org, "key": sig.external_key},
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
+    created = existing_opp is None
+    opp_id = str(existing_opp) if existing_opp else str(uuid.uuid4())
 
     params = {
+        "id": opp_id,
         "org": org,
         "cls": cls.capital_class,
         "csrc": cls.method if cls.capital_class else None,
@@ -182,8 +282,8 @@ async def write_opportunity(
         "desc": sig.description,
         "cp": counterparty_id,
         "gp": grant_program_id,
-        "geo": sig.countries,
-        "stages": tags.stages,
+        "geo": json.dumps(sig.countries or []),
+        "stages": json.dumps(tags.stages or []),
         "amin": sig.amount_min,
         "amax": sig.amount_max,
         "ccy": sig.currency,
@@ -192,43 +292,33 @@ async def write_opportunity(
         "sig": signal_id,
         "key": sig.external_key,
         "url": sig.url,
-        "sectors": tags.sectors,
-        "esg": sorted({*tags.esg, *tags.sdg}),
+        "sectors": json.dumps(tags.sectors or []),
+        "esg": json.dumps(sorted({*tags.esg, *tags.sdg}) or []),
         "demo": is_demo,
     }
-    row = (
-        await s.execute(
-            text(
-                "INSERT INTO opportunity (org_id, class, class_source, classification_confidence, class_evidence, title, "
-                "description, counterparty_id, grant_program_id, geography, stage_fit, amount_min, amount_max, currency, "
-                "deadline, source_ref, signal_id, external_key, url, sectors, esg_tags, is_demo) VALUES (:org, "
-                "CAST(:cls AS capital_class), :csrc, :conf, CAST(:cev AS jsonb), :title, :desc, :cp, :gp, :geo, :stages, :amin, "
-                ":amax, :ccy, :deadline, CAST(:src AS jsonb), :sig, :key, :url, :sectors, :esg, :demo) "
-                "ON CONFLICT (org_id, external_key) WHERE external_key IS NOT NULL DO UPDATE SET "
-                # a human-set class wins over re-classification
-                "class = CASE WHEN opportunity.class_source = 'human' THEN opportunity.class ELSE EXCLUDED.class END, "
-                "class_source = CASE WHEN opportunity.class_source = 'human' THEN 'human' ELSE EXCLUDED.class_source END, "
-                "classification_confidence = CASE WHEN opportunity.class_source = 'human' THEN opportunity.classification_confidence "
-                "ELSE EXCLUDED.classification_confidence END, class_evidence = EXCLUDED.class_evidence, "
-                "title = EXCLUDED.title, description = EXCLUDED.description, counterparty_id = EXCLUDED.counterparty_id, "
-                "grant_program_id = EXCLUDED.grant_program_id, geography = EXCLUDED.geography, stage_fit = EXCLUDED.stage_fit, "
-                "amount_min = EXCLUDED.amount_min, amount_max = EXCLUDED.amount_max, currency = EXCLUDED.currency, "
-                "deadline = EXCLUDED.deadline, source_ref = EXCLUDED.source_ref, signal_id = EXCLUDED.signal_id, "
-                "url = EXCLUDED.url, sectors = EXCLUDED.sectors, esg_tags = EXCLUDED.esg_tags "
-                "RETURNING id, (xmax = 0) AS created"
-            ),
-            params,
-        )
-    ).one()
-    opp_id, created = str(row.id), bool(row.created)
+    await s.execute(
+        text(
+            "INSERT INTO opportunity (id, org_id, class, class_source, classification_confidence, class_evidence, title, "
+            "description, counterparty_id, grant_program_id, geography, stage_fit, amount_min, amount_max, currency, "
+            "deadline, source_ref, signal_id, external_key, url, sectors, esg_tags, is_demo) VALUES (:id, :org, "
+            ":cls, :csrc, :conf, :cev, :title, :desc, :cp, :gp, :geo, :stages, :amin, "
+            ":amax, :ccy, :deadline, :src, :sig, :key, :url, :sectors, :esg, :demo) "
+            "ON DUPLICATE KEY UPDATE "
+            "class = CASE WHEN opportunity.class_source = 'human' THEN opportunity.class ELSE VALUES(class) END, "
+            "class_source = CASE WHEN opportunity.class_source = 'human' THEN 'human' ELSE VALUES(class_source) END, "
+            "classification_confidence = CASE WHEN opportunity.class_source = 'human' THEN opportunity.classification_confidence "
+            "ELSE VALUES(classification_confidence) END, class_evidence = VALUES(class_evidence), "
+            "title = VALUES(title), description = VALUES(description), counterparty_id = VALUES(counterparty_id), "
+            "grant_program_id = VALUES(grant_program_id), geography = VALUES(geography), stage_fit = VALUES(stage_fit), "
+            "amount_min = VALUES(amount_min), amount_max = VALUES(amount_max), currency = VALUES(currency), "
+            "deadline = VALUES(deadline), source_ref = VALUES(source_ref), signal_id = VALUES(signal_id), "
+            "url = VALUES(url), sectors = VALUES(sectors), esg_tags = VALUES(esg_tags)"
+        ),
+        params,
+    )
+
     if prev_counterparty and prev_counterparty != counterparty_id:
-        # the listing now names a different counterparty: drop the stale OFFERS edge (graph + mirror)
-        await age.cypher(
-            s,
-            GRAPH,
-            "MATCH (a:Organization {id: $old})-[r:OFFERS]->(o:Opportunity {id: $opp}) DELETE r RETURN 1",
-            {"old": str(prev_counterparty), "opp": opp_id},
-        )
+        # the listing now names a different counterparty: drop the stale OFFERS edge
         await s.execute(
             text(
                 "DELETE FROM relationship_edge WHERE type = 'OFFERS' AND to_entity IN (SELECT id FROM entity WHERE "
@@ -247,7 +337,7 @@ async def write_opportunity(
         opp_id,
         sig.title,
         src,
-        {"class": cls.capital_class, "deadline": sig.deadline},
+        {"class": cls.capital_class, "deadline": sig.deadline.isoformat() if sig.deadline else None},
         is_demo,
     )
     await _edge(s, opp_e, sig_e, "DERIVED_FROM", src, is_demo)
@@ -259,7 +349,7 @@ async def write_opportunity(
         await _edge(s, org_e, opp_e, "OFFERS", src, is_demo)
         await _edge(s, org_e, sig_e, "DERIVED_FROM", src, is_demo)
 
-    # ---- Capital Knowledge Graph (AGE) ----
+    # ---- Knowledge Graph vertices & edges ----
     ref = json.dumps(src, default=str)
     await upsert_vertex(
         s,
@@ -324,12 +414,11 @@ async def ensure_node(
     """Make sure a vertex exists without overwriting one another writer owns (its props and provenance)."""
     ent = (
         await s.execute(
-            text("SELECT id FROM entity WHERE org_id = :org AND ref_table = :t AND ref_id = CAST(:id AS uuid)"),
+            text("SELECT id FROM entity WHERE org_id = :org AND ref_table = :t AND ref_id = :id"),
             {"org": get_settings().org_id, "t": table, "id": node_id},
         )
     ).scalar()
-    exists = await age.cypher(s, GRAPH, f"MATCH (n:{label} {{id: $id}}) RETURN n.id", {"id": node_id})
-    if ent is None or not exists:
+    if ent is None:
         return await node(s, label, table, node_id, name, src, None, is_demo)
     return str(ent)
 
@@ -344,7 +433,7 @@ async def link(
     is_demo: bool = False,
 ) -> None:
     """Upsert an edge between nodes given as (label, table, id, name), creating missing endpoints without
-    touching existing ones. The AGE edge and its relational mirror change in the same transaction (§5.2)."""
+    touching existing ones."""
     ea = await ensure_node(s, a[0], a[1], a[2], a[3], src, is_demo)
     eb = await ensure_node(s, b[0], b[1], b[2], b[3], src, is_demo)
     await _edge(s, ea, eb, rel, src, is_demo)

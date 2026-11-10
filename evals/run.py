@@ -8,7 +8,7 @@ PENDING with their phase. They are never reported as passed (working rule 2: no 
   (c) classification_acc    — ≥ 0.85 on the labelled set
   (d) scoring_sanity        — monotonicity and weight sensitivity
   (t) traceability          — every SyRS item has a linked, existing test
-  (s) invariant_schema      — I1/I2/I6 constraints are present in the migration
+  (s) invariant_schema      — I1/I2/I3/I6 constraints are present in the MySQL baseline and the current schema
 """
 
 from __future__ import annotations
@@ -43,18 +43,24 @@ def traceability() -> tuple[bool, str]:
 
 def invariant_schema() -> tuple[bool, str]:
     """Static check that the invariant constraints are in the schema (the integration tests exercise them)."""
-    mig = (ROOT / "migrations" / "versions" / "0001_initial.py").read_text(encoding="utf-8")
+    sources = [ROOT / "migrations_mysql" / "baseline" / "m0001_schema.sql", ROOT / "scripts" / "schema_mysql.sql"]
     required = {
         "I1 provenance CHECK": r"source_ref IS NOT NULL.*?OR inference_id IS NOT NULL",
-        "I1 inference basis": r"basis_refs jsonb NOT NULL",
-        "I2 evidence NOT NULL": r"evidence jsonb NOT NULL",
-        "I2 reasoning NOT NULL": r"reasoning jsonb NOT NULL",
+        "I1 inference basis": r"basis_refs JSON NOT NULL",
+        "I2 evidence NOT NULL": r"evidence JSON NOT NULL",
+        "I2 reasoning NOT NULL": r"reasoning JSON NOT NULL",
         "I3 outbox approval CHECK": r"status NOT IN \('approved','sent'\) OR approval_id IS NOT NULL",
-        "I3 edit invalidates approval": r"outbox_invalidate_on_edit",
+        "I3 edit invalidates approval": r"CREATE TRIGGER trg_outbox_invalidate",
         "I6 realised labels only": r"CHECK \(label_source = 'realised'\)",
-        "audit append-only trigger": r"audit_log_immutable",
+        "audit no-update trigger": r"CREATE TRIGGER trg_audit_no_update",
+        "audit no-delete trigger": r"CREATE TRIGGER trg_audit_no_delete",
     }
-    missing = [k for k, rx in required.items() if not re.search(rx, mig, re.S)]
+    missing = [
+        f"{src.name}: {k}"
+        for src in sources
+        for k, rx in required.items()
+        if not re.search(rx, src.read_text(encoding="utf-8"), re.S)
+    ]
     return not missing, "all present" if not missing else f"missing: {', '.join(missing)}"
 
 

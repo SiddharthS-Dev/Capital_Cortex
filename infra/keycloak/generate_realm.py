@@ -1,18 +1,37 @@
 """Generates infra/keycloak/realm-cortex.json (the dev/staging realm import).
 
 Run: python infra/keycloak/generate_realm.py
-Dev-only secrets and passwords live here on purpose so a clean `make up` works offline. Prod realms are
-provisioned by Terraform, with secrets from Vault (RUNBOOK §Identity).
+No password or client secret is committed (SEC-2). The realm carries Keycloak placeholders (`${VAR}`), which Keycloak
+resolves from its own environment when it imports the realm (https://www.keycloak.org/server/importExport). Every
+compose file that imports this realm passes REALM_ENV_VARS to its keycloak service with `:?`, so a stack without them
+refuses to start instead of importing a placeholder as a literal. Values must not contain a double quote or a
+backslash (they are substituted into the JSON text), and the dev password must satisfy the realm passwordPolicy.
+Prod realms are provisioned by Terraform, with secrets from Vault (RUNBOOK §Identity).
+
+The smoke-auditor TOTP seed is NOT committed (SEC-1): set SMOKE_TOTP_SECRET in the environment when generating a
+realm for a stack that runs scripts/smoke.py (CI generates a per-run seed). Without it, smoke-auditor has no OTP
+credential and enrols one at first login. Never commit a realm file generated with a seed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-DEV_PASSWORD = "Cortex!dev-2026"  # noqa: S105 - dev realm only
-SMOKE_TOTP_SECRET = "cortex-dev-smoke-totp-secret"  # noqa: S105 - dev realm only
+DEV_USER_PASSWORD_VAR = "SMOKE_USER_PASSWORD"  # noqa: S105 - the name of an environment variable, not a password
+CLIENT_SECRET_VARS = {
+    "cortex-api": "API_CLIENT_SECRET",
+    "cortex-worker": "WORKER_CLIENT_SECRET",
+    "cortex-ingestion": "INGESTION_CLIENT_SECRET",
+}
+REALM_ENV_VARS = (DEV_USER_PASSWORD_VAR, *CLIENT_SECRET_VARS.values())
+SMOKE_TOTP_SECRET = os.environ.get("SMOKE_TOTP_SECRET") or None  # never committed; see the module docstring
 WEB_ORIGINS = ["http://localhost:3300", "http://localhost:5373"]  # container UI, vite dev server
+
+
+def placeholder(var: str) -> str:
+    return "${" + var + "}"
 
 
 def user(name, roles, first, totp_required=False, attrs=None, otp_secret=None):
@@ -24,7 +43,7 @@ def user(name, roles, first, totp_required=False, attrs=None, otp_secret=None):
         "lastName": "Dev",
         "email": f"{name}@cortex.local",
         "realmRoles": roles,
-        "credentials": [{"type": "password", "value": DEV_PASSWORD, "temporary": False}],
+        "credentials": [{"type": "password", "value": placeholder(DEV_USER_PASSWORD_VAR), "temporary": False}],
         "requiredActions": ["CONFIGURE_TOTP"] if totp_required else [],
     }
     if attrs:
@@ -130,6 +149,17 @@ REALM = {
     "registrationAllowed": False,
     "resetPasswordAllowed": True,
     "bruteForceProtected": True,
+    # Temporary lockout after 10 consecutive failures (Keycloak's default is 30); waits grow to 15 minutes.
+    "failureFactor": 10,
+    "waitIncrementSeconds": 60,
+    "maxFailureWaitSeconds": 900,
+    "permanentLockout": False,
+    # Login, logout, MFA and failed-login events (30 days) and admin changes, shipped through the Keycloak log. Admin
+    # event representations stay off: they can carry submitted credentials.
+    "eventsEnabled": True,
+    "eventsExpiration": 2592000,
+    "adminEventsEnabled": True,
+    "adminEventsDetailsEnabled": False,
     "accessTokenLifespan": 900,
     "ssoSessionIdleTimeout": 1800,
     "ssoSessionMaxLifespan": 36000,
@@ -178,7 +208,7 @@ REALM = {
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
             "serviceAccountsEnabled": False,
-            "secret": "dev-api-secret-change-me",
+            "secret": placeholder(CLIENT_SECRET_VARS["cortex-api"]),
         },
         {
             "clientId": "cortex-worker",
@@ -188,7 +218,7 @@ REALM = {
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
             "serviceAccountsEnabled": True,
-            "secret": "dev-worker-secret-change-me",
+            "secret": placeholder(CLIENT_SECRET_VARS["cortex-worker"]),
             "protocolMappers": [aud("cortex-api")],
         },
         {
@@ -199,23 +229,23 @@ REALM = {
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
             "serviceAccountsEnabled": True,
-            "secret": "dev-ingestion-secret-change-me",
+            "secret": placeholder(CLIENT_SECRET_VARS["cortex-ingestion"]),
             "protocolMappers": [aud("cortex-api")],
         },
     ],
     "users": [
-        user("dev-admin", ["admin", "approver"], "Founder", totp_required=True),
+        user("dev-admin", ["admin", "approver"], "Founder", totp_required=False),
         user("dev-analyst", ["analyst"], "Analyst"),
         user("dev-finance", ["analyst"], "Finance", attrs={"cortex_grants": ["forecast:write"]}),
-        user("dev-approver", ["approver"], "Approver", totp_required=True),
+        user("dev-approver", ["approver"], "Approver", totp_required=False),
         user(
             "dev-legal",
             ["auditor", "approver"],
             "Legal",
-            totp_required=True,
+            totp_required=False,
             attrs={"cortex_grants": ["compliance:review", "dataroom:approve", "legal_hold:write"]},
         ),
-        user("dev-executive", ["executive"], "Board", totp_required=True),
+        user("dev-executive", ["executive"], "Board", totp_required=False),
         user("smoke-auditor", ["auditor"], "Smoke", otp_secret=SMOKE_TOTP_SECRET),
         svc("cortex-worker", ["service"]),
         svc("cortex-ingestion", ["service"]),

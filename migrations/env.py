@@ -12,8 +12,10 @@ def _url() -> str:
     url = os.environ.get("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
     if not url:
         raise RuntimeError("DATABASE_URL is not set")
+    if not url.startswith("postgresql"):
+        raise RuntimeError("migrations/ is the PostgreSQL rollback history; use `alembic upgrade head` for MySQL")
     # Alembic runs synchronously; psycopg3 handles both modes with the same URL.
-    return url.replace("+asyncpg", "+psycopg")
+    return url.replace("+asyncpg", "+psycopg").replace("+asyncmy", "+pymysql").replace("+aiomysql", "+pymysql")
 
 
 def run_migrations_offline() -> None:

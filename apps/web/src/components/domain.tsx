@@ -4,7 +4,7 @@ import { ExternalLink, FileSearch } from "lucide-react";
 import type { ReactNode } from "react";
 import { BANDS, CLASS_COLORS, CLASS_LABELS, pct, score100 } from "@/lib/format";
 import type { Evidence } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, safeHttpUrl } from "@/lib/utils";
 import { Badge } from "./ui/primitives";
 
 export function BandBadge({ band, className }: { band: string | null; className?: string }) {
@@ -45,6 +45,10 @@ export function DemoBadge() {
   return <Badge tone="demo" title="Synthetic seed data (is_demo)">DEMO</Badge>;
 }
 
+export function ProvenanceBadge({ demo }: { demo?: boolean }) {
+  return demo ? <DemoBadge /> : null;
+}
+
 export function CompletenessRing({ value, size = 44 }: { value: number | null; size?: number }) {
   const v = value ?? 0;
   const r = (size - 6) / 2;
@@ -73,7 +77,7 @@ function describeRef(e: Evidence): { title: string; detail?: string; href?: stri
     const f = String(e.field ?? "");
     const how = fields[f.split("/")[0]] ?? fields[f] ?? undefined;
     return { title: `Opportunity · ${f}`, detail: how ? `from ${how}` : (src?.source_key ? `source ${src.source_key}` : undefined),
-             href: typeof src?.url === "string" ? src.url : undefined };
+             href: safeHttpUrl(src?.url) };
   }
   if (typeof e.ref === "string") return { title: e.ref };
   const rest = Object.entries(e).filter(([k]) => !["source_ref"].includes(k));

@@ -13,15 +13,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "infra" / "keycloak"))
 from devtoken import token  # noqa: E402
-from generate_realm import DEV_PASSWORD  # noqa: E402
+from smoke import setting  # noqa: E402 - dev password from the environment or .env, never committed
 
 API = os.environ.get("API", "http://localhost:8300")
 
 
 def main() -> int:
-    tok = token("dev-analyst", DEV_PASSWORD)
+    tok = token("dev-analyst", setting("SMOKE_USER_PASSWORD"))
     exe = Path(sys.executable).with_name("schemathesis.exe" if os.name == "nt" else "schemathesis")
     cmd = [str(exe), "run", f"{API}/v1/openapi.json", "-H", f"Authorization: Bearer {tok}", "--include-method", "GET",
            "--max-examples", "5", "--checks", "not_a_server_error,status_code_conformance,content_type_conformance,response_schema_conformance",

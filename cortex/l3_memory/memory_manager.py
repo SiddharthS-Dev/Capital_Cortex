@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
@@ -20,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from platform_core import objectstore
 from platform_core.bus import get_bus
 from platform_core.config import get_settings
+from platform_core.db.compat import is_mysql_session
+from platform_core.jsonutil import json_obj
 
 COLD_BUCKET = "cortex-cold"
 _DUR = re.compile(r"^(\d+)([hdwy])$")
@@ -69,36 +72,60 @@ async def put_warm(
     if not source_ref:
         raise ValueError("a memory needs a source_ref (I1)")
     expires = datetime.now(UTC) + duration(retention()["policies"]["memory_warm"]["retain"])
-    return str(
-        (
+    params = {
+        "org": get_settings().org_id,
+        "k": key,
+        "v": json.dumps(value, default=str),
+        "exp": expires,
+        "kind": kind,
+        "st": subject_type,
+        "sid": subject_id,
+        "src": json.dumps(source_ref, default=str),
+        "demo": is_demo,
+    }
+    if is_mysql_session(s):
+        mid = str(uuid.uuid4())
+        params["id"] = mid
+        await s.execute(
+            text(
+                "INSERT INTO memory (id, org_id, tier, `key`, value, expires_at, ts, kind, subject_type, subject_id, source_ref, is_demo) "
+                "VALUES (:id, :org, 'warm', :k, CAST(:v AS JSON), :exp, now(), :kind, :st, :sid, CAST(:src AS JSON), :demo) "
+                "ON DUPLICATE KEY UPDATE tier = 'warm', value = VALUES(value), storage_key = NULL, "
+                "expires_at = VALUES(expires_at), ts = now(), source_ref = VALUES(source_ref)"
+            ),
+            params,
+        )
+        row_id = (
             await s.execute(
-                text(
-                    "INSERT INTO memory (org_id, tier, key, value, expires_at, ts, kind, subject_type, subject_id, source_ref, is_demo) "
-                    "VALUES (:org, 'warm', :k, CAST(:v AS jsonb), :exp, now(), :kind, :st, :sid, CAST(:src AS jsonb), :demo) "
-                    "ON CONFLICT (org_id, key) DO UPDATE SET tier = 'warm', value = EXCLUDED.value, storage_key = NULL, "
-                    "expires_at = EXCLUDED.expires_at, ts = now(), source_ref = EXCLUDED.source_ref RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "k": key,
-                    "v": json.dumps(value, default=str),
-                    "exp": expires,
-                    "kind": kind,
-                    "st": subject_type,
-                    "sid": subject_id,
-                    "src": json.dumps(source_ref, default=str),
-                    "demo": is_demo,
-                },
+                text("SELECT id FROM memory WHERE org_id = :org AND `key` = :k"),
+                {"org": get_settings().org_id, "k": key},
             )
         ).scalar_one()
-    )
+        return str(row_id)
+    else:
+        return str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO memory (org_id, tier, key, value, expires_at, ts, kind, subject_type, subject_id, source_ref, is_demo) "
+                        "VALUES (:org, 'warm', :k, CAST(:v AS jsonb), :exp, now(), :kind, :st, :sid, CAST(:src AS jsonb), :demo) "
+                        "ON CONFLICT (org_id, key) DO UPDATE SET tier = 'warm', value = EXCLUDED.value, storage_key = NULL, "
+                        "expires_at = EXCLUDED.expires_at, ts = now(), source_ref = EXCLUDED.source_ref RETURNING id"
+                    ),
+                    params,
+                )
+            ).scalar_one()
+        )
 
 
 async def get(s: AsyncSession, key: str) -> dict[str, Any] | None:
+    key_col = "`key`" if is_mysql_session(s) else "key"
     r = (
         (
             await s.execute(
-                text("SELECT tier, value, storage_key, source_ref, ts FROM memory WHERE org_id = :org AND key = :k"),
+                text(
+                    f"SELECT tier, value, storage_key, source_ref, ts FROM memory WHERE org_id = :org AND {key_col} = :k"
+                ),
                 {"org": get_settings().org_id, "k": key},
             )
         )
@@ -108,6 +135,8 @@ async def get(s: AsyncSession, key: str) -> dict[str, Any] | None:
     if r is None:
         return None
     value = r["value"]
+    if isinstance(value, str):
+        value = json.loads(value)
     if r["tier"] == "cold" and r["storage_key"]:
         value = json.loads(await objectstore.get_bytes(COLD_BUCKET, r["storage_key"]))
     return {"tier": r["tier"], "value": value, "source_ref": r["source_ref"], "ts": r["ts"]}
@@ -116,11 +145,12 @@ async def get(s: AsyncSession, key: str) -> dict[str, Any] | None:
 # ----------------------------------------------------------------------------- cold (MinIO) + ttl_job
 async def ttl_job(s: AsyncSession, limit: int = 500) -> int:
     """Warm memories past their expiry move to the cold tier; the row keeps its key and provenance."""
+    key_col = "`key`" if is_mysql_session(s) else "key"
     rows = (
         (
             await s.execute(
                 text(
-                    "SELECT id, key, value FROM memory WHERE org_id = :org AND tier = 'warm' AND expires_at < now() "
+                    f"SELECT id, {key_col}, value FROM memory WHERE org_id = :org AND tier = 'warm' AND expires_at < now() "
                     "ORDER BY expires_at LIMIT :n FOR UPDATE SKIP LOCKED"
                 ),
                 {"org": get_settings().org_id, "n": limit},
@@ -129,9 +159,12 @@ async def ttl_job(s: AsyncSession, limit: int = 500) -> int:
         .mappings()
         .all()
     )
+
     for r in rows:
         key = f"memory/{r['id']}.json"
-        await objectstore.put_bytes(COLD_BUCKET, key, json.dumps(r["value"], default=str).encode(), "application/json")
+        await objectstore.put_bytes(
+            COLD_BUCKET, key, json.dumps(json_obj(r["value"]), default=str).encode(), "application/json"
+        )
         await s.execute(
             text("UPDATE memory SET tier = 'cold', value = NULL, storage_key = :sk, expires_at = NULL WHERE id = :id"),
             {"sk": key, "id": r["id"]},

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, UploadFile
@@ -17,8 +18,9 @@ from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.bus import Envelope, get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session
 from platform_core.errors import Problem
+from platform_core.security import rate_limit
 
 router = APIRouter(prefix="/v1", tags=["ingestion"])
 MAX_UPLOAD = 20 * 1024 * 1024
@@ -30,17 +32,31 @@ async def list_sources(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     await sync_sources(session)
+    is_my = is_mysql_session(session)
+    if is_my:
+        sql = (
+            "SELECT s.id, s.name, s.kind, s.adapter, s.adapter_key, s.schedule, s.enabled, s.health, s.last_run_at, "
+            "s.last_error, s.terms_note, (SELECT count(*) FROM `signal` sg WHERE sg.source_id = s.id) AS signals_total, "
+            "(SELECT JSON_OBJECT('id', id, 'status', status, 'trigger', `trigger`, "
+            "'started_at', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%sZ'), 'finished_at', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%sZ'), "
+            "'items_fetched', items_fetched, 'items_new', items_new, 'items_duplicate', items_duplicate, 'items_failed', items_failed, 'error', error) "
+            "FROM source_run WHERE source_id = s.id ORDER BY started_at DESC LIMIT 1) AS last_run, "
+            "(SELECT count(*) FROM source_run WHERE source_id = s.id AND status = 'failed' "
+            "AND started_at > NOW() - INTERVAL 7 DAY) AS errors_7d FROM source s WHERE s.org_id = :org ORDER BY s.name"
+        )
+    else:
+        sql = (
+            "SELECT s.id, s.name, s.kind, s.adapter, s.adapter_key, s.schedule, s.enabled, s.health, s.last_run_at, "
+            "s.last_error, s.terms_note, (SELECT count(*) FROM signal sg WHERE sg.source_id = s.id) AS signals_total, "
+            "(SELECT row_to_json(r) FROM (SELECT id, status, trigger, started_at, finished_at, items_fetched, items_new, "
+            "items_duplicate, items_failed, error FROM source_run WHERE source_id = s.id ORDER BY started_at DESC LIMIT 1) r) "
+            "AS last_run, (SELECT count(*) FROM source_run WHERE source_id = s.id AND status = 'failed' "
+            "AND started_at > now() - interval '7 days') AS errors_7d FROM source s WHERE s.org_id = :org ORDER BY s.name"
+        )
     rows = (
         (
             await session.execute(
-                text(
-                    "SELECT s.id, s.name, s.kind, s.adapter, s.adapter_key, s.schedule, s.enabled, s.health, s.last_run_at, "
-                    "s.last_error, s.terms_note, (SELECT count(*) FROM signal sg WHERE sg.source_id = s.id) AS signals_total, "
-                    "(SELECT row_to_json(r) FROM (SELECT id, status, trigger, started_at, finished_at, items_fetched, items_new, "
-                    "items_duplicate, items_failed, error FROM source_run WHERE source_id = s.id ORDER BY started_at DESC LIMIT 1) r) "
-                    "AS last_run, (SELECT count(*) FROM source_run WHERE source_id = s.id AND status = 'failed' "
-                    "AND started_at > now() - interval '7 days') AS errors_7d FROM source s WHERE s.org_id = :org ORDER BY s.name"
-                ),
+                text(sql),
                 {"org": get_settings().org_id},
             )
         )
@@ -56,12 +72,17 @@ async def source_runs(
     _: Principal = Depends(authorize("ingestion:read", "source")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
+    trigger_col = "`trigger`" if is_my else "trigger"
     rows = (
         (
             await session.execute(
                 text(
-                    "SELECT id, trigger, requested_by, status, started_at, finished_at, items_fetched, items_new, items_duplicate, "
-                    "items_failed, error FROM source_run WHERE source_id = CAST(:id AS uuid) ORDER BY started_at DESC LIMIT 50"
+                    # One statement for both dialects: only the quoting of the `trigger` column differs.
+                    f"SELECT id, {trigger_col}, requested_by, status, started_at, finished_at, items_fetched, items_new, "
+                    f"items_duplicate, items_failed, error FROM source_run WHERE source_id = {id_clause} "
+                    "ORDER BY started_at DESC LIMIT 50"
                 ),
                 {"id": id},
             )
@@ -84,9 +105,13 @@ async def patch_source(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     await get_source(session, id)
+    is_my = is_mysql_session(session)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     await session.execute(
         text(
-            "UPDATE source SET enabled = :e, health = CASE WHEN :e THEN 'unknown' ELSE 'disabled' END WHERE id = CAST(:id AS uuid)"
+            # health resets only on a real state change: re-enabling an enabled source keeps its measured health
+            f"UPDATE source SET health = CASE WHEN NOT :e THEN 'disabled' WHEN enabled THEN health ELSE 'unknown' END, "
+            f"enabled = :e WHERE id = {id_clause}"
         ),
         {"e": body.enabled, "id": id},
     )
@@ -100,20 +125,57 @@ async def run_now(
     p: Principal = Depends(authorize("source:run", "source")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
-    _, cfg = await get_source(session, id)
+    """Queues the run and returns its ``run_id`` at once; poll ``GET /sources/{id}/runs/{run_id}`` for the outcome."""
+    row_, cfg = await get_source(session, id)
     if cfg.adapter in ("tabular", "manual"):
         raise Problem(
             422, "Not a pull source", f"{cfg.name} ingests uploads/entries; use /upload or /entries", "validation"
         )
+    if not row_["enabled"]:
+        raise Problem(409, "Source disabled", f"enable {cfg.name} before running it", "conflict")
+    run_id = str(uuid.uuid4())
     msg = await get_bus().publish(
-        "system.jobs", Envelope(type="ingest.run", payload={"source_id": id, "trigger": "manual"}, actor_token=p.token)
+        "system.jobs",
+        Envelope(
+            type="ingest.run", payload={"source_id": id, "trigger": "manual", "run_id": run_id}, actor_token=p.token
+        ),
     )
-    await audit_service.record(session, p, "source.run.requested", f"source:{id}", {"stream_id": msg})
-    return {"queued": True, "stream_id": msg}
+    await audit_service.record(session, p, "source.run.requested", f"source:{id}", {"stream_id": msg, "run_id": run_id})
+    return {"queued": True, "run_id": run_id, "stream_id": msg, "status": "queued"}
+
+
+@router.get("/sources/{id}/runs/{run_id}", summary="One run's status: queued until the worker starts it")
+async def source_run(
+    id: str,
+    run_id: str,
+    _: Principal = Depends(authorize("ingestion:read", "source")),
+    session: AsyncSession = Depends(get_session, scope="function"),
+) -> dict[str, Any]:
+    await get_source(session, id)
+    is_my = is_mysql_session(session)
+    cast = (lambda x: x) if is_my else (lambda x: f"CAST({x} AS uuid)")
+    trigger_col = "`trigger`" if is_my else "trigger"
+    r = (
+        (
+            await session.execute(
+                text(
+                    f"SELECT id, {trigger_col}, requested_by, status, started_at, finished_at, items_fetched, items_new, "
+                    f"items_duplicate, items_failed, error FROM source_run WHERE id = {cast(':run')} "
+                    f"AND source_id = {cast(':id')}"
+                ),
+                {"run": run_id, "id": id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    # Not written yet: the job is still in the queue (the worker inserts the row when it starts).
+    return row(r) if r else {"id": run_id, "status": "queued"}
 
 
 @router.post(
     "/sources/{id}/upload",
+    dependencies=[Depends(rate_limit("source_upload", 10))],
     summary="Upload a CSV/XLSX (file source) or an .ics calendar (calendar source); runs immediately",
 )
 async def upload(

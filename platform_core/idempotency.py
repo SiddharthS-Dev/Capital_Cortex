@@ -44,12 +44,16 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         req_hash = hashlib.sha256(request.method.encode() + request.url.path.encode() + body).hexdigest()
         org = get_settings().org_id
         async with session_scope() as s:
+            from platform_core.db import is_mysql_session
+
+            # KEY is a reserved word in MySQL (unquoted it is a 1064 syntax error); PostgreSQL takes it as is
+            if is_mysql_session(s):
+                lookup = "SELECT request_hash, status_code, response FROM api_idempotency WHERE org_id = :org AND principal = :p AND `key` = :k"
+            else:
+                lookup = "SELECT request_hash, status_code, response FROM api_idempotency WHERE org_id = :org AND principal = :p AND key = :k"
             row = (
                 await s.execute(
-                    text(
-                        "SELECT request_hash, status_code, response FROM api_idempotency WHERE org_id = :org AND principal = :p "
-                        "AND key = :k"
-                    ),
+                    text(lookup),
                     {"org": org, "p": principal.sub, "k": key},
                 )
             ).first()
@@ -63,7 +67,9 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                     media_type="application/problem+json",
                 )
             if row.status_code is not None:
-                return JSONResponse(row.response, status_code=row.status_code, headers={"Idempotent-Replay": "true"})
+                # MySQL drivers return a JSON column as its text; PostgreSQL (jsonb) returns the decoded value
+                stored = json.loads(row.response) if isinstance(row.response, str) else row.response
+                return JSONResponse(stored, status_code=row.status_code, headers={"Idempotent-Replay": "true"})
 
         response = await call_next(request)
         if response.status_code >= 500 or response.headers.get("content-type", "").startswith("text/event-stream"):
@@ -75,22 +81,42 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
         except ValueError:
             payload = None
         async with session_scope() as s:
-            await s.execute(
-                text(
-                    "INSERT INTO api_idempotency (org_id, key, principal, method, path, request_hash, status_code, response) "
-                    "VALUES (:org, :k, :p, :m, :path, :h, :sc, CAST(:resp AS jsonb)) ON CONFLICT (org_id, principal, key) DO NOTHING"
-                ),
-                {
-                    "org": org,
-                    "k": key,
-                    "p": principal.sub,
-                    "m": request.method,
-                    "path": request.url.path,
-                    "h": req_hash,
-                    "sc": response.status_code,
-                    "resp": json.dumps(payload),
-                },
-            )
+            from platform_core.db import is_mysql_session
+
+            if is_mysql_session(s):
+                await s.execute(
+                    text(
+                        "INSERT IGNORE INTO api_idempotency (org_id, `key`, principal, method, path, request_hash, status_code, response) "
+                        "VALUES (:org, :k, :p, :m, :path, :h, :sc, :resp)"
+                    ),
+                    {
+                        "org": org,
+                        "k": key,
+                        "p": principal.sub,
+                        "m": request.method,
+                        "path": request.url.path,
+                        "h": req_hash,
+                        "sc": response.status_code,
+                        "resp": json.dumps(payload),
+                    },
+                )
+            else:
+                await s.execute(
+                    text(
+                        "INSERT INTO api_idempotency (org_id, key, principal, method, path, request_hash, status_code, response) "
+                        "VALUES (:org, :k, :p, :m, :path, :h, :sc, CAST(:resp AS jsonb)) ON CONFLICT (org_id, principal, key) DO NOTHING"
+                    ),
+                    {
+                        "org": org,
+                        "k": key,
+                        "p": principal.sub,
+                        "m": request.method,
+                        "path": request.url.path,
+                        "h": req_hash,
+                        "sc": response.status_code,
+                        "resp": json.dumps(payload),
+                    },
+                )
         return Response(
             raw, status_code=response.status_code, headers=dict(response.headers), media_type=response.media_type
         )

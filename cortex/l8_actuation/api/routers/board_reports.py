@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any, Literal
 
@@ -18,8 +19,9 @@ from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, in_clause, is_mysql_session
 from platform_core.errors import Problem
+from platform_core.security import content_disposition, rate_limit
 
 router = APIRouter(prefix="/v1/board-reports", tags=["board_reports"])
 EMAIL = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
@@ -30,12 +32,23 @@ async def list_reports(
     _: Principal = Depends(authorize("board_report:read", "board_report")),
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
+    is_my = is_mysql_session(session)
+    if is_my:
+        sql = (
+            "SELECT b.id, b.title, b.period_start, b.period_end, b.status, b.recipients, b.created_by, b.created_at, b.is_demo, "
+            "b.compliance ->> '$.status' AS compliance_status, JSON_LENGTH(b.distribution) AS distributed "
+            "FROM board_report b WHERE b.org_id = :org ORDER BY b.created_at DESC LIMIT 50"
+        )
+    else:
+        sql = (
+            "SELECT b.id, b.title, b.period_start, b.period_end, b.status, b.recipients, b.created_by, b.created_at, b.is_demo, "
+            "b.compliance ->> 'status' AS compliance_status, jsonb_array_length(b.distribution) AS distributed "
+            "FROM board_report b WHERE b.org_id = :org ORDER BY b.created_at DESC LIMIT 50"
+        )
     rows = (
         (
             await session.execute(
-                text("SELECT b.id, b.title, b.period_start, b.period_end, b.status, b.recipients, b.created_by, b.created_at, b.is_demo, "
-                     "b.compliance ->> 'status' AS compliance_status, jsonb_array_length(b.distribution) AS distributed "
-                     "FROM board_report b WHERE b.org_id = :org ORDER BY b.created_at DESC LIMIT 50"),
+                text(sql),
                 {"org": get_settings().org_id},
             )
         )
@@ -52,7 +65,12 @@ class CreateIn(BaseModel):
     include_demo: bool = False
 
 
-@router.post("", status_code=201, summary="Generate a board pack for a period (cited, deterministic)")
+@router.post(
+    "",
+    status_code=201,
+    dependencies=[Depends(rate_limit("board_report_create", 10))],
+    summary="Generate a board pack for a period (cited, deterministic)",
+)
 async def create(body: CreateIn, p: Principal = Depends(authorize("board_report:write", "board_report")),
                  session: AsyncSession = Depends(get_session, scope="function")) -> dict[str, Any]:  # fmt: skip
     import re
@@ -73,16 +91,20 @@ async def get_report(
 ) -> dict[str, Any]:
     r = await svc.get(session, id)
     out = row(r)
-    ids = [d["outbox_id"] for d in r["distribution"]]
+    ids = [d["outbox_id"] for d in (out.get("distribution") or [])]
     if ids:
-        st = {
-            str(x.id): (x.status, x.sent_at)
-            for x in (
+        is_my = is_mysql_session(session)
+        if is_my:
+            prm: dict[str, Any] = {}
+            id_in = in_clause("id", "ids", ids, prm)
+            st_rows = (await session.execute(text(f"SELECT id, status, sent_at FROM outbox WHERE {id_in}"), prm)).all()
+        else:
+            st_rows = (
                 await session.execute(
                     text("SELECT id, status, sent_at FROM outbox WHERE id = ANY(CAST(:ids AS uuid[]))"), {"ids": ids}
                 )
             ).all()
-        }
+        st = {str(x.id): (x.status, x.sent_at) for x in st_rows}
         for d in out["distribution"]:
             s_ = st.get(d["outbox_id"])
             d["outbox_status"], d["sent_at"] = (
@@ -91,7 +113,11 @@ async def get_report(
     return out
 
 
-@router.get("/{id}/export", summary="Export the board pack: pdf | pptx | docx")
+@router.get(
+    "/{id}/export",
+    dependencies=[Depends(rate_limit("board_report_export", 20))],
+    summary="Export the board pack: pdf | pptx | docx",
+)
 async def export(id: str, fmt: Literal["pdf", "pptx", "docx"], p: Principal = Depends(authorize("board_report:read", "board_report")),
                  session: AsyncSession = Depends(get_session, scope="function")) -> Response:  # fmt: skip
     try:
@@ -102,7 +128,9 @@ async def export(id: str, fmt: Literal["pdf", "pptx", "docx"], p: Principal = De
 
     await audit_service.record(session, p, "board_report.exported", f"board_report:{id}", {"fmt": fmt})
     return Response(
-        data, media_type=ag.CONTENT_TYPES[fmt], headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        data,
+        media_type=ag.CONTENT_TYPES[fmt],
+        headers={"Content-Disposition": content_disposition(filename, f"board-pack.{fmt}")},
     )
 
 
@@ -135,10 +163,19 @@ async def set_recipients(id: str, body: RecipientsIn, p: Principal = Depends(aut
         raise Problem(409, "Already distributed", None, "conflict")
     rec = [x.lower() for x in body.recipients]
     h = svc.report_hash(r["content"], rec)
-    await session.execute(
-        text("UPDATE board_report SET recipients = :r, content_hash = :h, status = 'draft' WHERE id = :id"),
-        {"r": rec, "h": h, "id": r["id"]},
-    )
+    is_my = is_mysql_session(session)
+    if is_my:
+        await session.execute(
+            text(
+                "UPDATE board_report SET recipients = CAST(:r AS JSON), content_hash = :h, status = 'draft' WHERE id = :id"
+            ),
+            {"r": json.dumps(rec), "h": h, "id": str(r["id"])},
+        )
+    else:
+        await session.execute(
+            text("UPDATE board_report SET recipients = :r, content_hash = :h, status = 'draft' WHERE id = :id"),
+            {"r": rec, "h": h, "id": r["id"]},
+        )
     n = await approval_service.invalidate_open(session, "board_report", id, h)
     await audit_service.record(
         session, p, "board_report.recipients_set", f"board_report:{id}", {"recipients": rec, "approvals_invalidated": n}

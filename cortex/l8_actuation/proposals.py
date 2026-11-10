@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, date, datetime
 from typing import Any
 
 from dateutil.relativedelta import relativedelta
@@ -28,20 +29,25 @@ from cortex.l8_actuation.proposal_builder import build, gap, packages, sections_
 from platform_core import objectstore
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db import is_mysql_session
 from platform_core.errors import Forbidden, NotFound, Problem
-from platform_core.jsonutil import row
+from platform_core.jsonutil import json_obj, row
 
 DOCS_BUCKET = "cortex-docs"
 
 
 async def _get(s: AsyncSession, pid: str, lock: bool = False) -> dict[str, Any]:
+    is_my = is_mysql_session(s)
+    cls_col = "CAST(op.class AS CHAR) AS class" if is_my else "op.class::text AS class"
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
+    lock_clause = (" FOR UPDATE" if is_my else " FOR UPDATE OF p") if lock else ""
     r = (
         (
             await s.execute(
                 text(
-                    "SELECT p.*, op.title AS opportunity_title, op.currency AS opportunity_currency, op.deadline, op.class::text AS class, "
-                    "op.is_demo AS opp_demo FROM proposal p JOIN opportunity op ON op.id = p.opportunity_id "
-                    "WHERE p.id = CAST(:id AS uuid) AND p.org_id = :org" + (" FOR UPDATE OF p" if lock else "")
+                    f"SELECT p.*, op.title AS opportunity_title, op.currency AS opportunity_currency, op.deadline, {cls_col}, "
+                    f"op.is_demo AS opp_demo FROM proposal p JOIN opportunity op ON op.id = p.opportunity_id "
+                    f"WHERE p.id = {id_clause} AND p.org_id = :org{lock_clause}"
                 ),
                 {"id": pid, "org": get_settings().org_id},
             )
@@ -51,7 +57,7 @@ async def _get(s: AsyncSession, pid: str, lock: bool = False) -> dict[str, Any]:
     )
     if r is None:
         raise NotFound("proposal not found")
-    return dict(r)
+    return row(r)
 
 
 def _all_gaps(sections: list[dict[str, Any]], waivers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -71,21 +77,23 @@ async def _new_version(
     version = int(p["version"]) + 1
     review = await compliance_check.review(sections, has_disclaimer=bool(packages().get("disclaimer")))
     invalidated = await approval_service.invalidate_open(s, "proposal", str(p["id"]), h)
+    is_my = is_mysql_session(s)
+    cast_json = "JSON" if is_my else "jsonb"
     await s.execute(
         text(
-            "UPDATE proposal SET sections = CAST(:sec AS jsonb), gaps = CAST(:g AS jsonb), waivers = CAST(:w AS jsonb), version = :v, "
-            "content_hash = :h, compliance = CAST(:c AS jsonb), status = CASE WHEN status IN ('pending_approval','approved', "
+            f"UPDATE proposal SET sections = CAST(:sec AS {cast_json}), gaps = CAST(:g AS {cast_json}), waivers = CAST(:w AS {cast_json}), version = :v, "
+            f"content_hash = :h, compliance = CAST(:c AS {cast_json}), status = CASE WHEN status IN ('pending_approval','approved', "
             "'changes_requested','rejected') THEN 'draft' ELSE status END WHERE id = :id"
         ),
         {"sec": json.dumps(sections), "g": json.dumps(_all_gaps(sections, waivers)), "w": json.dumps(waivers), "v": version,
-         "h": h, "c": json.dumps(review), "id": p["id"]},
+         "h": h, "c": json.dumps(review), "id": str(p["id"]) if is_my else p["id"]},
     )  # fmt: skip
     await s.execute(
         text(
-            "INSERT INTO proposal_version (org_id, proposal_id, version, sections, gaps, content_hash, reason, created_by, is_demo) "
-            "VALUES (:org, :p, :v, CAST(:sec AS jsonb), CAST(:g AS jsonb), :h, :r, :by, :demo)"
+            f"INSERT INTO proposal_version (org_id, proposal_id, version, sections, gaps, content_hash, reason, created_by, is_demo) "
+            f"VALUES (:org, :p, :v, CAST(:sec AS {cast_json}), CAST(:g AS {cast_json}), :h, :r, :by, :demo)"
         ),
-        {"org": get_settings().org_id, "p": p["id"], "v": version, "sec": json.dumps(sections),
+        {"org": get_settings().org_id, "p": str(p["id"]) if is_my else p["id"], "v": version, "sec": json.dumps(sections),
          "g": json.dumps(_all_gaps(sections, waivers)), "h": h, "r": reason, "by": actor.sub, "demo": p["is_demo"]},
     )  # fmt: skip
     await audit_service.record(
@@ -113,10 +121,12 @@ async def create(s: AsyncSession, actor: Principal, opportunity_id: str, package
         b = await build(s, actor, opportunity_id, package_type)
     except LookupError as e:
         raise NotFound(str(e)) from e
+    is_my = is_mysql_session(s)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     opp = (
         (
             await s.execute(
-                text("SELECT title, is_demo FROM opportunity WHERE id = CAST(:id AS uuid)"), {"id": opportunity_id}
+                text(f"SELECT title, is_demo FROM opportunity WHERE id = {id_clause}"), {"id": opportunity_id}
             )
         )
         .mappings()
@@ -124,33 +134,78 @@ async def create(s: AsyncSession, actor: Principal, opportunity_id: str, package
     )
     h = sections_hash(b.sections, [])
     review = await compliance_check.review(b.sections, has_disclaimer=bool(packages().get("disclaimer")))
-    pid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO proposal (org_id, opportunity_id, package_type, sections, status, version, gaps, title, template_set, "
-                    "artefacts, content_hash, waivers, compliance, mode, created_by, agent_run_id, source_ref, is_demo) VALUES "
-                    "(:org, :opp, :pt, CAST(:sec AS jsonb), 'draft', 1, CAST(:g AS jsonb), :t, :ts, :art, :h, '[]'::jsonb, "
-                    "CAST(:c AS jsonb), :m, :by, :run, CAST(:src AS jsonb), :demo) RETURNING id"
-                ),
-                {
-                    "org": get_settings().org_id, "opp": opportunity_id, "pt": package_type, "sec": json.dumps(b.sections),
-                    "g": json.dumps(_all_gaps(b.sections, [])), "t": title or f"{spec['title']}: {opp['title']}"[:300],
-                    "ts": template_set, "art": spec["artefacts"], "h": h, "c": json.dumps(review), "m": b.mode, "by": actor.sub,
-                    "run": b.run_id, "src": json.dumps({"kind": "agent_run", "agent_run_id": b.run_id, "agent": "proposal"}),
-                    "demo": opp["is_demo"],
-                },
-            )
-        ).scalar_one()
-    )  # fmt: skip
-    await s.execute(
-        text(
-            "INSERT INTO proposal_version (org_id, proposal_id, version, sections, gaps, content_hash, reason, created_by, is_demo) "
-            "VALUES (:org, :p, 1, CAST(:sec AS jsonb), CAST(:g AS jsonb), :h, 'generated', :by, :demo)"
-        ),
-        {"org": get_settings().org_id, "p": pid, "sec": json.dumps(b.sections), "g": json.dumps(_all_gaps(b.sections, [])),
-         "h": h, "by": actor.sub, "demo": opp["is_demo"]},
-    )  # fmt: skip
+    if is_my:
+        new_pid = uuid.uuid4()
+        pid = str(new_pid)
+        await s.execute(
+            text(
+                "INSERT INTO proposal (id, org_id, opportunity_id, package_type, sections, status, version, gaps, title, template_set, "
+                "artefacts, content_hash, waivers, compliance, mode, created_by, agent_run_id, source_ref, is_demo) VALUES "
+                "(:id, :org, :opp, :pt, CAST(:sec AS JSON), 'draft', 1, CAST(:g AS JSON), :t, :ts, CAST(:art AS JSON), :h, CAST('[]' AS JSON), "
+                "CAST(:c AS JSON), :m, :by, :run, CAST(:src AS JSON), :demo)"
+            ),
+            {
+                "id": pid,
+                "org": get_settings().org_id,
+                "opp": opportunity_id,
+                "pt": package_type,
+                "sec": json.dumps(b.sections),
+                "g": json.dumps(_all_gaps(b.sections, [])),
+                "t": title or f"{spec['title']}: {opp['title']}"[:300],
+                "ts": template_set,
+                "art": json.dumps(spec["artefacts"]),
+                "h": h,
+                "c": json.dumps(review),
+                "m": b.mode,
+                "by": actor.sub,
+                "run": b.run_id,
+                "src": json.dumps({"kind": "agent_run", "agent_run_id": b.run_id, "agent": "proposal"}),
+                "demo": opp["is_demo"],
+            },
+        )
+        await s.execute(
+            text(
+                "INSERT INTO proposal_version (org_id, proposal_id, version, sections, gaps, content_hash, reason, created_by, is_demo) "
+                "VALUES (:org, :p, 1, CAST(:sec AS JSON), CAST(:g AS JSON), :h, 'generated', :by, :demo)"
+            ),
+            {
+                "org": get_settings().org_id,
+                "p": pid,
+                "sec": json.dumps(b.sections),
+                "g": json.dumps(_all_gaps(b.sections, [])),
+                "h": h,
+                "by": actor.sub,
+                "demo": opp["is_demo"],
+            },
+        )
+    else:
+        pid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO proposal (org_id, opportunity_id, package_type, sections, status, version, gaps, title, template_set, "
+                        "artefacts, content_hash, waivers, compliance, mode, created_by, agent_run_id, source_ref, is_demo) VALUES "
+                        "(:org, :opp, :pt, CAST(:sec AS jsonb), 'draft', 1, CAST(:g AS jsonb), :t, :ts, :art, :h, '[]'::jsonb, "
+                        "CAST(:c AS jsonb), :m, :by, :run, CAST(:src AS jsonb), :demo) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id, "opp": opportunity_id, "pt": package_type, "sec": json.dumps(b.sections),
+                        "g": json.dumps(_all_gaps(b.sections, [])), "t": title or f"{spec['title']}: {opp['title']}"[:300],
+                        "ts": template_set, "art": spec["artefacts"], "h": h, "c": json.dumps(review), "m": b.mode, "by": actor.sub,
+                        "run": b.run_id, "src": json.dumps({"kind": "agent_run", "agent_run_id": b.run_id, "agent": "proposal"}),
+                        "demo": opp["is_demo"],
+                    },
+                )
+            ).scalar_one()
+        )  # fmt: skip
+        await s.execute(
+            text(
+                "INSERT INTO proposal_version (org_id, proposal_id, version, sections, gaps, content_hash, reason, created_by, is_demo) "
+                "VALUES (:org, :p, 1, CAST(:sec AS jsonb), CAST(:g AS jsonb), :h, 'generated', :by, :demo)"
+            ),
+            {"org": get_settings().org_id, "p": pid, "sec": json.dumps(b.sections), "g": json.dumps(_all_gaps(b.sections, [])),
+             "h": h, "by": actor.sub, "demo": opp["is_demo"]},
+        )  # fmt: skip
     await audit_service.record(s, actor, "proposal.created", f"proposal:{pid}",
                                {"package_type": package_type, "mode": b.mode, "claims": b.report, "run_id": b.run_id})  # fmt: skip
     return {
@@ -250,7 +305,10 @@ async def _financial_model(s: AsyncSession, p: dict[str, Any], title: str) -> by
     lag = forecast_assumptions()["decision_lag_months"]
     offset = None
     if p["deadline"]:
-        when = p["deadline"] + relativedelta(months=int(lag.get(p["class"] or "", lag["default"])))
+        dl = p["deadline"]
+        if isinstance(dl, str):
+            dl = date.fromisoformat(dl[:10])
+        when = dl + relativedelta(months=int(lag.get(p["class"] or "", lag["default"])))
         now = datetime.now(UTC)
         offset = max(0, (when.year - now.year) * 12 + when.month - now.month - 1)
     stage_p = reference()["stage_probability"].get("qualified")
@@ -288,7 +346,7 @@ async def _dd_items(s: AsyncSession, demo: bool) -> list[dict[str, Any]]:
     return [
         {"key": i["key"], "title": i["title"],
          "documents": [{"title": d["title"], "version": d["version"], "checksum": d["checksum"], "approved": d["approved_repo"]}
-                       for d in docs if set(d["dd_tags"] or []) & set(i["tags"])]}
+                       for d in docs if set(json_obj(d["dd_tags"], [])) & set(i["tags"])]}
         for i in items
     ]  # fmt: skip
 
@@ -412,16 +470,18 @@ async def detail(s: AsyncSession, pid: str) -> dict[str, Any]:
             )
         ).mappings().all()
     ]  # fmt: skip
-    out["open_gaps"] = sum(1 for g in _all_gaps(list(p["sections"]), list(p["waivers"] or [])) if not g["waived"])
-    out["catalogue"] = {a: packages()["artefacts"][a] for a in p["artefacts"]}
+    out["open_gaps"] = sum(1 for g in _all_gaps(list(out["sections"]), list(out["waivers"] or [])) if not g["waived"])
+    out["catalogue"] = {a: packages()["artefacts"][a] for a in out["artefacts"]}
     return out
 
 
 async def version(s: AsyncSession, pid: str, v: int) -> dict[str, Any]:
+    is_my = is_mysql_session(s)
+    p_clause = ":p" if is_my else "CAST(:p AS uuid)"
     r = (
         (
             await s.execute(
-                text("SELECT * FROM proposal_version WHERE proposal_id = CAST(:p AS uuid) AND version = :v"),
+                text(f"SELECT * FROM proposal_version WHERE proposal_id = {p_clause} AND version = :v"),
                 {"p": pid, "v": v},
             )
         )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -25,7 +26,9 @@ from cortex.l8_actuation.proposal_builder import gap, packages
 from platform_core import objectstore
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
+from platform_core.db import is_mysql_session, order_by_nulls
 from platform_core.errors import NotFound, Problem
+from platform_core.jsonutil import row
 from platform_core.signing import content_hash
 
 BUCKET = "cortex-docs"
@@ -37,15 +40,32 @@ async def build(
     s: AsyncSession, actor: Principal, start: date, end: date, include_demo: bool
 ) -> tuple[list[dict[str, Any]], str]:
     org = get_settings().org_id
-    run_id = str(
-        (
-            await s.execute(
-                text("INSERT INTO agent_run (org_id, agent, task, requested_by, model_tier, status, started_at, mode, input) VALUES "
-                     "(:org, 'board_intelligence', 'board', :by, 'none', 'running', now(), 'deterministic', CAST(:i AS jsonb)) RETURNING id"),
-                {"org": org, "by": actor.sub, "i": json.dumps({"period": [start.isoformat(), end.isoformat()], "include_demo": include_demo})},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    is_my = is_mysql_session(s)
+    if is_my:
+        new_run_id = uuid.uuid4()
+        run_id = str(new_run_id)
+        await s.execute(
+            text(
+                "INSERT INTO agent_run (id, org_id, agent, task, requested_by, model_tier, status, started_at, mode, input) VALUES "
+                "(:id, :org, 'board_intelligence', 'board', :by, 'none', 'running', NOW(), 'deterministic', CAST(:i AS JSON))"
+            ),
+            {
+                "id": run_id,
+                "org": org,
+                "by": actor.sub,
+                "i": json.dumps({"period": [start.isoformat(), end.isoformat()], "include_demo": include_demo}),
+            },
+        )
+    else:
+        run_id = str(
+            (
+                await s.execute(
+                    text("INSERT INTO agent_run (org_id, agent, task, requested_by, model_tier, status, started_at, mode, input) VALUES "
+                         "(:org, 'board_intelligence', 'board', :by, 'none', 'running', now(), 'deterministic', CAST(:i AS jsonb)) RETURNING id"),
+                    {"org": org, "by": actor.sub, "i": json.dumps({"period": [start.isoformat(), end.isoformat()], "include_demo": include_demo})},
+                )
+            ).scalar_one()
+        )  # fmt: skip
     ctx = ToolContext(
         s,
         actor,
@@ -63,13 +83,22 @@ async def build(
         pack[r.key] = r.data
         claims[sec] += r.facts
         gaps[sec] += r.gaps
+    if is_my:
+        cls_col = "CAST(class AS CHAR) AS class"
+        order_col = order_by_nulls("score", asc=False, nulls_last=True)
+        top_sql = (
+            f"SELECT id, title, {cls_col}, score, score_band, deadline, amount_max, currency FROM opportunity WHERE org_id = :org "
+            f"AND status = 'active' AND score_band IN ('high','watchlist') AND (:demo OR NOT is_demo) ORDER BY {order_col} LIMIT 5"
+        )
+    else:
+        top_sql = (
+            "SELECT id, title, class::text AS class, score, score_band, deadline, amount_max, currency FROM opportunity WHERE org_id = :org "
+            "AND status = 'active' AND score_band IN ('high','watchlist') AND (:demo OR NOT is_demo) ORDER BY score DESC NULLS LAST LIMIT 5"
+        )
     top = (
         (
             await s.execute(
-                text(
-                    "SELECT id, title, class::text AS class, score, score_band, deadline, amount_max, currency FROM opportunity WHERE org_id = :org "
-                    "AND status = 'active' AND score_band IN ('high','watchlist') AND (:demo OR NOT is_demo) ORDER BY score DESC NULLS LAST LIMIT 5"
-                ),
+                text(top_sql),
                 {"org": org, "demo": include_demo},
             )
         )
@@ -83,12 +112,13 @@ async def build(
                                             "kind": "fact", "evidence": [f"opportunity:{o['id']}"], "basis": []})  # fmt: skip
     if not top:
         gaps["key_opportunities"].append("no scored opportunities in the high or watchlist band")
+    date_filter = "DATE(oc.closed_at)" if is_my else "oc.closed_at::date"
     oc = (
         (
             await s.execute(
                 text(
-                    "SELECT oc.id, oc.result, oc.amount, oc.currency, op.title FROM outcome oc JOIN opportunity op ON op.id = oc.opportunity_id "
-                    "WHERE oc.org_id = :org AND oc.closed_at::date BETWEEN :a AND :b AND (:demo OR NOT oc.is_demo) ORDER BY oc.closed_at DESC LIMIT 10"
+                    f"SELECT oc.id, oc.result, oc.amount, oc.currency, op.title FROM outcome oc JOIN opportunity op ON op.id = oc.opportunity_id "
+                    f"WHERE oc.org_id = :org AND {date_filter} BETWEEN :a AND :b AND (:demo OR NOT oc.is_demo) ORDER BY oc.closed_at DESC LIMIT 10"
                 ),
                 {"org": org, "a": start, "b": end, "demo": include_demo},
             )
@@ -139,9 +169,10 @@ async def build(
                                "kind": "fact", "evidence": [f"organization:{me['id']}#profile.raise_target"], "basis": []})  # fmt: skip
     else:
         gaps["asks"].append("raise target in the organisation profile")
+    cast_json = "JSON" if is_my else "jsonb"
     await s.execute(
         text(
-            "UPDATE agent_run SET status = 'succeeded', finished_at = now(), output = CAST(:o AS jsonb) WHERE id = :id"
+            f"UPDATE agent_run SET status = 'succeeded', finished_at = now(), output = CAST(:o AS {cast_json}) WHERE id = :id"
         ),
         {"o": json.dumps({"evidence_pack": pack}, default=str), "id": run_id},
     )
@@ -168,19 +199,43 @@ async def create(
     sections, run_id = await build(s, actor, start, end, include_demo)
     content = {"sections": sections, "run_id": run_id, "include_demo": include_demo}
     review = await compliance_check.review(sections, has_disclaimer=True)
-    rid = str(
-        (
-            await s.execute(
-                text(
-                    "INSERT INTO board_report (org_id, period_start, period_end, title, status, content, content_hash, compliance, recipients, "
-                    "created_by, is_demo) VALUES (:org, :a, :b, :t, 'draft', CAST(:c AS jsonb), :h, CAST(:cmp AS jsonb), :r, :by, :demo) RETURNING id"
-                ),
-                {"org": get_settings().org_id, "a": start, "b": end, "t": f"Board pack {start.isoformat()} to {end.isoformat()}",
-                 "c": json.dumps(content), "h": report_hash(content, recipients), "cmp": json.dumps(review),
-                 "r": [x.lower() for x in recipients], "by": actor.sub, "demo": include_demo},
-            )
-        ).scalar_one()
-    )  # fmt: skip
+    is_my = is_mysql_session(s)
+    if is_my:
+        new_rid = uuid.uuid4()
+        rid = str(new_rid)
+        await s.execute(
+            text(
+                "INSERT INTO board_report (id, org_id, period_start, period_end, title, status, content, content_hash, compliance, recipients, "
+                "created_by, is_demo) VALUES (:id, :org, :a, :b, :t, 'draft', CAST(:c AS JSON), :h, CAST(:cmp AS JSON), CAST(:r AS JSON), :by, :demo)"
+            ),
+            {
+                "id": rid,
+                "org": get_settings().org_id,
+                "a": start,
+                "b": end,
+                "t": f"Board pack {start.isoformat()} to {end.isoformat()}",
+                "c": json.dumps(content),
+                "h": report_hash(content, recipients),
+                "cmp": json.dumps(review),
+                "r": json.dumps([x.lower() for x in recipients]),
+                "by": actor.sub,
+                "demo": include_demo,
+            },
+        )
+    else:
+        rid = str(
+            (
+                await s.execute(
+                    text(
+                        "INSERT INTO board_report (org_id, period_start, period_end, title, status, content, content_hash, compliance, recipients, "
+                        "created_by, is_demo) VALUES (:org, :a, :b, :t, 'draft', CAST(:c AS jsonb), :h, CAST(:cmp AS jsonb), :r, :by, :demo) RETURNING id"
+                    ),
+                    {"org": get_settings().org_id, "a": start, "b": end, "t": f"Board pack {start.isoformat()} to {end.isoformat()}",
+                     "c": json.dumps(content), "h": report_hash(content, recipients), "cmp": json.dumps(review),
+                     "r": [x.lower() for x in recipients], "by": actor.sub, "demo": include_demo},
+                )
+            ).scalar_one()
+        )  # fmt: skip
     await audit_service.record(
         s, actor, "board_report.created", f"board_report:{rid}", {"period": [str(start), str(end)], "run_id": run_id}
     )
@@ -193,10 +248,12 @@ async def create(
 
 
 async def get(s: AsyncSession, rid: str) -> dict[str, Any]:
+    is_my = is_mysql_session(s)
+    id_clause = ":id" if is_my else "CAST(:id AS uuid)"
     r = (
         (
             await s.execute(
-                text("SELECT * FROM board_report WHERE id = CAST(:id AS uuid) AND org_id = :org"),
+                text(f"SELECT * FROM board_report WHERE id = {id_clause} AND org_id = :org"),
                 {"id": rid, "org": get_settings().org_id},
             )
         )
@@ -205,7 +262,7 @@ async def get(s: AsyncSession, rid: str) -> dict[str, Any]:
     )
     if r is None:
         raise NotFound("board report not found")
-    return dict(r)
+    return row(r)
 
 
 async def model(s: AsyncSession, actor: Principal, r: dict[str, Any]) -> ag.DocModel:
@@ -254,9 +311,13 @@ async def distribute_on_approval(s: AsyncSession, approver: Principal, rid: str,
     sha = hashlib.sha256(data).hexdigest()
     key = f"board/{rid}/board-pack-{r['period_end']}.{fmt}"
     await objectstore.put_bytes(BUCKET, key, data, ag.CONTENT_TYPES[fmt])
-    requester = (
-        await s.execute(text("SELECT requested_by FROM approval WHERE id = CAST(:id AS uuid)"), {"id": approval_id})
-    ).scalar()
+    is_my = is_mysql_session(s)
+    app_id_sql = (
+        "SELECT requested_by FROM approval WHERE id = :id"
+        if is_my
+        else "SELECT requested_by FROM approval WHERE id = CAST(:id AS uuid)"
+    )
+    requester = (await s.execute(text(app_id_sql), {"id": approval_id})).scalar()
     log = []
     for to in r["recipients"]:
         payload = {"to": to, "subject": r["title"], "board_report_id": rid, "board_report_hash": r["content_hash"],
@@ -270,12 +331,25 @@ async def distribute_on_approval(s: AsyncSession, approver: Principal, rid: str,
             s, approver, req["approval_id"], "approved", f"covered by board report approval {approval_id}"
         )
         log.append({"to": to, "outbox_id": d["id"], "approval": res["status"]})
-    await s.execute(
-        text(
-            "UPDATE board_report SET status = 'distributed', distribution = distribution || CAST(:d AS jsonb) WHERE id = :id"
-        ),
-        {"d": json.dumps([{**x, "at": datetime.now(UTC).isoformat(), "sha256": sha} for x in log]), "id": r["id"]},
-    )
+    if is_my:
+        await s.execute(
+            text(
+                "UPDATE board_report SET status = 'distributed', "
+                "distribution = JSON_MERGE_PRESERVE(COALESCE(distribution, JSON_ARRAY()), CAST(:d AS JSON)) "
+                "WHERE id = :id"
+            ),
+            {
+                "d": json.dumps([{**x, "at": datetime.now(UTC).isoformat(), "sha256": sha} for x in log]),
+                "id": str(r["id"]),
+            },
+        )
+    else:
+        await s.execute(
+            text(
+                "UPDATE board_report SET status = 'distributed', distribution = distribution || CAST(:d AS jsonb) WHERE id = :id"
+            ),
+            {"d": json.dumps([{**x, "at": datetime.now(UTC).isoformat(), "sha256": sha} for x in log]), "id": r["id"]},
+        )
     await audit_service.record(
         s, approver, "board_report.distribution_queued", f"board_report:{rid}", {"recipients": len(log), "sha256": sha}
     )

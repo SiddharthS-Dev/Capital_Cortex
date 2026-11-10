@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
 
-const SHOTS = "../../docs/screenshots";
+// Untracked test artefacts (git-ignored apps/web/test-results/): E2E runs never overwrite the committed documentation
+// screenshots. Refresh docs/screenshots deliberately with E2E_SCREENSHOT_DIR=../../docs/screenshots.
+const SHOTS = process.env.E2E_SCREENSHOT_DIR ?? "test-results/screenshots";
 
 function admin(): { email: string; password: string } | null {
   try {

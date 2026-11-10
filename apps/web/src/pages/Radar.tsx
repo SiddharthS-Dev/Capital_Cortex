@@ -14,7 +14,7 @@ import { Badge, Card, CardContent, Input } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { BANDS, CLASS_LABELS, CLASSES, amountRange, label, pct, relativeDeadline, STAGE_LABELS, STAGES, timeAgo } from "@/lib/format";
 import { useLive } from "@/lib/live";
-import { useMe, usePermission } from "@/lib/queries";
+import { useMe, useMeta, usePermission } from "@/lib/queries";
 import type { OpportunityList, OpportunityListItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -161,7 +161,10 @@ export function Radar() {
   const base = new URLSearchParams();
   FACET_KEYS.forEach((k) => f.get(k).forEach((v) => base.append(k, v)));
   if (f.sp.get("q")) base.set("q", f.sp.get("q")!);
-  const originParam = f.sp.get("origin");
+  // Outside DEMO_MODE (production / live deployments) the Radar opens on ingested records only; synthetic rows stay
+  // one click away under "Demo / Synthetic" or "All" (origin=all). DEMO_MODE keeps "All" as the default.
+  const { data: meta } = useMeta();
+  const originParam = f.sp.get("origin") ?? (meta && !meta.demo_mode ? "ingested" : null);
   const origin: Origin | null = originParam === "ingested" || originParam === "demo" ? originParam : null;
   const params = new URLSearchParams(base);
   if (origin) params.set("demo", String(origin === "demo"));
@@ -254,7 +257,7 @@ export function Radar() {
       </aside>
 
       <div className="min-w-0 flex-1 space-y-3">
-        <ProvenanceBar origin={origin} onSelect={(o) => f.set("origin", o)}
+        <ProvenanceBar origin={origin} onSelect={(o) => f.set("origin", o ?? "all")}
           counts={{ ingested: ingestedQ.data?.total, demo: demoQ.data?.total }}
           apiOk={query.isSuccess} apiError={query.isError || ingestedQ.isError || demoQ.isError} streaming={streaming}
           filtered={base.toString() !== ""}

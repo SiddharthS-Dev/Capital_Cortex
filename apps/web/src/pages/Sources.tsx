@@ -9,7 +9,7 @@ import { currentUser } from "@/lib/auth";
 import { config } from "@/lib/config";
 import { CLASS_LABELS, CLASSES, dateTime, timeAgo } from "@/lib/format";
 import { usePermission } from "@/lib/queries";
-import type { SourceItem, SourceRun } from "@/lib/types";
+import type { SourceItem, SourceRun, TrackedRun } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const HEALTH: Record<string, { icon: typeof CircleCheck; tone: string; text: string }> = {
@@ -44,6 +44,49 @@ function RunsDrawer({ source }: { source: SourceItem }) {
           <td className="tabular-nums">{r.items_fetched}</td><td className="tabular-nums">{r.items_new}</td><td className="tabular-nums">{r.items_duplicate}</td>
           <td className="tabular-nums">{r.items_failed}</td><td className="max-w-md break-words text-muted-foreground">{r.error ?? ""}</td></tr>))}</tbody>
     </table>
+  );
+}
+
+/** Polls one queued run until it finishes; reports its real outcome only then (never an early "success"). */
+function useTrackedRun(sourceId: string, runId: string | undefined) {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: ["source-run", sourceId, runId],
+    enabled: !!runId,
+    queryFn: async () => {
+      const r = await api<TrackedRun>(`/v1/sources/${sourceId}/runs/${runId}`);
+      if (r.status !== "queued" && r.status !== "running") {
+        qc.invalidateQueries({ queryKey: ["sources"] });
+        qc.invalidateQueries({ queryKey: ["source-runs", sourceId] });
+      }
+      return r;
+    },
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === undefined || s === "queued" || s === "running" ? 2_000 : false;
+    },
+  });
+}
+
+function RunOutcome({ run }: { run: TrackedRun | undefined }) {
+  if (!run || run.status === "queued" || run.status === "running") return null;
+  const counts = `${run.items_fetched} fetched · ${run.items_new} new · ${run.items_duplicate} duplicates · ${run.items_failed} failed`;
+  if (run.status === "failed") return <div className="mt-1 max-w-56 text-[11px] text-destructive">Run failed: {run.error ?? "see run history"}</div>;
+  return <div className={cn("mt-1 max-w-56 text-[11px]", run.status === "partial" ? "text-warning" : "text-success")}>
+    {run.status === "partial" ? "Finished with item errors: " : "Run finished: "}{counts}</div>;
+}
+
+function RunButton({ source, runId, onRun, disabled }: { source: SourceItem; runId?: string; onRun: () => void; disabled: boolean }) {
+  const tracked = useTrackedRun(source.id, runId);
+  const s = tracked.data?.status;
+  const busy = !!runId && (s === undefined || s === "queued" || s === "running");
+  return (
+    <div>
+      <Button size="sm" variant="outline" disabled={disabled || busy} onClick={onRun}>
+        {busy ? <Loader2 className="animate-spin" /> : <Play />} {busy ? (s === "running" ? "Running…" : "Queued…") : "Run now"}
+      </Button>
+      <RunOutcome run={tracked.data} />
+    </div>
   );
 }
 
@@ -82,7 +125,9 @@ export function Sources() {
   const [uploadFor, setUploadFor] = useState<string | null>(null);
   const q = useQuery({ queryKey: ["sources"], queryFn: () => api<{ items: SourceItem[] }>("/v1/sources"), refetchInterval: 15_000 });
   const dlq = useQuery({ queryKey: ["dlq"], queryFn: () => api<{ items: Record<string, string>[] }>("/v1/ingestion/dlq?stream=signals.raw") });
-  const run = useMutation({ mutationFn: (id: string) => api(`/v1/sources/${id}/run`, { method: "POST" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
+  const [runIds, setRunIds] = useState<Record<string, string>>({}); // source id → the run Run now queued
+  const run = useMutation({ mutationFn: (id: string) => api<{ run_id: string }>(`/v1/sources/${id}/run`, { method: "POST" }),
+                            onSuccess: (r, id) => setRunIds((m) => ({ ...m, [id]: r.run_id })) });
   const toggle = useMutation({ mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api(`/v1/sources/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
                                onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
   const upload = useMutation({ mutationFn: ({ id, file }: { id: string; file: File }) => uploadFile(id, file), onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }) });
@@ -129,7 +174,8 @@ export function Sources() {
                             <Button size="sm" variant="outline" disabled={!s.enabled || upload.isPending} onClick={() => { setUploadFor(s.id); fileRef.current?.click(); }}>
                               {upload.isPending ? <Loader2 className="animate-spin" /> : <Upload />} Upload</Button>
                           ) : s.adapter !== "manual" ? (
-                            <Button size="sm" variant="outline" disabled={!s.enabled || running || run.isPending} onClick={() => run.mutate(s.id)}><Play /> Run now</Button>
+                            <RunButton source={s} runId={runIds[s.id]} disabled={!s.enabled || running || (run.isPending && run.variables === s.id)}
+                              onRun={() => run.mutate(s.id)} />
                           ) : null}
                           <Button size="sm" variant="ghost" onClick={() => toggle.mutate({ id: s.id, enabled: !s.enabled })}>{s.enabled ? "Disable" : "Enable"}</Button>
                         </div>
@@ -143,6 +189,7 @@ export function Sources() {
           </table>
           {upload.data && <p className="mt-2 text-sm text-success">Upload processed: {upload.data.new} new, {upload.data.duplicate} duplicates, {upload.data.failed} rows skipped{upload.data.errors?.length ? `: ${upload.data.errors.slice(0, 3).join("; ")}` : ""}.</p>}
           {upload.isError && <p className="mt-2 text-sm text-destructive">{(upload.error as Error).message}</p>}
+          {run.isError && <p className="mt-2 text-sm text-destructive">Run not started: {(run.error as Error).message}</p>}
           <p className="mt-2 text-xs text-muted-foreground">CSV/XLSX headers are matched case-insensitively: title, organization, country, deadline, amount_min, amount_max, currency, class, url, stage, sectors, description.</p>
         </CardContent>
       </Card>

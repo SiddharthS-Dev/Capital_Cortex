@@ -15,24 +15,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.l3_memory import relationship_service as rs
 from platform_core.config import get_settings
+from platform_core.db.compat import in_clause, is_mysql_session
 
 
 async def _contacts_by_email(s: AsyncSession, addrs: list[str]) -> dict[str, dict[str, Any]]:
-    if not addrs:
+    addrs_clean = [a.strip().lower() for a in addrs if a and a.strip()]
+    if not addrs_clean:
         return {}
-    rows = (
-        (
-            await s.execute(
-                text(
-                    "SELECT id, organization_id, lower(e) AS email, is_demo FROM contact, unnest(emails) e "
-                    "WHERE org_id = :org AND lower(e) = ANY(:a)"
-                ),
-                {"org": get_settings().org_id, "a": [a.lower() for a in addrs]},
-            )
+    params: dict[str, Any] = {"org": get_settings().org_id}
+    if is_mysql_session(s):
+        addr_in = in_clause("LOWER(jt.email)", "a", addrs_clean, params)
+        sql = (
+            "SELECT c.id, c.organization_id, LOWER(jt.email) AS email, c.is_demo "
+            "FROM contact c, "
+            "JSON_TABLE(c.emails, '$[*]' COLUMNS (email VARCHAR(255) PATH '$')) jt "
+            f"WHERE c.org_id = :org AND {addr_in}"
         )
-        .mappings()
-        .all()
-    )
+    else:
+        params["a"] = addrs_clean
+        sql = (
+            "SELECT id, organization_id, lower(e) AS email, is_demo FROM contact, unnest(emails) e "
+            "WHERE org_id = :org AND lower(e) = ANY(:a)"
+        )
+    rows = (await s.execute(text(sql), params)).mappings().all()
     return {r["email"]: dict(r) for r in rows}
 
 
@@ -52,6 +57,8 @@ async def ingest(
     when = datetime.fromisoformat(raw["occurred_at"]) if raw.get("occurred_at") else None
     if when is None:
         return {"interactions": 0, "reason": "no timestamp"}
+    if when.tzinfo is None:  # an offset-less timestamp is UTC, as everywhere else (comparing it would raise)
+        when = when.replace(tzinfo=UTC)
     if raw.get("kind") == "event":
         if when > datetime.now(UTC):
             return {"interactions": 0, "reason": "future event (becomes an interaction once it has happened)"}
@@ -60,9 +67,10 @@ async def ingest(
         found = await _contacts_by_email(s, [*(raw.get("attendees") or []), raw.get("organizer") or ""])
         if not found:
             return {"interactions": 0, "reason": "no known contact attended"}
+        ext_expr = "source_ref ->> '$.external_id'" if is_mysql_session(s) else "source_ref ->> 'external_id'"
         exists = (
             await s.execute(
-                text("SELECT 1 FROM meeting WHERE org_id = :org AND source_ref ->> 'external_id' = :x"),
+                text(f"SELECT 1 FROM meeting WHERE org_id = :org AND {ext_expr} = :x"),
                 {"org": get_settings().org_id, "x": raw.get("external_id")},
             )
         ).scalar()
@@ -73,14 +81,20 @@ async def ingest(
             summary=raw.get("subject"), source_ref=src, external_id=raw.get("external_id"),
             is_demo=any(c["is_demo"] for c in found.values()),
         )  # fmt: skip
-        return {"interactions": len(found), "meeting_id": out["id"]}
+        # one interaction per contact (log_meeting de-duplicates), not per matched address
+        return {"interactions": len({str(c["id"]) for c in found.values()}), "meeting_id": out["id"]}
     if raw.get("kind") == "email":
         frm = raw.get("from")
         recipients = list(raw.get("to") or []) + list(raw.get("cc") or [])
         outbound = _ours(frm, self_addresses)
         found = await _contacts_by_email(s, recipients if outbound else [frm or ""])
         n = 0
-        for addr, c in found.items():
+        # one interaction per contact: a contact reached at two of its addresses is still one touch (warmth); the
+        # first address in sorted order keys the external id, so a re-read of the same message is still a duplicate
+        per_contact: dict[str, tuple[str, dict[str, Any]]] = {}
+        for addr, c in sorted(found.items()):
+            per_contact.setdefault(str(c["id"]), (addr, c))
+        for addr, c in per_contact.values():
             res = await rs.log_interaction(
                 s, actor, kind="email_sent" if outbound else "email_reply", occurred_at=min(when, datetime.now(UTC)),
                 contact_id=str(c["id"]), summary=raw.get("subject"), direction="outbound" if outbound else "inbound",

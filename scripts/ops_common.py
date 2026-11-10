@@ -82,11 +82,11 @@ def setting(name: str, default: str) -> str:
     return v if v else default
 
 
-PG_PASSWORD = setting("POSTGRES_PASSWORD", "cortex-dev-pw")
+PG_PASSWORD = setting("POSTGRES_PASSWORD", "")  # no committed fallback; checked in pg_connect()
 PG_PORT = int(setting("PG_PORT", "55432"))
 MINIO_ENDPOINT = f"localhost:{setting('MINIO_PORT', '9300')}"
 MINIO_USER = setting("MINIO_ROOT_USER", "cortex")
-MINIO_PASSWORD = setting("MINIO_ROOT_PASSWORD", "cortex-dev-minio")
+MINIO_PASSWORD = setting("MINIO_ROOT_PASSWORD", "")  # no committed fallback; checked in minio_client()
 PG_CONTAINER = setting("CORTEX_PG_CONTAINER", f"{PROJECT}-postgres-1")
 
 
@@ -144,6 +144,8 @@ def psql(container: str, sql: str, db: str = "cortex", user: str = "cortex") -> 
 
 
 def minio_client():  # type: ignore[no-untyped-def]
+    if not MINIO_PASSWORD:
+        raise SystemExit("set MINIO_ROOT_PASSWORD in .env or the environment (no committed default)")
     from minio import Minio
 
     return Minio(MINIO_ENDPOINT, access_key=MINIO_USER, secret_key=MINIO_PASSWORD, secure=False)
@@ -151,6 +153,9 @@ def minio_client():  # type: ignore[no-untyped-def]
 
 def pg_connect(port: int = PG_PORT, db: str = "cortex", **kw: Any):  # type: ignore[no-untyped-def]
     import psycopg
+
+    if not PG_PASSWORD:
+        raise SystemExit("set POSTGRES_PASSWORD in .env or the environment (no committed default)")
 
     return psycopg.connect(
         host="127.0.0.1", port=port, user="cortex", password=PG_PASSWORD, dbname=db, connect_timeout=10, **kw

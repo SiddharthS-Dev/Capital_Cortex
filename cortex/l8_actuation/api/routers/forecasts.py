@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,7 +22,7 @@ from cortex.l8_actuation.api.common import row
 from platform_core.auth.deps import authorize
 from platform_core.auth.principal import Principal
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session
 from platform_core.errors import Problem
 
 router = APIRouter(prefix="/v1/forecasts", tags=["forecasts"])
@@ -122,24 +123,47 @@ async def import_snapshots(
             "at": datetime.now(UTC).isoformat(),
             "mapping": m,
         }
-        await session.execute(
-            text(
-                "INSERT INTO financial_snapshot (org_id, period, cash, revenue, opex, net_burn, currency, source_ref) "
-                "VALUES (:org, :period, :cash, :rev, :opex, :burn, :ccy, CAST(:src AS jsonb)) ON CONFLICT (org_id, period) "
-                "DO UPDATE SET cash = EXCLUDED.cash, revenue = EXCLUDED.revenue, opex = EXCLUDED.opex, "
-                "net_burn = EXCLUDED.net_burn, currency = EXCLUDED.currency, source_ref = EXCLUDED.source_ref, is_demo = false"
-            ),
-            {
-                "org": get_settings().org_id,
-                "period": period.date().replace(day=1),
-                "cash": vals["cash"],
-                "rev": vals["revenue"],
-                "opex": vals["opex"],
-                "burn": vals["net_burn"],
-                "ccy": ccy,
-                "src": json.dumps(src),
-            },
-        )
+        is_my = is_mysql_session(session)
+        if is_my:
+            new_id = uuid.uuid4()
+            await session.execute(
+                text(
+                    "INSERT INTO financial_snapshot (id, org_id, period, cash, revenue, opex, net_burn, currency, source_ref) "
+                    "VALUES (:id, :org, :period, :cash, :rev, :opex, :burn, :ccy, CAST(:src AS JSON)) "
+                    "ON DUPLICATE KEY UPDATE cash = VALUES(cash), revenue = VALUES(revenue), opex = VALUES(opex), "
+                    "net_burn = VALUES(net_burn), currency = VALUES(currency), source_ref = VALUES(source_ref), is_demo = false"
+                ),
+                {
+                    "id": str(new_id),
+                    "org": get_settings().org_id,
+                    "period": period.date().replace(day=1),
+                    "cash": vals["cash"],
+                    "rev": vals["revenue"],
+                    "opex": vals["opex"],
+                    "burn": vals["net_burn"],
+                    "ccy": ccy,
+                    "src": json.dumps(src),
+                },
+            )
+        else:
+            await session.execute(
+                text(
+                    "INSERT INTO financial_snapshot (org_id, period, cash, revenue, opex, net_burn, currency, source_ref) "
+                    "VALUES (:org, :period, :cash, :rev, :opex, :burn, :ccy, CAST(:src AS jsonb)) ON CONFLICT (org_id, period) "
+                    "DO UPDATE SET cash = EXCLUDED.cash, revenue = EXCLUDED.revenue, opex = EXCLUDED.opex, "
+                    "net_burn = EXCLUDED.net_burn, currency = EXCLUDED.currency, source_ref = EXCLUDED.source_ref, is_demo = false"
+                ),
+                {
+                    "org": get_settings().org_id,
+                    "period": period.date().replace(day=1),
+                    "cash": vals["cash"],
+                    "rev": vals["revenue"],
+                    "opex": vals["opex"],
+                    "burn": vals["net_burn"],
+                    "ccy": ccy,
+                    "src": json.dumps(src),
+                },
+            )
         imported += 1
     await audit_service.record(
         session,
@@ -223,14 +247,17 @@ async def create(
             "computed_by": "forecast_engine",
         }
         src = {"kind": "computed", "engine": "forecast_engine", "inputs": inputs_ref}
-        fid = (
+        is_my = is_mysql_session(session)
+        if is_my:
+            fid = uuid.uuid4()
             await session.execute(
                 text(
-                    "INSERT INTO forecast (org_id, scenario, horizon_months, status, series, runway_months, zero_cash_date, "
-                    "assumptions, inputs_ref, source_ref) VALUES (:org, :sc, :h, :st, CAST(:series AS jsonb), :rw, :zc, "
-                    "CAST(:as AS jsonb), CAST(:ir AS jsonb), CAST(:src AS jsonb)) RETURNING id"
+                    "INSERT INTO forecast (id, org_id, scenario, horizon_months, status, series, runway_months, zero_cash_date, "
+                    "assumptions, inputs_ref, source_ref) VALUES (:id, :org, :sc, :h, :st, CAST(:series AS JSON), :rw, :zc, "
+                    "CAST(:as AS JSON), CAST(:ir AS JSON), CAST(:src AS JSON))"
                 ),
                 {
+                    "id": str(fid),
                     "org": get_settings().org_id,
                     "sc": r["scenario"],
                     "h": r["horizon_months"],
@@ -243,7 +270,28 @@ async def create(
                     "src": json.dumps(src, default=str),
                 },
             )
-        ).scalar_one()
+        else:
+            fid = (
+                await session.execute(
+                    text(
+                        "INSERT INTO forecast (org_id, scenario, horizon_months, status, series, runway_months, zero_cash_date, "
+                        "assumptions, inputs_ref, source_ref) VALUES (:org, :sc, :h, :st, CAST(:series AS jsonb), :rw, :zc, "
+                        "CAST(:as AS jsonb), CAST(:ir AS jsonb), CAST(:src AS jsonb)) RETURNING id"
+                    ),
+                    {
+                        "org": get_settings().org_id,
+                        "sc": r["scenario"],
+                        "h": r["horizon_months"],
+                        "st": r["status"],
+                        "series": json.dumps(r["series"], default=str),
+                        "rw": r["runway_months"] if r["status"] == "ok" else None,
+                        "zc": r["zero_cash_date"] if r["status"] == "ok" else None,
+                        "as": json.dumps(r.get("inputs", {}), default=str),
+                        "ir": json.dumps(inputs_ref, default=str),
+                        "src": json.dumps(src, default=str),
+                    },
+                )
+            ).scalar_one()
         ids.append(str(fid))
     await audit_service.record(session, p, "forecast.create", "forecast:*", {"ids": ids})
     return {"ids": ids, **out}

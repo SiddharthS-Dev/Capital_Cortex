@@ -3,8 +3,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -12,9 +13,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  PG_IMAGE: capital-cortex/postgres:16-age1.5.0-pgvector0.8.0
 
 jobs:
   lint:
@@ -42,6 +40,23 @@ jobs:
   unit:
     needs: lint
     runs-on: ubuntu-latest
+    # The MySQL-backed unit tests (repository SQL, JSON/DATETIME compatibility, runtime verification) run against a
+    # throwaway MySQL 8.4 service with its own `cortex_unit` schema built by the MySQL migration history. Same model as
+    # mysql-schema: per-run password, never leaves the runner, no repository secret.
+    env:
+      MYSQL_TEST_HOST: 127.0.0.1
+      MYSQL_TEST_PORT: "3306"
+      MYSQL_TEST_USER: root  # ephemeral server: trigger creation needs it without log_bin_trust_function_creators
+      MYSQL_TEST_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      MYSQL_TEST_DATABASE: cortex_unit
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent" --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,11 +64,61 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json}
       - run: pip install -e ".[dev]"
-      - run: pytest -q --cov=platform_core --cov=cortex --cov-report=term
+      - name: Unit schema at the MySQL migration head
+        run: |
+          python -c "import os, pymysql; pymysql.connect(host='127.0.0.1', port=3306, user='root', password=os.environ['MYSQL_TEST_PASSWORD']).cursor().execute('CREATE DATABASE cortex_unit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci')"
+          DATABASE_URL="mysql+asyncmy://root:${MYSQL_TEST_PASSWORD}@127.0.0.1:3306/cortex_unit" alembic -n mysql upgrade head
+      # test_mysql_keycloak.py logs real users in through a live Keycloak realm backed by the demo MySQL: it runs in
+      # the local/stack validation (KEYCLOAK_TEST_URL), not on a bare runner.
+      - run: pytest -q --cov=platform_core --cov=cortex --cov-report=term --ignore=tests/unit/test_mysql_keycloak.py
       - name: Rego policy tests
         run: docker run --rm -v "$PWD/config/policies:/policies:ro" openpolicyagent/opa:0.70.0 test /policies -v
       - run: npm ci && npx vitest run
         working-directory: apps/web
+
+  # MySQL 8.4 schema gate: the migration history builds from empty, re-runs as a no-op, and two independent builds
+  # show no drift (scripts/check_mysql_schema_drift.py exits 1 on any). A throwaway service container only: no
+  # repository secret, no production access; its password is derived from the run id and never leaves the runner.
+  mysql-schema:
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      MYSQL_TEST_HOST: 127.0.0.1
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_TEST_PORT: "3306"
+      MYSQL_TEST_USER: root  # the ephemeral server's root: trigger creation needs it without log_bin_trust_function_creators
+      MYSQL_TEST_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      MYSQL_TEST_DATABASE: cortex_ci_a
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent" --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - name: Build the schema twice from empty with the MySQL migration history
+        run: |
+          python - <<'PY'
+          import os, pymysql
+          c = pymysql.connect(host="127.0.0.1", port=3306, user="root", password=os.environ["MYSQL_TEST_PASSWORD"])
+          for db in ("cortex_ci_a", "cortex_ci_b"):
+              c.cursor().execute(f"CREATE DATABASE {db} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
+          PY
+          for db in cortex_ci_a cortex_ci_b; do
+            DATABASE_URL="mysql+asyncmy://root:${MYSQL_TEST_PASSWORD}@127.0.0.1:3306/$db" alembic -n mysql upgrade head
+          done
+      - name: Re-running the migrations is a no-op
+        run: DATABASE_URL="mysql+asyncmy://root:${MYSQL_TEST_PASSWORD}@127.0.0.1:3306/cortex_ci_a" alembic -n mysql upgrade head
+      - name: Schema drift check (non-zero exit on any drift)
+        run: python scripts/check_mysql_schema_drift.py --reference cortex_ci_a --targets cortex_ci_b
+      - name: Drift-checker and legacy-reconciliation tests
+        run: pytest -q tests/unit/test_check_mysql_schema_drift.py tests/unit/test_mysql_m0004_reconcile.py
 
   integration:
     needs: unit
@@ -63,7 +128,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12", cache: pip}
       - run: pip install -e ".[dev]"
-      - run: docker build -t "$PG_IMAGE" infra/postgres
+      # MySQL 8.4 in a Testcontainer (no MYSQL_TEST_* here); the 3 PostgreSQL-only tests skip until ARCH-4.
       - run: pytest -q -m integration tests/integration
 
   contract:
@@ -94,11 +159,38 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install httpx
-      - run: pip install -e .  # scripts/backup.py + restore_drill.py (minio, psycopg, platform_core verifier)
-      - name: Build and start the full stack
+      - run: pip install -e .  # scripts/backup_mysql.py and smoke.py (minio, platform_core verifier)
+      - name: Per-run credentials and realm (nothing committed; SEC-1/SEC-2)
+        # Every stack credential is generated fresh per run and masked in the log: the TOTP seed, the dev users'
+        # password, the three Keycloak client secrets and the PostgreSQL / Keycloak-admin / MinIO / Vault / Grafana
+        # secrets (compose requires each with `:?`). The realm is regenerated here with the seed (never committed);
+        # Keycloak resolves its ${VAR} placeholders from these same variables at import.
         run: |
-          docker compose -f infra/docker-compose.yml up -d --build --wait postgres redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
-          docker compose -f infra/docker-compose.yml up -d --build minio-init migrate api worker web
+          python - <<'PY'
+          import json, os, secrets, sys
+          from pathlib import Path
+          env_out = open(os.environ["GITHUB_ENV"], "a", encoding="utf-8")
+          def put(name, value):
+              print(f"::add-mask::{value}")
+              env_out.write(f"{name}={value}\n")
+              os.environ[name] = value
+          put("SMOKE_TOTP_SECRET", secrets.token_hex(20))
+          put("SMOKE_USER_PASSWORD", f"Ci-{secrets.token_urlsafe(18)}!9Z")  # realm policy: upper, digit, special, 12+
+          for name in ("POSTGRES_PASSWORD", "KEYCLOAK_ADMIN_PASSWORD", "MINIO_ROOT_PASSWORD", "VAULT_DEV_ROOT_TOKEN",
+                       "GRAFANA_ADMIN_PASSWORD", "API_CLIENT_SECRET", "WORKER_CLIENT_SECRET", "INGESTION_CLIENT_SECRET",
+                       "MYSQL_ROOT_PASSWORD"):
+              put(name, secrets.token_urlsafe(24))
+          put("MYSQL_PASSWORD", secrets.token_hex(24))  # goes into DATABASE_URL: URL-safe characters only
+          put("MINIO_ROOT_USER", "cortex")
+          sys.path.insert(0, "infra/keycloak")
+          import generate_realm  # reads SMOKE_TOTP_SECRET from the environment at import
+          assert set(generate_realm.REALM_ENV_VARS) <= set(os.environ), "a realm placeholder has no per-run value"
+          Path("infra/keycloak/realm-cortex.json").write_text(json.dumps(generate_realm.REALM, indent=2) + "\n", encoding="utf-8")
+          PY
+      - name: Build and start the full stack (MySQL 8.4)
+        run: |
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml up -d --build --wait mysql redis minio keycloak opa vault otel-collector tempo loki prometheus grafana
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml up -d --build minio-init migrate api worker web
           timeout 300 bash -c 'until curl -sf http://localhost:8300/readyz; do sleep 3; done'
       - name: Trivy scan (app images)
         uses: aquasecurity/trivy-action@0.28.0
@@ -140,16 +232,18 @@ jobs:
         run: >-
           docker run --rm --network host -v "$PWD:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable
           zap-api-scan.py -t http://localhost:8300/v1/openapi.json -f openapi -S -I -J zap-api.json
-      - name: Backup + restore drill (D-031, RUNBOOK §8)
+      - name: Backup + restore drill on MySQL (backup, verify, restore into a new database with strict row counts)
+        # Ephemeral runner data: unencrypted is acceptable here; production backups are encrypted (MYSQL_BACKUP_*).
         run: |
-          docker compose -f infra/docker-compose.yml up -d --no-deps wal-shipper
-          python scripts/backup.py
-          python scripts/restore_drill.py --report restore-drill.json
+          python scripts/backup_mysql.py backup --container capital-cortex-mysql --databases cortex,keycloak --dest ci-backups --allow-unencrypted
+          ID=$(ls ci-backups | sort | tail -1)
+          python scripts/backup_mysql.py verify --id "$ID" --dest ci-backups
+          python scripts/backup_mysql.py restore --id "$ID" --database cortex --target-db cortex_restore_drill --container capital-cortex-mysql --dest ci-backups --strict-counts --report restore-drill.json
       - if: always()
         uses: actions/upload-artifact@v4
         with: {name: ops-reports, path: "zap-api.json\nrestore-drill.json", if-no-files-found: ignore}
       - if: failure()
-        run: docker compose -f infra/docker-compose.yml logs --no-color > compose-logs.txt
+        run: docker compose -f infra/docker-compose.yml -f infra/docker-compose.mysql.yml logs --no-color > compose-logs.txt
       - if: failure()
         uses: actions/upload-artifact@v4
         with: {name: compose-logs, path: compose-logs.txt}
@@ -160,6 +254,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && vars.TF_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: staging
+    permissions: {contents: read}  # explicit: a later top-level change must not widen the deploy job
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3

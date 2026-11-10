@@ -32,6 +32,12 @@ def load_env() -> dict[str, str]:
     return env
 
 
+def _required(env: dict[str, str], name: str) -> str:
+    if not env.get(name):
+        raise SystemExit(f"bootstrap_admin: set {name} in .env (no committed default)")
+    return env[name]
+
+
 def main() -> int:
     env = load_env()
     email, password = env.get("CORTEX_ADMIN_EMAIL", ""), env.get("CORTEX_ADMIN_PASSWORD", "")
@@ -46,7 +52,7 @@ def main() -> int:
                 "grant_type": "password",
                 "client_id": "admin-cli",
                 "username": env.get("KEYCLOAK_ADMIN", "kcadmin"),
-                "password": env.get("KEYCLOAK_ADMIN_PASSWORD", "kcadmin-dev-pw"),
+                "password": _required(env, "KEYCLOAK_ADMIN_PASSWORD"),
             },
         )
         tok.raise_for_status()

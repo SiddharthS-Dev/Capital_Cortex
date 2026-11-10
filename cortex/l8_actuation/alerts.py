@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import smtplib
+import uuid
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from functools import lru_cache
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from platform_core import secrets
 from platform_core.config import get_settings
+from platform_core.db import in_clause, insert_or_skip_duplicate, is_mysql_session
 
 log = logging.getLogger(__name__)
 KINDS = ("new_opp", "deadline", "follow_up", "runway_risk", "expiring_commitment", "custom")
@@ -34,6 +36,11 @@ CUSTOM_FIELDS = {
     "score": "o.score",
     "completeness": "o.completeness",
     "days_to_deadline": "EXTRACT(EPOCH FROM (o.deadline - now())) / 86400",
+}
+CUSTOM_FIELDS_MYSQL = {
+    "score": "o.score",
+    "completeness": "o.completeness",
+    "days_to_deadline": "TIMESTAMPDIFF(SECOND, NOW(), o.deadline) / 86400",
 }
 CUSTOM_OPS = {">=": ">=", "<=": "<=", ">": ">", "<": "<", "=": "="}
 
@@ -61,16 +68,37 @@ def validate_rule(kind: str, expr: dict[str, Any]) -> None:
 
 async def seed_default_rules(s: AsyncSession) -> int:
     n = 0
+    is_my = is_mysql_session(s)
     for r in alerts_config().get("defaults", []):
-        res = await s.execute(
-            text(
-                "INSERT INTO alert_rule (org_id, name, kind, rule_expr, severity, channels, enabled, is_default, description, created_by) "
-                "VALUES (:org, :n, :k, CAST(:e AS jsonb), :sev, :ch, true, true, :d, 'system:default') "
-                "ON CONFLICT (org_id, name) DO NOTHING"
-            ),
-            {"org": get_settings().org_id, "n": r["name"], "k": r["kind"], "e": json.dumps(r["rule_expr"]),
-             "sev": r["severity"], "ch": r["channels"], "d": r.get("description")},
-        )  # fmt: skip
+        if is_my:
+            new_id = uuid.uuid4()
+            res = await insert_or_skip_duplicate(
+                s,
+                text(
+                    "INSERT INTO alert_rule (id, org_id, name, kind, rule_expr, severity, channels, enabled, is_default, description, created_by) "
+                    "VALUES (:id, :org, :n, :k, CAST(:e AS JSON), :sev, CAST(:ch AS JSON), true, true, :d, 'system:default')"
+                ),
+                {
+                    "id": str(new_id),
+                    "org": get_settings().org_id,
+                    "n": r["name"],
+                    "k": r["kind"],
+                    "e": json.dumps(r["rule_expr"]),
+                    "sev": r["severity"],
+                    "ch": json.dumps(r["channels"]),
+                    "d": r.get("description"),
+                },
+            )
+        else:
+            res = await s.execute(
+                text(
+                    "INSERT INTO alert_rule (org_id, name, kind, rule_expr, severity, channels, enabled, is_default, description, created_by) "
+                    "VALUES (:org, :n, :k, CAST(:e AS jsonb), :sev, :ch, true, true, :d, 'system:default') "
+                    "ON CONFLICT (org_id, name) DO NOTHING"
+                ),
+                {"org": get_settings().org_id, "n": r["name"], "k": r["kind"], "e": json.dumps(r["rule_expr"]),
+                 "sev": r["severity"], "ch": r["channels"], "d": r.get("description")},
+            )  # fmt: skip
         n += getattr(res, "rowcount", 0) or 0
     return n
 
@@ -103,21 +131,41 @@ async def _new_opp(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[di
 
 async def _deadline(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     offsets = sorted(int(x) for x in e.get("offsets_days", [30, 14, 7, 2]))
+    bands = e.get("bands") or []
+    stages = e.get("stages") or []
+    params: dict[str, Any] = {
+        "org": get_settings().org_id,
+        "now": now,
+        "until": now + timedelta(days=max(offsets)),
+    }
+    if is_mysql_session(s):
+        filter_parts = []
+        if bands:
+            b_clause, b_params = in_clause("score_band", bands, prefix="band")
+            filter_parts.append(b_clause)
+            params.update(b_params)
+        if stages:
+            s_clause, s_params = in_clause("pipeline_stage", stages, prefix="stage")
+            filter_parts.append(s_clause)
+            params.update(s_params)
+        extra_filter = f"AND ({' OR '.join(filter_parts)}) " if filter_parts else ""
+        sql = (
+            "SELECT id, title, deadline, is_demo FROM opportunity WHERE org_id = :org AND status IN ('active','watchlist') "
+            f"AND deadline > :now AND deadline <= :until {extra_filter}"
+        )
+    else:
+        sql = (
+            "SELECT id, title, deadline, is_demo FROM opportunity WHERE org_id = :org AND status IN ('active','watchlist') "
+            "AND deadline > :now AND deadline <= :until AND ((cardinality(CAST(:bands AS text[])) = 0 AND "
+            "cardinality(CAST(:stages AS text[])) = 0) OR score_band = ANY(:bands) OR pipeline_stage::text = ANY(:stages))"
+        )
+        params["bands"] = bands
+        params["stages"] = stages
     rows = (
         (
             await s.execute(
-                text(
-                    "SELECT id, title, deadline, is_demo FROM opportunity WHERE org_id = :org AND status IN ('active','watchlist') "
-                    "AND deadline > :now AND deadline <= :until AND ((cardinality(CAST(:bands AS text[])) = 0 AND "
-                    "cardinality(CAST(:stages AS text[])) = 0) OR score_band = ANY(:bands) OR pipeline_stage::text = ANY(:stages))"
-                ),
-                {
-                    "org": get_settings().org_id,
-                    "now": now,
-                    "until": now + timedelta(days=max(offsets)),
-                    "bands": e.get("bands") or [],
-                    "stages": e.get("stages") or [],
-                },
+                text(sql),
+                params,
             )
         )
         .mappings()
@@ -125,7 +173,10 @@ async def _deadline(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[d
     )
     out = []
     for r in rows:
-        days = (r["deadline"] - now).total_seconds() / 86400
+        dl = r["deadline"]
+        if hasattr(dl, "tzinfo") and dl.tzinfo is None:
+            dl = dl.replace(tzinfo=UTC)
+        days = (dl - now).total_seconds() / 86400
         bucket = next(o for o in offsets if days <= o)
         crit = days <= float(e.get("critical_at_days", 7))
         out.append({
@@ -197,11 +248,13 @@ async def _runway(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[dic
 
 async def _custom(s: AsyncSession, e: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     validate_rule("custom", e)
-    expr, op = CUSTOM_FIELDS[e["field"]], CUSTOM_OPS[e["op"]]
+    mysql = is_mysql_session(s)
+    fields = CUSTOM_FIELDS_MYSQL if mysql else CUSTOM_FIELDS
+    expr, op = fields[e["field"]], CUSTOM_OPS[e["op"]]
     where = [f"{expr} {op} :v", "o.org_id = :org", "o.status = 'active'"]
     p: dict[str, Any] = {"v": float(e["value"]), "org": get_settings().org_id}
     if e.get("class"):
-        where.append("o.class::text = :cls")
+        where.append("o.class = :cls" if mysql else "o.class::text = :cls")
         p["cls"] = e["class"]
     rows = (
         (
@@ -299,31 +352,76 @@ async def evaluate(s: AsyncSession, now: datetime | None = None) -> dict[str, An
     created: list[str] = []
     for rule in rules:
         try:
-            cands = await EVALUATORS[rule["kind"]](s, dict(rule["rule_expr"] or {}), now)
+            expr = rule["rule_expr"]
+            if isinstance(expr, str):
+                expr = json.loads(expr)
+            cands = await EVALUATORS[rule["kind"]](s, dict(expr or {}), now)
         except Exception as e:  # one bad rule never stops the others
             log.warning("alert rule %s failed: %s", rule["name"], e)
             continue
         for c in cands:
             sev = c.get("severity") or rule["severity"]
             subj_type, subj_id = c["subject"]
-            aid = (
-                await s.execute(
+            src_val = json.dumps(
+                {
+                    "kind": "alert_rule",
+                    "rule_id": str(rule["id"]),
+                    "rule": rule["name"],
+                    "subject": f"{subj_type}:{subj_id}" if subj_id else subj_type,
+                    "evaluated_at": now.isoformat(),
+                }
+            )
+            if is_mysql_session(s):
+                new_id = str(uuid.uuid4())
+                res = await insert_or_skip_duplicate(
+                    s,
                     text(
-                        "INSERT INTO alert (org_id, rule_id, kind, severity, subject_type, subject_id, message, status, dedup_key, drill, "
-                        "due_at, source_ref, is_demo) VALUES (:org, :r, :k, :sev, :st, :sid, :m, 'open', :key, :drill, :due, "
-                        "CAST(:src AS jsonb), :demo) ON CONFLICT (org_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING RETURNING id"
+                        "INSERT INTO alert (id, org_id, rule_id, kind, severity, subject_type, subject_id, message, status, dedup_key, drill, "
+                        "due_at, source_ref, is_demo) VALUES (:id, :org, :r, :k, :sev, :st, :sid, :m, 'open', :key, :drill, :due, "
+                        "CAST(:src AS JSON), :demo)"
                     ),
                     {
-                        "org": org, "r": rule["id"], "k": rule["kind"], "sev": sev, "st": subj_type, "sid": subj_id, "m": c["message"],
-                        "key": c["key"], "drill": c.get("drill"), "due": c.get("due_at"), "demo": bool(c.get("demo")),
-                        "src": json.dumps({"kind": "alert_rule", "rule_id": str(rule["id"]), "rule": rule["name"],
-                                           "subject": f"{subj_type}:{subj_id}" if subj_id else subj_type, "evaluated_at": now.isoformat()}),
+                        "id": new_id,
+                        "org": org,
+                        "r": rule["id"],
+                        "k": rule["kind"],
+                        "sev": sev,
+                        "st": subj_type,
+                        "sid": subj_id,
+                        "m": c["message"],
+                        "key": c["key"],
+                        "drill": c.get("drill"),
+                        "due": c.get("due_at"),
+                        "demo": bool(c.get("demo")),
+                        "src": src_val,
                     },
                 )
-            ).scalar()  # fmt: skip
+                aid = new_id if getattr(res, "rowcount", 0) > 0 else None
+            else:
+                aid = (
+                    await s.execute(
+                        text(
+                            "INSERT INTO alert (org_id, rule_id, kind, severity, subject_type, subject_id, message, status, dedup_key, drill, "
+                            "due_at, source_ref, is_demo) VALUES (:org, :r, :k, :sev, :st, :sid, :m, 'open', :key, :drill, :due, "
+                            "CAST(:src AS jsonb), :demo) ON CONFLICT (org_id, dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING RETURNING id"
+                        ),
+                        {
+                            "org": org, "r": rule["id"], "k": rule["kind"], "sev": sev, "st": subj_type, "sid": subj_id, "m": c["message"],
+                            "key": c["key"], "drill": c.get("drill"), "due": c.get("due_at"), "demo": bool(c.get("demo")),
+                            "src": src_val,
+                        },
+                    )
+                ).scalar()  # fmt: skip
             if aid:
                 created.append(str(aid))
-                await _deliver(s, str(aid), list(rule["channels"]), c["message"], sev)
+                chans = rule["channels"]
+                if isinstance(chans, str):
+                    try:
+                        chans = json.loads(chans)
+                    except Exception:
+                        chans = []
+                await _deliver(s, str(aid), list(chans), c["message"], sev)
+
         await s.execute(
             text("UPDATE alert_rule SET last_evaluated_at = :now WHERE id = :id"), {"now": now, "id": rule["id"]}
         )

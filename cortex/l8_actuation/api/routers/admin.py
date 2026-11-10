@@ -19,7 +19,7 @@ from platform_core.auth.deps import OPA_AUTHZ_PACKAGE, authorize
 from platform_core.auth.principal import Principal
 from platform_core.bus import get_bus
 from platform_core.config import get_settings
-from platform_core.db import get_session
+from platform_core.db import get_session, is_mysql_session, order_by_nulls
 from platform_core.errors import NotFound
 from platform_core.llm.router import get_router
 from platform_core.policy.opa import get_opa
@@ -120,7 +120,12 @@ async def get_retention(
     session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     org = get_settings().org_id
-    holds = (await session.execute(text("SELECT * FROM legal_hold WHERE org_id = :org ORDER BY released_at NULLS FIRST, created_at DESC LIMIT 200"),
+    is_my = is_mysql_session(session)
+    if is_my:
+        order_hold = f"{order_by_nulls('released_at', asc=True, nulls_first=True)}, created_at DESC"
+    else:
+        order_hold = "released_at NULLS FIRST, created_at DESC"
+    holds = (await session.execute(text(f"SELECT * FROM legal_hold WHERE org_id = :org ORDER BY {order_hold} LIMIT 200"),
                                    {"org": org})).mappings().all()  # fmt: skip
     runs = (
         (

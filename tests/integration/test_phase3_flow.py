@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import re
+import secrets
 import uuid
 import zipfile
 from datetime import UTC, date, datetime, timedelta
@@ -25,11 +26,12 @@ from platform_core import objectstore
 from platform_core.auth import oidc
 from platform_core.bus import streams
 from platform_core.db import session_scope
+from platform_core.db.compat import is_mysql_session
 from platform_core.policy import opa
 from tests.integration.test_phase2_flow import _seed_high_opportunity
 
 pytestmark = pytest.mark.integration
-KEY = "integration-approval-signing-key-0123456789"
+KEY = secrets.token_urlsafe(32)  # per run: the fixture below signs with this value
 
 
 @pytest.fixture
@@ -63,26 +65,55 @@ async def env(engine, verifier, opa_url, monkeypatch):
 async def _enrich_profile_and_financials() -> None:
     src = json.dumps({"kind": "manual_entry", "entered_by": "integration"})
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
         me = (
             (await s.execute(text("SELECT id, profile FROM organization WHERE kind = 'self' AND NOT is_demo LIMIT 1")))
             .mappings()
             .one()
         )
-        prof = {**me["profile"], "team": [{"name": "Ada Orlo", "role": "CEO", "bio": "Former grid engineer"}],
+        raw_prof = me["profile"]
+        if isinstance(raw_prof, str):
+            try:
+                raw_prof = json.loads(raw_prof)
+            except Exception:
+                raw_prof = {}
+        prof = {**(raw_prof or {}), "team": [{"name": "Ada Orlo", "role": "CEO", "bio": "Former grid engineer"}],
                 "traction": ["3 utility pilots signed"], "use_of_funds": [{"item": "Pilot deployments", "share_pct": 60}],
                 "budget_lines": [{"category": "Staff", "item": "Engineers", "amount": 180000}, {"category": "Equipment", "item": "Test rig", "amount": 40000}]}  # fmt: skip
-        await s.execute(
-            text("UPDATE organization SET profile = CAST(:p AS jsonb) WHERE id = :id"),
-            {"p": json.dumps(prof), "id": me["id"]},
-        )
+        if is_my:
+            await s.execute(
+                text("UPDATE organization SET profile = CAST(:p AS json) WHERE id = :id"),
+                {"p": json.dumps(prof), "id": me["id"]},
+            )
+        else:
+            await s.execute(
+                text("UPDATE organization SET profile = CAST(:p AS jsonb) WHERE id = :id"),
+                {"p": json.dumps(prof), "id": me["id"]},
+            )
         await s.execute(text("DELETE FROM financial_snapshot WHERE NOT is_demo"))
         for m in range(6):
             period = (date.today().replace(day=1) - timedelta(days=31 * (6 - m))).replace(day=1)
-            await s.execute(
-                text("INSERT INTO financial_snapshot (period, cash, revenue, opex, net_burn, currency, source_ref) VALUES "
-                     "(:p, :c, :r, :o, :b, 'USD', CAST(:src AS jsonb)) ON CONFLICT (org_id, period) DO NOTHING"),
-                {"p": period, "c": 1_200_000 - m * 60_000, "r": 20_000 + m * 2_000, "o": 80_000, "b": 60_000 - m * 2_000, "src": src},
-            )  # fmt: skip
+            if is_my:
+                await s.execute(
+                    text(
+                        "INSERT INTO financial_snapshot (id, period, cash, revenue, opex, net_burn, currency, source_ref) VALUES "
+                        "(UUID(), :p, :c, :r, :o, :b, 'USD', CAST(:src AS json)) ON DUPLICATE KEY UPDATE cash = VALUES(cash)"
+                    ),
+                    {
+                        "p": period,
+                        "c": 1_200_000 - m * 60_000,
+                        "r": 20_000 + m * 2_000,
+                        "o": 80_000,
+                        "b": 60_000 - m * 2_000,
+                        "src": src,
+                    },
+                )
+            else:
+                await s.execute(
+                    text("INSERT INTO financial_snapshot (period, cash, revenue, opex, net_burn, currency, source_ref) VALUES "
+                         "(:p, :c, :r, :o, :b, 'USD', CAST(:src AS jsonb)) ON CONFLICT (org_id, period) DO NOTHING"),
+                    {"p": period, "c": 1_200_000 - m * 60_000, "r": 20_000 + m * 2_000, "o": 80_000, "b": 60_000 - m * 2_000, "src": src},
+                )  # fmt: skip
 
 
 async def test_phase3_definition_of_done(env, make_token):
@@ -218,8 +249,10 @@ async def test_phase3_definition_of_done(env, make_token):
         assert hashlib.sha256(zf.read(f["path"])).hexdigest() == f["sha256"], "package checksums verify"
     assert (await client.get("/v1/share/" + "x" * 43)).status_code == 404
     async with session_scope() as s:
+        is_my = is_mysql_session(s)
+        int_clause = "now() - INTERVAL 1 MINUTE" if is_my else "now() - interval '1 minute'"
         await s.execute(
-            text("UPDATE share_link SET expires_at = now() - interval '1 minute' WHERE id = :id"),
+            text(f"UPDATE share_link SET expires_at = {int_clause} WHERE id = :id"),
             {"id": share["share_link_id"]},
         )
     assert (await client.get(f"/v1/share/{link}")).status_code == 410
