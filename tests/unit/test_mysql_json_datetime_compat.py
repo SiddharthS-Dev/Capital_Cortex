@@ -1,4 +1,4 @@
-"""Regression tests for the MySQL JSON/DATETIME compatibility defects (H1–H12, CORTEX_MYSQL_BLOCKER_CLOSURE_REGISTER.md).
+"""Regression tests for the MySQL JSON/DATETIME compatibility defects (H1–H12, docs/archive/migration-history/CORTEX_MYSQL_BLOCKER_CLOSURE_REGISTER.md).
 
 Root cause: on MySQL (asyncmy) a JSON column read with text() SQL arrives as its *text*, and DATETIME arrives *naive*;
 PostgreSQL jsonb/timestamptz arrive decoded/aware. Code written for PostgreSQL then iterated characters, double-encoded

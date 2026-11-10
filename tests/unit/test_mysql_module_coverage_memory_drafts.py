@@ -1,4 +1,4 @@
-"""MySQL coverage for four modules that had no MySQL tests (docs/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §D rows
+"""MySQL coverage for four modules that had no MySQL tests (docs/archive/migration-history/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §D rows
 5, 6, 8, 18): l3_memory.consolidation_job, l3_memory.interaction_ingest, l3_memory.recall_api (+ GET /v1/recall) and
 l7_governance.drafts (+ POST/PATCH /v1/outbox, POST /v1/contacts/{id}/draft-follow-up).
 

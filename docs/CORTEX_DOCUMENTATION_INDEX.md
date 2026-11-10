@@ -17,6 +17,9 @@ carries it. A document marked historical records its date and is not updated.
 | Testing | `docs/CORTEX_MYSQL_TEST_EVIDENCE.md`, `docs/CORTEX_MYSQL_TECHNICAL_PROOF_REPORT.md` | 59 | Current |
 | Performance | `docs/CORTEX_MYSQL_PERFORMANCE_REPORT.md`, `docs/CORTEX_PERFORMANCE_AUDIT.md` | 59 | PERF-1 still open |
 | Operations | `docs/RUNBOOK.md` | 58 | Current. Section 8.0 is the MySQL backup procedure |
+| Migration history | `docs/CORTEX_MYSQL_MIGRATION_HISTORY.md`, `docs/archive/migration-history/README.md` | follow-up | Current summary; the archived reports are historical |
+| Production migration plan for DevOps | `docs/CORTEX_PRODUCTION_MIGRATION_ACTION_PLAN.md` | follow-up | Current; B1 to B3 open |
+| Test evidence index | `docs/CORTEX_MYSQL_EVIDENCE_INDEX.md` | follow-up | Index of the raw local logs, which are kept out of Git |
 | Open items and readiness | `docs/CORTEX_MYSQL_BLOCKER_REGISTER.md`, `docs/CORTEX_PRODUCTION_READINESS_CHECKLIST.md` | 60 | Current |
 
 ## Historical documents (PostgreSQL era, unchanged)
@@ -25,5 +28,6 @@ carries it. A document marked historical records its date and is not updated.
 `docs/traceability.md`, `tests/load/README.md`, `CapitalCortex_Master_Build_Prompt.md`. Mentions of PostgreSQL, Apache
 AGE or pgvector in them describe the system at that date. Decision D-100 records what replaced them.
 
-Raw test logs and dated working reports are kept out of the repository because they are superseded or contain
-machine-specific information.
+Dated working reports from the migration are kept in `docs/archive/migration-history/`, marked as historical, with
+machine-specific paths replaced. Raw test logs stay out of the repository because they contain machine-specific
+paths; `docs/CORTEX_MYSQL_EVIDENCE_INDEX.md` lists what each one recorded.

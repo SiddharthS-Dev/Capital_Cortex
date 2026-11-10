@@ -1,5 +1,5 @@
 """Regression tests for the Medium MySQL defects M1–M10 and the H10 function-level path
-(docs/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §C). MySQL unit database (MYSQL_TEST_DATABASE=cortex_unit); every
+(docs/archive/migration-history/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §C). MySQL unit database (MYSQL_TEST_DATABASE=cortex_unit); every
 test runs in a transaction that is rolled back."""
 
 from __future__ import annotations

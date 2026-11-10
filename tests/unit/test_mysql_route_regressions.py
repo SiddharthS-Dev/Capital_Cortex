@@ -1,5 +1,5 @@
 """Route/function-level regression tests for the High MySQL defects H3, H4 and H9 (COV-2 in
-docs/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md; originals in docs/CORTEX_MYSQL_BLOCKER_CLOSURE_REGISTER.md):
+docs/archive/migration-history/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md; originals in docs/archive/migration-history/CORTEX_MYSQL_BLOCKER_CLOSURE_REGISTER.md):
 
 * H3  PATCH /v1/recommendations/{id}: ``{**payload}`` on the portal-export draft's JSON column (text on MySQL) raised
       TypeError, so editing a recommendation with export drafts returned 500.

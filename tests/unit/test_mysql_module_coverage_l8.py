@@ -1,4 +1,4 @@
-"""MySQL coverage for four L8 modules that had no MySQL test (docs/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §D rows
+"""MySQL coverage for four L8 modules that had no MySQL test (docs/archive/migration-history/CORTEX_MYSQL_COMPLETE_OPEN_BLOCKER_AUDIT.md §D rows
 23, 25, 37, 38):
 
 * ``cortex/l8_actuation/alerts.py``                 rule evaluation, dedup, delivery, snooze wake-up, resolution, seeding
